@@ -1,0 +1,36 @@
+[workspace]
+resolver = "3"
+members = [
+    "crates/uia-core",
+    "crates/uia-audio",
+    "crates/uia-mcp",
+    "crates/uia-openai",
+    "crates/uia-nova",
+    "crates/uia-foundry",
+    "crates/uia-engine-contract",
+    "crates/uia-app",
+]
+# Phase 0 spikes are throwaway probes that need network and provider credentials.
+# They must never gate `cargo test --workspace` or CI's clippy run.
+exclude = ["spikes/nova-probe", "spikes/openai-probe"]
+
+[workspace.package]
+edition = "2024"
+rust-version = "1.85"
+authors = ["MycorX (Daniel, Sole Trader)"]
+# Dual source-available license, recipient's choice; the texts are in
+# LICENSE.md and LICENSES/. PolyForm Internal Use is not on the SPDX list
+# (only Noncommercial and Small Business are), hence the LicenseRef- half.
+# `license-file` is deliberately not set alongside this — cargo warns when
+# both are present.
+license = "LicenseRef-PolyForm-Internal-Use-1.0.0 OR PolyForm-Noncommercial-1.0.0"
+# Nothing here is publishable to crates.io. `publish = false` makes an
+# accidental `cargo publish` fail instead of leaking proprietary code.
+publish = false
+
+[workspace.dependencies]
+async-trait = "0.1.92"
+thiserror = "2.0.20"
+tokio = { version = "1.53.1", features = ["sync", "time", "macros", "rt"] }
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"

@@ -1,0 +1,94 @@
+name: Bug report
+description: Something in UIA behaves incorrectly
+labels: ["bug"]
+body:
+  - type: markdown
+    attributes:
+      value: |
+        Thanks for taking the time to file a bug.
+
+        **Do not paste API keys, the contents of any `*.key` file, or an
+        unredacted `uia.toml`.** If a config or log excerpt helps, redact
+        credentials first.
+
+        If this is a security vulnerability, close this form and report it
+        privately through
+        [Security Advisories](https://github.com/mycorx/user-interface-agents/security/advisories/new)
+        instead.
+
+  - type: textarea
+    id: what-happened
+    attributes:
+      label: What happened
+      description: What you expected, and what you got instead.
+    validations:
+      required: true
+
+  - type: textarea
+    id: reproduce
+    attributes:
+      label: Steps to reproduce
+      placeholder: |
+        1. Start UIA with ...
+        2. Say ...
+        3. Observe ...
+    validations:
+      required: true
+
+  - type: dropdown
+    id: area
+    attributes:
+      label: Area
+      description: Where the problem shows up.
+      options:
+        - Audio (capture, playback, device switching, echo cancellation)
+        - Realtime engine or session
+        - MCP tools
+        - Settings UI
+        - Memory or conversation history
+        - Build, install, or packaging
+        - Something else / not sure
+    validations:
+      required: true
+
+  - type: dropdown
+    id: engine
+    attributes:
+      label: Engine in use
+      options:
+        - OpenAI Realtime
+        - Amazon Bedrock (Nova Sonic 2)
+        - Azure AI Foundry
+        - Not applicable / unknown
+    validations:
+      required: true
+
+  - type: dropdown
+    id: os
+    attributes:
+      label: Operating system
+      options:
+        - Windows
+        - macOS
+        - Linux
+        - iOS
+        - Android
+    validations:
+      required: true
+
+  - type: input
+    id: version
+    attributes:
+      label: UIA version or commit
+      description: The version from the app, or the commit SHA you built from.
+    validations:
+      required: true
+
+  - type: textarea
+    id: logs
+    attributes:
+      label: Logs
+      description: Relevant log output. This is rendered as code, no backticks needed.
+      render: text
+    validations:
+      required: false

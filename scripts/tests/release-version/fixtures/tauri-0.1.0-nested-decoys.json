@@ -1,0 +1,10 @@
+{
+  "productName": "uia",
+  "version": "0.1.0",
+  "bundle": {
+    "windows": { "wix": { "version": "9.9.9" } }
+  },
+  "plugins": {
+    "updater": { "version": "8.8.8" }
+  }
+}

@@ -1,0 +1,89 @@
+{
+  "$schema": "https://docs.renovatebot.com/renovate-schema.json",
+  "extends": ["config:recommended", ":configMigration"],
+  "schedule": ["at any time"],
+  "labels": ["dependency"],
+  // images and actions pinned with digests
+  "pinDigests": true,
+  // Wait until required status checks pass before opening the PR (reduces noisy failing PRs)
+  "prCreation": "not-pending",
+  "minimumReleaseAgeBehaviour": "timestamp-optional", // transient updates do not have timestamps
+  // Catch-all: every package waits 3 days after release before Renovate proposes an update.
+  "minimumReleaseAge": "3 days",
+  "internalChecksFilter": "strict",
+  "osvVulnerabilityAlerts": true,
+  "vulnerabilityAlerts": { "enabled": true },
+  "dependencyDashboardOSVVulnerabilitySummary": "all",
+  "timezone": "Australia/Brisbane",
+  "dependencyDashboard": true,
+  "prConcurrentLimit": 5,
+
+  // Latest *stable* only — no beta, RC, alpha or preview, ever.
+  "ignoreUnstable": true,
+  "respectLatest": true,
+
+  "lockFileMaintenance": {
+    "enabled": true,
+    "schedule": ["before 8am"],
+  },
+
+  // Frontend deps live in pnpm-lock.yaml; dedupe it after every update
+  // the same way `pnpm install` would.
+  "postUpdateOptions": ["pnpmDedupe"],
+
+  "packageRules": [
+    {
+      // TypeScript 7's native/tsgo compiler drops the CJS `typescript.sys`
+      // shape svelte-check relies on, so svelte-check breaks on it as of
+      // 2026-08. Revisit once svelte-check declares stable TS7 support.
+      "description": "Block TypeScript major updates to v7 until svelte-check supports it",
+      "matchPackageNames": ["typescript"],
+      "matchUpdateTypes": ["major"],
+      "enabled": false,
+    },
+    {
+      "description": "github-actions: group minor+patch together, run weekly",
+      "matchManagers": ["github-actions"],
+      "matchUpdateTypes": ["minor", "patch"],
+      "groupName": "actions dependencies",
+      "groupSlug": "actions-dependencies",
+      "commitMessageTopic": "github-actions {{updateType}} dependencies",
+      "schedule": ["before 8am on monday"],
+    },
+    {
+      "matchManagers": ["cargo"],
+      "matchDatasources": ["crate"],
+      "groupName": "rust crates",
+      "groupSlug": "rust-crates",
+      "commitMessageTopic": "Rust crate {{depName}}",
+      "commitMessageExtra": "({{newVersion}})",
+      "matchUpdateTypes": ["minor", "patch"],
+      "schedule": ["before 8am on monday"],
+    },
+    {
+      "description": "Automerge anything that is NOT a major update",
+      "matchUpdateTypes": ["minor", "patch", "pin", "digest", "pinDigest", "lockFileMaintenance"],
+      "automerge": true,
+      "platformAutomerge": false, // false to let renovate bot merge the PR instead of the GitHub UI automerge
+      "automergeStrategy": "squash",
+    },
+    {
+      // we consider dependency minor and patch updates as app patch updates
+      "description": "Label minor and patch updates",
+      "matchUpdateTypes": ["minor", "patch"],
+      "addLabels": ["semver:patch"],
+    },
+    {
+      "description": "Label pin, digest and lock file maintenance updates",
+      "matchUpdateTypes": ["pin", "digest", "pinDigest", "lockFileMaintenance"],
+      "addLabels": ["semver:none"],
+    },
+    {
+      "description": "Label major updates",
+      "matchUpdateTypes": ["major"],
+      "addLabels": ["semver:major"],
+      "automerge": false,
+      "schedule": ["before 8am on monday"],
+    },
+  ],
+}

@@ -1,0 +1,9 @@
+{
+  "MIT": [
+    { "name": "@esbuild/linux-x64", "versions": ["0.25.0"] },
+    { "name": "vite", "versions": ["6.0.0"] }
+  ],
+  "Apache-2.0": [
+    { "name": "typescript", "versions": ["5.7.0"] }
+  ]
+}
