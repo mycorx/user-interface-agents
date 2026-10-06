@@ -1,0 +1,137 @@
+# Example configuration — copy to `uia.toml` and edit.
+# Never commit a real API key here; `*.key`, `.env`, and `.env.*` are
+# gitignored for exactly this reason.
+
+[engine]
+# Which engine an unconfigured install starts on. OpenAI Realtime is the
+# primary engine (native WebRTC, no NAT/relay in the path); Nova is the
+# manually-selectable fallback — see PLAN.md's frozen decisions for why
+# "fallback" does not mean automatic failover.
+# One of: "openai", "bedrock". Defaults to "openai".
+default = "openai"
+
+[openai]
+
+# How long one realtime session may last before the app rotates it, in
+# seconds. Default 3600. Set 0 to disable rotation.
+#
+# OpenAI closes a Realtime session at 60 minutes with `session_expired`.
+# The cap is on session age, not idle time: an active conversation hits it
+# just as surely as an abandoned one.
+# The app rotates 30 seconds early so the reconnect lands between
+# utterances rather than the provider closing the stream mid-sentence.
+# Conversation history is carried across the rotation, so it is invisible.
+#
+# Exposed because this is provider policy and can change without warning.
+# max_session_duration_secs = 3600
+# Preferred: leave this unset and export OPENAI_API_KEY instead. This key
+# is here only as a documented option, never serialised back out by the app.
+# api_key = "sk-..."
+
+# Alternative to api_key / OPENAI_API_KEY: a path to a file holding the key.
+# Its contents are read and trimmed at load time. Local dev keeps this in a
+# gitignored `gpt-api.key`.
+# key_file = "gpt-api.key"
+
+# Pin the explicit model id, never the floating "gpt-realtime" alias — an
+# alias silently changes the model under a provider A/B.
+# Defaults to the mini model: ~3.2x cheaper on audio, ~10x on text, and the
+# quality gap only matters if S14's A/B shows one.
+model = "gpt-realtime-2.1-mini"
+
+# Cached audio input is $0.40/1M against $32.00 uncached (a 98.75% discount),
+# and a multi-turn voice session resends its history every turn. Leave this
+# on unless you have a specific reason to disable it.
+enable_audio_cache = true
+
+[bedrock]
+
+# How long one realtime session may last before the app rotates it, in
+# seconds. Default 480. Set 0 to disable rotation.
+#
+# Bedrock's bidirectional stream stays open for 8 minutes -- by far the
+# tightest of the three, and the reason this is per-provider rather than
+# one shared number.
+# The app rotates 30 seconds early so the reconnect lands between
+# utterances rather than the provider closing the stream mid-sentence.
+# Conversation history is carried across the rotation, so it is invisible.
+#
+# Exposed because this is provider policy and can change without warning.
+# max_session_duration_secs = 480
+# MUST NOT be "ap-southeast-2" — Nova Sonic 2 does not exist there, and the
+# ambient AWS profile in this account resolves to that region. Config
+# validation rejects it at load time rather than letting it surface later as
+# a confusing Bedrock ValidationException. Nova Sonic 2 exists only in
+# us-east-1, us-west-2, and ap-northeast-1.
+region = "ap-northeast-1"
+
+# The Bedrock model id, same tier as [openai] model and [foundry] deployment.
+# AWS ships exactly one Nova Sonic model today, so this has one valid value
+# and the Settings UI shows a one-entry picker. It is a real config field
+# rather than a hardcoded constant so pinning a second Sonic id, when AWS
+# ships one, is an edit here instead of a code change.
+# model = "amazon.nova-2-sonic-v1:0"
+
+# IAM access keys, not a Bedrock API key / bearer token: Bedrock API keys
+# explicitly cannot authenticate InvokeModelWithBidirectionalStream, the call
+# Nova Sonic's streaming session uses. Preferred: leave these unset and export
+# AWS_ACCESS_KEY_ID / AWS_SECRET_ACCESS_KEY instead — same env var names the
+# AWS CLI/SDK already use, so an existing AWS setup is picked up for free.
+# Never committed here; see the [openai] key comment above for why.
+# access_key_id = "AKIA..."
+# secret_access_key = "..."
+
+# Alternative to the inline fields / env vars: a path to a file holding
+# `access-key: '...'` and `secret-access-key: '...'` lines (quotes optional).
+# Quick fix for local testing — slated to move to the real secret store later.
+# key_file = "aws-api.key"
+
+[foundry]
+# Azure's GPT Realtime caps a session at 30 minutes — half OpenAI's own, and
+# like the others on session age rather than idle time. Set 0 to disable
+# rotation.
+# max_session_duration_secs = 1800
+
+[memory]
+# "local" (default) keeps transcripts in uia-conversation.json beside this
+# file and replays them into each new connection. Local only: a plain file,
+# no service, nothing sent anywhere. Delete the uia-client folder to clear it.
+#
+# "none" keeps nothing. Note what that now costs: the app disconnects
+# deliberately — on an idle timeout, when Settings opens, and when rotating
+# before a provider's session ceiling — and with no memory each of those
+# resumes with the assistant having forgotten the conversation.
+backend = "local"
+
+[audio]
+# On Windows, capture and render open under WASAPI's Communications category
+# by default, which gets the OS's own AEC/AGC/NS for free (no C++ toolchain
+# needed). Set false to open plain devices instead, with no echo cancellation
+# at all — useful for A/B-testing whether it's doing anything, or if it's
+# misbehaving with a particular audio device. Has no effect on Linux/macOS,
+# where echo cancellation is instead the `aec` Cargo feature (off by default).
+aec_enabled = true
+
+# RMS level (0.0-1.0) above which your voice counts as speaking over the
+# assistant and cuts its audio off mid-sentence. Defaults to 0.03, tuned on
+# real hardware: too high and your first syllables don't register, so the
+# assistant keeps talking until you get louder and barge-in feels sluggish;
+# too low and residual echo trips it, so the assistant interrupts itself.
+# This depends on your mic's gain, so adjust it if barge-in fires while you
+# are silent (raise it) or needs a raised voice (lower it).
+# barge_in_threshold = 0.03
+
+# MCP servers are no longer configured here. Add them in the app's
+# Settings -> MCP tab: install a local server from a `.mcpb` bundle, or add a
+# remote HTTP server (which must answer the MCP handshake and declare its
+# tools before it can be saved). What you add is recorded in
+# `uia-mcp.json` next to this file. Everything you add starts disabled
+# until you enable it.
+
+# The assistant's identity is not configured here either. Up to six personas
+# are edited in Settings -> General -> Personas..., and recorded in
+# `uia-personas.json` next to this file, one of them marked active. Each is a
+# small set of structured fields -- archetype, how it speaks, when to use it --
+# composed into the system prompt in a fixed order; there is deliberately no
+# raw prompt override, because composition is what guarantees the brevity and
+# no-self-introduction rules survive every persona.

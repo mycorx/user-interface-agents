@@ -1,0 +1,12 @@
+{
+  "MIT": [
+    { "name": "@esbuild/linux-x64", "versions": ["0.25.0"] },
+    { "name": "@esbuild/win32-x64", "versions": ["0.25.0"] }
+  ],
+  "Apache-2.0": [
+    { "name": "typescript", "versions": ["5.6.0"] }
+  ],
+  "MPL-2.0": [
+    { "name": "lightningcss-win32-x64-msvc", "versions": ["1.30.0"] }
+  ]
+}

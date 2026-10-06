@@ -1,0 +1,107 @@
+# Its own workflow rather than a job in ci.yaml, because the triggers differ:
+# the ledger half has to run on `closed`, and adding `closed` to ci.yaml's
+# trigger list would fire the Rust build, the desktop build and the AEC build
+# every time a pull request is closed without merging.
+name: cla
+
+on:
+  pull_request:
+    # `edited` matters: without it, a contributor who force-pushes the trailer
+    # after opening gets a re-run (synchronize), but one who only edits the
+    # pull request does not. `closed` drives the ledger job below.
+    types: [opened, synchronize, reopened, edited, closed]
+
+# Declaring this block narrows the token to exactly what is listed, so
+# `pull-requests: read` is required even though the repository's default
+# workflow permission is read -- without it, reading a pull request's commit
+# list comes back 403 "Resource not accessible by integration".
+permissions:
+  contents: read
+  pull-requests: read
+
+jobs:
+  # Gate: has the author of this pull request accepted the CLA?
+  check:
+    if: github.event.action != 'closed'
+    runs-on: mycorx-ubuntu #ubuntu-latest
+    steps:
+      # Checks out the BASE branch, not the pull request head. A fork otherwise
+      # supplies the very script that judges it, and could edit the check to
+      # pass unconditionally. The ledger is read from the base for the same
+      # reason.
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          ref: ${{ github.base_ref }}
+      # The commit list comes from the API rather than from the checkout: the
+      # base branch does not contain the pull request's commits, and this is
+      # the same list the ledger job reads after the merge.
+      - name: Fetch the pull request's commits
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          REPO: ${{ github.repository }}
+          PR_NUMBER: ${{ github.event.pull_request.number }}
+        run: gh api --paginate "repos/$REPO/pulls/$PR_NUMBER/commits" > /tmp/pr-commits.json
+      # The guard covers exactly one case: the pull request that introduces
+      # this workflow, whose base branch does not have the script yet. It is
+      # not a bypass -- the base branch is the trusted side, so a fork cannot
+      # reach this by deleting anything.
+      - name: Check CLA acceptance
+        env:
+          BASE_REF: ${{ github.base_ref }}
+        run: |
+          if [ ! -x ./scripts/check_cla_acceptance.py ]; then
+            echo "notice: $BASE_REF has no CLA check yet; nothing to enforce until this merges"
+            exit 0
+          fi
+          ./scripts/check_cla_acceptance.py "$GITHUB_EVENT_PATH" /tmp/pr-commits.json CONTRIBUTOR_LEDGER.md
+
+  # Record: a merged author never has to accept again.
+  ledger:
+    if: github.event.action == 'closed' && github.event.pull_request.merged == true
+    runs-on: mycorx-ubuntu #ubuntu-latest
+    # A job-level block replaces the workflow-level one rather than adding to
+    # it, so `pull-requests: read` has to be restated here to fetch the commit
+    # list.
+    permissions:
+      contents: write
+      pull-requests: read
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          ref: ${{ github.event.pull_request.base.ref }}
+      - name: Fetch the pull request's commits
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          REPO: ${{ github.repository }}
+          PR_NUMBER: ${{ github.event.pull_request.number }}
+        # Read from the pull request, not from the merged history: a squash
+        # merge composes a new message that the merger can edit, so the trailer
+        # may not exist on the base branch at all.
+        run: gh api --paginate "repos/$REPO/pulls/$PR_NUMBER/commits" > /tmp/pr-commits.json
+      - run: ./scripts/update_contributor_ledger.py "$GITHUB_EVENT_PATH" /tmp/pr-commits.json CONTRIBUTOR_LEDGER.md
+      # Pushes made with GITHUB_TOKEN do not trigger further workflow runs, so
+      # this cannot loop back into itself.
+      #
+      # When `main` becomes a protected branch (only possible once the
+      # repository is public), this push starts failing unless GitHub Actions
+      # is added to the bypass list. The alternative at that point is to have
+      # this step open a pull request instead of pushing.
+      #
+      # The login and number go through the environment rather than being
+      # interpolated into the script: `${{ }}` is substituted before bash sees
+      # the line, so a value containing shell syntax would execute.
+      - name: Commit the ledger if it changed
+        env:
+          PR_AUTHOR: ${{ github.event.pull_request.user.login }}
+          PR_NUMBER: ${{ github.event.pull_request.number }}
+        run: |
+          if git diff --quiet -- CONTRIBUTOR_LEDGER.md; then
+            echo "ledger unchanged"
+            exit 0
+          fi
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git add CONTRIBUTOR_LEDGER.md
+          git commit -m "chore(cla): record @${PR_AUTHOR} in the contributor ledger" \
+                     -m "Accepted in #${PR_NUMBER}."
+          git push

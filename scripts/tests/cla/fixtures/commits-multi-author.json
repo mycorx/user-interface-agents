@@ -1,0 +1,2 @@
+[{"sha":"ccc1","commit":{"message":"feat: part one\n\nMycorX-CLA-Accepted: v1.0","author":{"name":"The Octocat","email":"octocat@example.com"}},"author":{"login":"octocat"}},
+ {"sha":"ccc2","commit":{"message":"feat: part two","author":{"name":"Hubot","email":"hubot@example.com"}},"author":{"login":"hubot"}}]

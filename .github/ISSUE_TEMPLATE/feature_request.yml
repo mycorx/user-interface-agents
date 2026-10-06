@@ -1,0 +1,57 @@
+name: Feature request or idea
+description: Suggest an enhancement or an architectural improvement
+labels: ["enhancement"]
+body:
+  - type: markdown
+    attributes:
+      value: |
+        Ideas are welcome, including architectural ones. Note that UIA is a
+        small project with a narrow scope — a suggestion may be declined
+        simply because it widens that scope.
+
+  - type: textarea
+    id: problem
+    attributes:
+      label: The problem
+      description: What are you trying to do that UIA makes hard or impossible today?
+    validations:
+      required: true
+
+  - type: textarea
+    id: proposal
+    attributes:
+      label: What you have in mind
+      description: A sketch is fine. If you have considered alternatives, say what and why you set them aside.
+    validations:
+      required: true
+
+  - type: dropdown
+    id: area
+    attributes:
+      label: Area
+      options:
+        - Audio
+        - Realtime engine or session
+        - MCP tools
+        - Settings UI
+        - Memory or conversation history
+        - Build, install, or packaging
+        - Something else
+    validations:
+      required: true
+
+  - type: checkboxes
+    id: offer
+    attributes:
+      label: Would you like to implement this?
+      options:
+        - label: I would be willing to open a pull request for this
+          required: false
+  - type: markdown
+    attributes:
+      value: |
+        If you do intend to send a pull request, read
+        [CONTRIBUTING.md](https://github.com/mycorx/user-interface-agents/blob/main/CONTRIBUTING.md)
+        first — contributions require accepting the
+        [CLA](https://github.com/mycorx/user-interface-agents/blob/main/CLA.md),
+        and forks are permitted only as a route back here.

@@ -1,0 +1,28 @@
+[package]
+name = "uia-nova"
+version = "0.1.0"
+edition.workspace = true
+rust-version.workspace = true
+authors.workspace = true
+license.workspace = true
+publish.workspace = true
+
+[dependencies]
+uia-core = { path = "../uia-core" }
+uia-mcp = { path = "../uia-mcp" }
+async-trait.workspace = true
+serde_json.workspace = true
+tokio.workspace = true
+base64 = "0.22"
+aws-config = "1.10.1"
+aws-sdk-bedrockruntime = "1.139.0"
+tokio-stream = "0.1"
+
+[dev-dependencies]
+tokio = { version = "1.53.1", features = ["full", "test-util"] }
+uia-engine-contract = { path = "../uia-engine-contract" }
+# The live contract test synthesises real speech via OpenAI TTS (same
+# technique as uia-openai's live tests and provider_ab.rs) to drive a real
+# tool call — Nova's server VAD will not treat a synthetic tone as speech.
+reqwest = { version = "0.12", default-features = false, features = ["json", "rustls-tls"] }
+serde_json = "1"

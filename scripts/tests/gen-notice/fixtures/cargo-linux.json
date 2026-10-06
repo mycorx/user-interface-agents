@@ -1,0 +1,8 @@
+{
+  "workspace_members": ["path+file:///repo/uia-app#uia-app@0.1.0"],
+  "packages": [
+    { "id": "path+file:///repo/uia-app#uia-app@0.1.0", "name": "uia-app", "version": "0.1.0", "license": "PolyForm-Noncommercial-1.0.0" },
+    { "id": "registry+https://github.com/rust-lang/crates.io-index#serde@1.0.200", "name": "serde", "version": "1.0.200", "license": "MIT OR Apache-2.0" },
+    { "id": "registry+https://github.com/rust-lang/crates.io-index#chrono-tz@0.12.1", "name": "chrono-tz", "version": "0.12.1", "license": "MIT OR Apache-2.0" }
+  ]
+}

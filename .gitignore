@@ -1,0 +1,74 @@
+/target/
+
+# Provider credentials — never commit. Keys are read from disk at runtime or
+# exported into the environment; nothing under here belongs in git history.
+*.key
+.env
+.env.*
+
+# Phase 0 spike crates: throwaway provider probes kept locally, not published.
+# (Cargo.toml still lists them under `exclude`, which is harmless without them.)
+spikes/
+
+# Svelte/Vite frontend (crates/uia-app's WebView).
+node_modules/
+dist/
+pnpm-debug.log*
+
+# Local configuration. `uia.example.toml` is the tracked template; `uia.toml`
+# is the per-machine copy you make from it (see the README), and it holds
+# whichever audio devices, regions, and key_file paths belong to this machine.
+uia.toml
+
+# Runtime sidecar files the Settings UI writes next to uia.toml — local,
+# per-machine state, same as uia-engine.json.
+uia-engine.json
+uia-foundry.json
+uia-audio.json
+uia-agent.json
+uia-agent.md
+uia-agent-avatar.*
+uia-agent-avatar-*
+uia-model.json
+uia-voice.json
+uia-ui.json
+uia-personas.json
+uia-mcp.json
+# Installed MCP server bundles: downloaded per machine, never authored here.
+mcp-local-servers/
+uia-conversation.jsonl
+uia-conversation.jsonl.tmp
+
+# Isolated worktrees for staged implementation work (superpowers SDD).
+.worktrees/
+
+# Developing tools' local resources. docs/superpowers/ holds the specs, plans
+# and findings behind the design decisions. They are kept locally but are not
+# published with the repository.
+.remember/
+.superpowers/
+docs/superpowers/plans/
+# Kept for reference but not publishable (names a private server and its infra).
+docs/superpowers/private/
+
+# Hermetic build toolchain (scripts/build-macos-package.sh): Node, Rust, Python.
+.toolchain/
+
+# macOS Finder/system files, never part of the project.
+.DS_Store
+._*
+.AppleDouble
+.LSOverride
+.Spotlight-V100
+.Trashes
+.fseventsd
+
+# Written by `tauri build` on a macOS host as `<os>-schema.json`. It is a
+# byte-identical copy of the tracked windows-schema.json and desktop-schema.json
+# (checked), so it only adds noise; the other generated files in this folder
+# stay tracked, as they were before. The bundles themselves (.app, .dmg) are
+# under /target/, and the toolchain scripts/build-macos-package.sh provisions
+# is under .toolchain/ (both already ignored above).
+crates/uia-app/gen/schemas/macOS-schema.json
+# Same file, written by a Linux build.
+crates/uia-app/gen/schemas/linux-schema.json
