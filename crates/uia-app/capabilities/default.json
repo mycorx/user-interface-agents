@@ -1,0 +1,20 @@
+{
+  "$schema": "../gen/schemas/desktop-schema.json",
+  "identifier": "default",
+  "description": "Lets the HUD webview receive the uia://state, uia://level, and uia://error events Rust emits over IPC. Tauri v2 denies every permission-gated command by default, and with no capabilities directory present this project's App.svelte listen() calls were silently rejected as event.listen not allowed. `process:allow-restart` (S21) lets the HUD's Restart Now button relaunch the app after an engine switch, instead of leaving that to the user to do by hand. Settings is now an in-window card rendered inside `hud` (PLAN.md Stage 7), not a second window, so there is only one window label to scope this to. `core:window:allow-set-size` and `core:window:allow-center` (S1) are what let CardDeck.svelte resize the fixed-footprint overlay on every visible-state change per PLAN.md FD1 — `core:window:default` grants only the read-only getters, so without these two the setSize/center calls are rejected at runtime. `dialog:default` (S5) is what lets the General tab's avatar picker call `@tauri-apps/plugin-dialog`'s `open()` directly from the frontend — the backend's own `set_agent_avatar` command needs no ACL entry since app-defined commands aren't permission-gated, only the plugin's own `open` command is. `core:window:allow-set-always-on-top` (S10) is what lets the General tab's Always-on-top toggle call `getCurrentWindow().setAlwaysOnTop()` directly for an immediate, no-restart effect (FD9's app-lifecycle half), the same live window API `main()` already calls once at startup with the sidecar's resolved value. `core:window:allow-minimize` and `core:window:allow-close` (S7) back the HUD card's own minimize and ✕ buttons: `decorations: false` removed the native titlebar controls, so the card draws its own, and per FD10 ✕ calls `window.close()` and nothing else — hide-vs-quit stays in the Rust CloseRequested handler. `opener:allow-open-url` (Task 8, OAuth phase) is what lets the MCP Settings tab call `@tauri-apps/plugin-opener`'s `openUrl()` on a `NeedsAuthorization` response's `authorize_url`, handing the Cognito hosted UI to the user's actual default browser instead of an in-app webview. `opener:allow-default-urls` has to come with it: `allow-open-url` only grants the command, and ships with an empty URL scope of its own — without `allow-default-urls`'s `http(s)://*` scope entries, every `openUrl()` call is rejected as \"Not allowed to open url\", Cognito's `https://` authorize URL included.",
+  "windows": ["hud"],
+  "permissions": [
+    "core:event:default",
+    "core:window:default",
+    "core:window:allow-start-dragging",
+    "core:window:allow-set-size",
+    "core:window:allow-center",
+    "core:window:allow-set-always-on-top",
+    "core:window:allow-minimize",
+    "core:window:allow-close",
+    "process:allow-restart",
+    "dialog:default",
+    "opener:allow-open-url",
+    "opener:allow-default-urls"
+  ]
+}

@@ -1,0 +1,8 @@
+blank_issues_enabled: false
+contact_links:
+  - name: Report a security vulnerability
+    url: https://github.com/mycorx/user-interface-agents/security/advisories/new
+    about: Report privately through GitHub Security Advisories. Never open a public issue for a vulnerability — see SECURITY.md.
+  - name: Read the license first
+    url: https://github.com/mycorx/user-interface-agents/blob/main/LICENSE.md
+    about: UIA is source-available, not open source. LICENSE.md explains what the PolyForm licenses do and do not permit.

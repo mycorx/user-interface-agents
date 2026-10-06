@@ -1,0 +1,58 @@
+name: Licensing, commercial use, or branding request
+description: Ask about a use the PolyForm licenses do not permit, or about using MycorX branding
+labels: ["licensing"]
+body:
+  - type: markdown
+    attributes:
+      value: |
+        UIA is **source-available, not open source**. Running and modifying it
+        for yourself is permitted; putting it into a product or service you
+        provide to someone else is not, and the names and logos are not covered
+        by the code license at all. See
+        [LICENSE.md](https://github.com/mycorx/user-interface-agents/blob/main/LICENSE.md)
+        and
+        [TRADEMARKS.md](https://github.com/mycorx/user-interface-agents/blob/main/TRADEMARKS.md).
+
+        Anything those documents do not permit needs a separate written
+        agreement. This form starts that conversation.
+
+        **Prefer to keep it private?** Email info@mycorx.com.au instead —
+        no need to negotiate in a public tracker.
+
+  - type: dropdown
+    id: kind
+    attributes:
+      label: What are you asking about?
+      options:
+        - A commercial license (selling, hosting, embedding, or shipping to customers)
+        - Permission to use MycorX or U.I.A. names, logos, or icons
+        - Whether a specific use is already permitted
+        - Something else
+    validations:
+      required: true
+
+  - type: input
+    id: who
+    attributes:
+      label: Who is asking
+      description: You or your organization, and your role.
+    validations:
+      required: true
+
+  - type: textarea
+    id: use
+    attributes:
+      label: What you want to do
+      description: Describe the intended use concretely — what gets built, who receives it, and whether money changes hands.
+    validations:
+      required: true
+
+  - type: checkboxes
+    id: read
+    attributes:
+      label: Before you submit
+      options:
+        - label: I have read LICENSE.md and TRADEMARKS.md
+          required: true
+        - label: I understand this is a request, not a grant, and that nothing is permitted until MycorX agrees in writing
+          required: true

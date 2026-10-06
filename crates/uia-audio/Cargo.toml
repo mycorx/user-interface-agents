@@ -1,0 +1,69 @@
+[package]
+name = "uia-audio"
+version = "0.1.0"
+edition.workspace = true
+rust-version.workspace = true
+authors.workspace = true
+license.workspace = true
+publish.workspace = true
+
+[features]
+# On by default: live microphone/speaker I/O via cpal. Off for crates that
+# only need the Opus codec - `uia-openai` imports nothing but
+# `codec::OpusCodec`, and without this gate it dragged the whole cpal device
+# stack (and its ALSA/CoreAudio system deps) into every build of that crate.
+# `uia-app` is the only consumer that actually opens devices, and it takes
+# uia-audio with default features on.
+default = ["cpal-io"]
+cpal-io = ["dep:cpal"]
+# Off by default: webrtc-audio-processing links a bundled C++ library that
+# needs meson + ninja + a C++ compiler + libclang (for bindgen) on PATH, none
+# of which this WSL2 sandbox carries out of the box. `cargo test`/`cargo build
+# --workspace` (no flags) must never touch it - same reasoning as uia-app's
+# `desktop` feature gate for tauri. See LEDGER.md's S15 notes for exactly what
+# was needed to build it here without root.
+aec = ["webrtc-audio-processing"]
+# Proof-of-concept for OS-level echo cancellation via WASAPI's Communications
+# stream category (see LEDGER.md's S15 update, 2026-08-20): `aec` above needs
+# a C++ toolchain this Windows machine's MSVC can't actually build
+# (`webrtc-audio-processing-sys` 2.1.0 requires C++20 designated initializers
+# MSVC rejects). Windows already ships its own AEC/AGC/NS for any stream
+# opened with `AudioCategory_Communications` - no bundled C++ library needed.
+# Windows-only: `windows` below is gated to `cfg(windows)`, so this feature is
+# a no-op (undefined symbols) anywhere else.
+wasapi-aec = ["dep:windows"]
+
+[dependencies]
+uia-core = { path = "../uia-core" }
+async-trait.workspace = true
+thiserror.workspace = true
+tokio.workspace = true
+cpal = { version = "0.18.2", optional = true }
+opus-rs = "0.1.29"
+webrtc-audio-processing = { version = "2.1.0", optional = true, features = ["bundled"] }
+
+[target.'cfg(windows)'.dependencies]
+windows = { version = "0.62", optional = true, features = [
+  "Win32_Media_Audio",
+  "Win32_Media_KernelStreaming",
+  # KSDATAFORMAT_SUBTYPE_IEEE_FLOAT, for validating the negotiated mix format
+  # at open time rather than misreading buffers later.
+  "Win32_Media_Multimedia",
+  "Win32_Foundation",
+  "Win32_System_Com",
+  "Win32_System_Com_StructuredStorage",
+  "Win32_System_Variant",
+  # Also carries the MMCSS calls (AvSetMmThreadCharacteristicsW) the audio
+  # worker threads use to avoid being starved into an underrun.
+  "Win32_System_Threading",
+  "Win32_Security",
+  # IMMDevice::OpenPropertyStore + PKEY_Device_FriendlyName, so the
+  # opened-device log line names the actual endpoint rather than just its
+  # sample rate - the only way to tell a user whether `eCommunications`
+  # resolved to the device they expected.
+  "Win32_UI_Shell_PropertiesSystem",
+  "Win32_Devices_FunctionDiscovery",
+] }
+
+[dev-dependencies]
+tokio = { version = "1.53.1", features = ["full", "test-util"] }

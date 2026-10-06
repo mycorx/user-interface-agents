@@ -1,0 +1,195 @@
+[package]
+name = "uia-app"
+version = "0.1.0"
+edition.workspace = true
+rust-version.workspace = true
+authors.workspace = true
+license.workspace = true
+publish.workspace = true
+
+# The `desktop` feature gates every `tauri`/`tauri-plugin-global-shortcut`
+# dependency and is OFF by default. Building it needs GTK3 + WebKit2GTK-4.1
+# system dev headers (Linux) that are not present in this WSL2 sandbox and
+# cannot be installed without root (confirmed: `sudo -n` requires a password,
+# and the apt dependency closure for `libwebkit2gtk-4.1-dev` alone is ~190
+# packages). Off by default keeps `cargo build/test/clippy --workspace`
+# genuinely green in this sandbox and in any GTK-less CI runner, matching
+# PLAN.md's WSL2 test-gate rule; `tauri.conf.json`'s `build.features` passes
+# `desktop` for real dev/build (`pnpm run tauri dev` / `tauri build`), so nothing
+# extra is needed on Windows/macOS. See LEDGER.md's S13 notes for the full
+# finding and the `--features desktop` compile error this environment
+# produces (real `pkg-config` failure on `dbus-1`, captured for the record).
+[features]
+default = []
+desktop = [
+    "dep:tauri",
+    "dep:tauri-plugin-global-shortcut",
+    "dep:tauri-plugin-process",
+    "dep:tauri-plugin-dialog",
+    "dep:tauri-plugin-autostart",
+    "dep:tauri-plugin-deep-link",
+    "dep:tauri-plugin-single-instance",
+    "dep:tauri-plugin-opener",
+    "dep:tauri-build",
+    "keyring/sync-secret-service",
+    "keyring/crypto-rust",
+]
+# Capture-side echo cancellation (S15's `uia-audio::aec`), off by default
+# for the same reason it is off in `uia-audio`: it links a bundled C++
+# library needing meson + ninja + a C++ compiler + libclang on PATH.
+aec = ["uia-audio/aec"]
+
+[[bin]]
+name = "uia"
+path = "src/main.rs"
+required-features = ["desktop"]
+
+[dependencies]
+async-trait.workspace = true
+# Platform-native per-user config directory. Not `dirs`: `directories` is the
+# maintained successor and gives the XDG/Known Folder/Apple conventions in one
+# call. Deliberately not Tauri's `app.path()` -- `config`, `settings` and
+# `paths` are compiled and tested without the `desktop` feature, so they cannot
+# reach for a `tauri::AppHandle`.
+directories = "6"
+# Avatar downscaling only. `default-features = false` with just these two
+# codecs on purpose: the fuller feature set pulls C libraries (AVIF decoding
+# wants dav1d), and the frozen test gate says the workspace builds on a host
+# with no toolchain beyond Rust. JPEG and PNG are also where oversized avatars
+# actually come from -- phone photos and screenshots -- while GIF, WebP and
+# AVIF are either animated or already compact, and are passed through under a
+# size cap rather than re-encoded.
+image = { version = "0.25.10", default-features = false, features = ["jpeg", "png"] }
+# The clock the `get_current_time` tool reads. Default features on purpose:
+# the `clock` feature is what provides `Utc::now()`.
+chrono = "0.4.45"
+# Bundles the IANA timezone database into the binary at compile time. That is
+# the point rather than a side effect: no network call, so the tool answers
+# offline and on mobile, and there is no failure mode for a user to debug.
+chrono-tz = "0.10.4"
+# Reads the device's own timezone. Already in Cargo.lock transitively via
+# chrono; named here because this crate depends on it directly.
+iana-time-zone = "0.1.65"
+uia-audio = { path = "../uia-audio" }
+uia-core = { path = "../uia-core" }
+uia-mcp = { path = "../uia-mcp" }
+uia-nova = { path = "../uia-nova" }
+uia-openai = { path = "../uia-openai" }
+uia-foundry = { path = "../uia-foundry" }
+serde.workspace = true
+serde_json.workspace = true
+thiserror.workspace = true
+tokio.workspace = true
+toml = "1.1.4"
+# `oauth_flow::DeepLinkListener::deliver` routes each incoming callback
+# through `uia_mcp::callback::PendingAuthorizations::route` first (rmcp's own
+# parser and validation, exposed as a plain `rmcp`-free `Routed` struct --
+# calling it needs no `rmcp` dependency here, only a normal `uia_mcp` call).
+# This `url` dependency is what backs its FALLBACK path: `route` requires
+# `code` to be present to parse at all, so a bare denial redirect (no
+# `code`, e.g. `?error=access_denied&state=X`) fails it, and `deliver` falls
+# back to pulling `state` straight out of the raw URL's query string so that
+# denial still reaches its waiter instead of silently hanging until
+# `OAUTH_BROWSER_TIMEOUT`. `uia-app` still has no *direct* `rmcp` dependency
+# -- the plan's global constraint holds -- everything `rmcp`-shaped stays
+# behind the `uia-mcp` boundary; this comment used to (incorrectly) claim
+# the `route`-based integration itself would need one, which is what left it
+# unwired for as long as it was. `url` is already pulled in transitively
+# (e.g. via `tauri-plugin-deep-link`), so this adds no new dependency to the
+# build graph, just a direct edge to one already present. Left ungated (not
+# `desktop`-only): cheap enough to leave available workspace-wide, even
+# though `deliver` (its only user) stays `#[cfg(feature = "desktop")]`.
+url = "2.5.8"
+tauri = { version = "2.11.5", optional = true, features = ["tray-icon", "protocol-asset", "macos-private-api"] }
+tauri-plugin-global-shortcut = { version = "2.3.2", optional = true }
+tauri-plugin-process = { version = "2.3.1", optional = true }
+tauri-plugin-dialog = { version = "2.7.2", optional = true }
+tauri-plugin-autostart = { version = "2.5.1", optional = true }
+# `deep-link` needs `single-instance`'s `deep-link` feature and vice versa
+# only in spirit -- see `oauth_flow.rs`'s header comment for why both are
+# needed together: on Linux/Windows a deep link starts a NEW process with
+# the URL in argv, and `single-instance` is what forwards that argv into the
+# already-running one where the PKCE verifier actually lives.
+tauri-plugin-deep-link = { version = "2.4.9", optional = true }
+tauri-plugin-single-instance = { version = "2.4.3", optional = true, features = [
+    "deep-link",
+] }
+# Opens `authorize_url` (the identity provider's hosted login page) in the user's actual default
+# browser rather than an in-app webview. Not cosmetic: a real browser can
+# reuse the user's existing sign-in session cookies (skip-the-login-prompt),
+# and keeping the credential entry surface out of any webview this app
+# controls is the whole point of the redirect-based OAuth flow the plan
+# picked over an embedded login form.
+tauri-plugin-opener = { version = "2.5.4", optional = true }
+
+# Makes Windows-native echo cancellation the default on Windows, with no
+# `--features` flag for anyone to remember — including `pnpm run tauri dev` and
+# `tauri build`, which compile with whatever `tauri.conf.json`'s
+# `build.features` says (`["desktop"]`) and cannot vary it per platform.
+#
+# Cargo unions the features requested across every declaration of the same
+# dependency, and skips a `[target.'cfg(...)']` table wholesale when the
+# predicate does not match. So on Linux/WSL2 this stanza does not exist:
+# `uia-audio` gets no extra features, `windows` is never built, and the
+# no-toolchain `cargo build --workspace` gate is untouched. A bare
+# `default = ["..."]` could not do this — Cargo's default feature list is not
+# platform-conditional, which is why the dependency table is the lever.
+#
+# `scripts/check-windows-wasapi-default.sh` asserts both halves of that from
+# any host, so this stays honest without a Windows machine to check it on.
+[target.'cfg(windows)'.dependencies]
+uia-audio = { path = "../uia-audio", features = ["wasapi-aec"] }
+
+# `keyring` v3.x ships with NO default features - with none enabled it
+# silently falls back to an in-memory "mock" store that never persists
+# anything, so the per-target platform backend below must be enabled
+# explicitly or the entire OS-keystore tier is a silent no-op on every
+# platform. `sync-secret-service` (not the async variant) is required on
+# Linux: `OsKeyring` is called from inside `tauri::async_runtime::spawn`
+# (an already-running tokio worker thread) in both `build_session` and
+# `migrate_plaintext_credentials_into_keystore`, and keyring's async
+# secret-service backend blocks on its own runtime internally, which is a
+# panic risk from inside a runtime that is already running. `crypto-rust`
+# is `sync-secret-service`'s required companion feature (pure-Rust crypto
+# for the D-Bus Secret Service session, avoiding an OpenSSL dependency).
+[target.'cfg(target_os = "windows")'.dependencies]
+keyring = { version = "3.6", features = ["windows-native"] }
+
+[target.'cfg(target_os = "macos")'.dependencies]
+keyring = { version = "3.6", features = ["apple-native"] }
+
+# On Linux, `sync-secret-service` (see the note above) pulls in the
+# `dbus-secret-service` crate, whose `libdbus-sys` dependency links the
+# SYSTEM `libdbus-1` library via a pkg-config build script. `libdbus-1-dev`
+# is not installed in this WSL2 sandbox and cannot be installed without root
+# (confirmed: bare `cargo build -p uia-app` fails with "The system
+# library `dbus-1` ... was not found"). So the real D-Bus backend is folded
+# into the `desktop` feature above -- already off by default for the exact
+# same class of reason (a real desktop dependency needing a system toolchain
+# this sandbox lacks) -- rather than being a new always-on Linux dependency.
+# `keyring` itself stays a mandatory (non-optional) dependency here so
+# `OsKeyring` always compiles on Linux; with `desktop` off it simply builds
+# with no backend features enabled, which is keyring v3's own harmless
+# in-memory mock (see the note above) -- fine for a non-desktop build target,
+# since the real desktop Linux build (built elsewhere with GTK/WebKit +
+# libdbus-1-dev present) is what actually needs the real backend.
+[target.'cfg(target_os = "linux")'.dependencies]
+keyring = { version = "3.6" }
+
+[dev-dependencies]
+# The A/B harness synthesises real speech with OpenAI TTS: `server_vad`
+# classifies speech, and a synthetic tone is never classified as any (S16).
+reqwest = { version = "0.12", default-features = false, features = ["json", "rustls-tls", "multipart"] }
+tokio = { version = "1.53.1", features = ["full", "test-util"] }
+# A local axum server standing in for the MCP endpoint under test, same
+# pattern as `uia-mcp/src/client.rs`'s redirect test - answers a 401 with a
+# `WWW-Authenticate` challenge so `preview_remote`'s OAuth branch has
+# something real to catch.
+axum = "0.8.9"
+# Only to build a realistic `OAuthTokenResponse` fixture in oauth_store.rs's
+# tests; already pinned to this exact version transitively via rmcp's own
+# dependency on it (same pattern as uia-mcp's oauth.rs test fixtures).
+oauth2 = "5.0.0"
+
+[build-dependencies]
+tauri-build = { version = "2", optional = true , features = [] }

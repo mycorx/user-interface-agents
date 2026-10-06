@@ -1,0 +1,10 @@
+The image files in this directory, and the application icons in ../icons/,
+are MycorX brand assets: copyright (c) 2026 MycorX (Daniel, Sole Trader).
+All rights reserved.
+
+They are NOT covered by the PolyForm licenses in the repository root
+LICENSE.md, which license source code only. You may not use, modify,
+redistribute, or create derivative works from these files without prior
+written permission from MycorX.
+
+See TRADEMARKS.md in the repository root for the full policy.

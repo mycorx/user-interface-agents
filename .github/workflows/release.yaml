@@ -1,0 +1,238 @@
+name: release
+
+# Two ways in, deliberately different:
+#
+#   * pushing a semver tag creates a DRAFT GitHub Release, builds the installers
+#     for both platforms in parallel, and attaches them to it. A human then
+#     publishes it. Draft rather than published because a tag is cheap to push
+#     by accident and a published release is not cheap to retract.
+#   * `workflow_dispatch` is a dry run: the same builds, uploaded as Actions
+#     artifacts, touching no release. This is how you hand a tester a build
+#     without committing to a version number.
+on:
+  push:
+    # Deliberately broader than the convention. `[0-9]*` is every tag the
+    # convention allows; `v[0-9]*` is the mistake people actually make, and it
+    # is matched ON PURPOSE so that `version-gate` can reject it out loud.
+    #
+    # A tag filter that misses is SILENT -- no run, no failure, no release,
+    # nothing to look at. That is how `0.1.0` was pushed against a `v*` filter
+    # and produced no release and no error. So the filter is kept simple enough
+    # that it cannot subtly fail to match, and all real validation lives in
+    # `version-gate`, which is tested.
+    tags: ["[0-9]*", "v[0-9]*"]
+  workflow_dispatch:
+
+# Read-only by default; only `release` widens it, and only to what attaching
+# assets to a release actually needs.
+permissions:
+  contents: read
+
+# A retagged release should supersede the run it replaces rather than race it
+# for the same draft.
+concurrency:
+  group: release-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  # Fails in seconds, before either build job allocates a runner -- and
+  # `windows-latest` bills at 2x while this repository is private, so a
+  # mistyped tag is worth catching for free.
+  version-gate:
+    runs-on: ubuntu-latest #mycorx-ubuntu
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - run: ./scripts/tests/release-version/run-release-version-tests.sh
+      # A dispatch run has no tag to check against, so the gate is the tag
+      # push's alone. The step is conditional rather than the job: a skipped
+      # job counts as unsuccessful to `needs`, which would strand both builds.
+      - name: The tag must match both manifests
+        if: startsWith(github.ref, 'refs/tags/')
+        run: ./scripts/check-release-version.sh "${GITHUB_REF_NAME}"
+
+  # The draft is created exactly once, here, so that `linux` and `windows` can
+  # then run in PARALLEL and do nothing but upload into it.
+  #
+  # They cannot safely create it themselves. tauri-action's own
+  # `getOrCreateRelease` is a read-then-create with no locking, and for a
+  # DRAFT it cannot even look the release up by tag -- a draft has no git tag
+  # yet, so the action pages through every release hunting for a tag match.
+  # Two parallel jobs would both find nothing and both create, and GitHub does
+  # not reject the second one precisely because no tag exists to collide. The
+  # result is two drafts for one version, one holding the .deb and one the
+  # .msi.
+  #
+  # Serialising the builds also fixed that, but at the cost of ~12 minutes and
+  # of `windows` being skipped outright whenever `linux` failed -- which is
+  # exactly what happened on run 34038639910, where a missing xdg-utils on the
+  # Linux runner meant the MSI was never built or tested at all.
+  create-release:
+    needs: version-gate
+    runs-on: ubuntu-latest #mycorx-ubuntu
+    permissions:
+      contents: write
+    outputs:
+      release_id: ${{ steps.draft.outputs.result }}
+    steps:
+      # A dispatch run has no tag and creates no release; the builds below
+      # already gate their upload steps on the same condition, so the empty
+      # output is never read. The step is conditional rather than the job,
+      # because a skipped job counts as unsuccessful to `needs`.
+      - name: Create the draft release
+        id: draft
+        if: startsWith(github.ref, 'refs/tags/')
+        uses: actions/github-script@3a2844b7e9c422d3c10d287c895573f7108da1b3 # v9.0.0
+        env:
+          # Passed as an environment variable rather than interpolated into
+          # the script body, which would be a code injection point.
+          TAG: ${{ github.ref_name }}
+        with:
+          result-encoding: string
+          script: |
+            const tag = process.env.TAG
+            const { owner, repo } = context.repo
+
+            // Idempotent, so re-running a failed workflow reuses its draft
+            // instead of leaving a second one behind. There is no
+            // getReleaseByTag for drafts -- see the note above -- so this
+            // pages the list.
+            const releases = await github.paginate(github.rest.repos.listReleases, {
+              owner, repo, per_page: 100,
+            })
+            const existing = releases.find((r) => r.tag_name === tag && r.draft)
+            if (existing) {
+              core.info(`Reusing existing draft release ${existing.id} for ${tag}`)
+              return String(existing.id)
+            }
+
+            const { data } = await github.rest.repos.createRelease({
+              owner, repo,
+              tag_name: tag,
+              name: `uia ${tag}`,
+              draft: true,
+              // Any tag carrying a suffix (0.2.0-rc.1) is a prerelease.
+              prerelease: tag.includes('-'),
+              target_commitish: context.sha,
+              generate_release_notes: true,
+            })
+            core.info(`Created draft release ${data.id} for ${tag}`)
+            return String(data.id)
+
+  # linux:
+  #   needs: [version-gate, create-release]
+  #   runs-on: ubuntu-latest #mycorx-ubuntu
+  #   permissions:
+  #     contents: write
+  #   steps:
+  #     - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+  #     - uses: dtolnay/rust-toolchain@6bed0761d98439e5a578e2877258200ad565ba87 # stable
+  #     - uses: pnpm/action-setup@ea17c68df8912ef543352723c149a84f56e3d413 # v6.1.0
+  #     - uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7.0.0
+  #       with:
+  #         node-version: 24
+  #         cache: pnpm
+  #     # The same closure `desktop-build` installs in ci.yaml -- tauri needs
+  #     # GTK3 + WebKit2GTK-4.1 dev headers, and uia-audio needs ALSA.
+  #     - run: >
+  #         sudo apt-get update && sudo apt-get install -y
+  #         libasound2-dev pkg-config
+  #         libwebkit2gtk-4.1-dev libgtk-3-dev librsvg2-dev
+  #         libayatana-appindicator3-dev libsoup-3.0-dev libjavascriptcoregtk-4.1-dev
+  #     - uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2.9.2
+  #       with:
+  #         key: release-linux
+  #     - run: pnpm install --frozen-lockfile
+
+  #     - name: Build and attach to the draft release
+  #       if: startsWith(github.ref, 'refs/tags/')
+  #       uses: tauri-apps/tauri-action@1deb371b0cd8bd54025b384f1cd735e725c4060f # action-v1.0.0
+  #       env:
+  #         GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+  #       with:
+  #         # Not the repository root: tauri.conf.json lives beside the crate,
+  #         # and its `frontendDist` is resolved relative to itself.
+  #         projectPath: crates/uia-app
+  #         # Exactly the invocation scripts/build-windows-package.ps1 uses
+  #         # locally, so CI and a developer's machine run the same command.
+  #         tauriScript: pnpm exec tauri
+  #         # Linux ships as a .deb only. AppImage was dropped deliberately:
+  #         # its bundler downloads and executes *unpinned* content at build
+  #         # time -- linuxdeploy from a rolling tag, linuxdeploy-plugin-appimage
+  #         # from the literal `continuous` tag, and linuxdeploy-plugin-gtk.sh
+  #         # from `master` -- inside the job that produces the binaries we
+  #         # ship. Every other step in this workflow is pinned to a commit SHA,
+  #         # and that one exception is not worth a format nothing asks for:
+  #         # nothing in the README offers an AppImage, and tauri.conf.json
+  #         # declares only `msi`.
+  #         #
+  #         # The cost is real and accepted: the .deb depends on the
+  #         # webkit2gtk-4.1 runtime, so Ubuntu 22.04 and non-Debian distros
+  #         # (Fedora, Arch, openSUSE) now have no Linux artifact. Add
+  #         # `appimage` back -- ideally with the bundler tools mirrored or
+  #         # pinned -- the day one of them is a real audience.
+  #         args: --bundles deb
+  #         releaseId: ${{ needs.create-release.outputs.release_id }}
+
+  #     - name: Build without releasing
+  #       if: ${{ !startsWith(github.ref, 'refs/tags/') }}
+  #       working-directory: crates/uia-app
+  #       run: pnpm exec tauri build --bundles deb
+
+  #     # Either build step above links the real shipped binary, so this needs
+  #     # no `if`. Replaces the +1.95 MiB figure C5/T6 measured by hand against
+  #     # a release *test* binary -- this tracks the actual artifact on every
+  #     # release run instead of one point-in-time comparison.
+  #     - name: Record shipped binary size
+  #       run: |
+  #         size=$(stat -c%s target/release/uia)
+  #         echo "### Shipped binary size" >> "$GITHUB_STEP_SUMMARY"
+  #         echo "\`target/release/uia\`: ${size} bytes" >> "$GITHUB_STEP_SUMMARY"
+
+  #     - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+  #       if: ${{ !startsWith(github.ref, 'refs/tags/') }}
+  #       with:
+  #         name: uia-linux
+  #         path: target/release/bundle/deb/*.deb
+  #         if-no-files-found: error
+
+  windows:
+    needs: [version-gate, create-release]
+    # GitHub-hosted: an MSI cannot be produced on the Linux self-hosted
+    # runner, and WiX only runs on Windows.
+    runs-on: windows-latest
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - uses: dtolnay/rust-toolchain@6bed0761d98439e5a578e2877258200ad565ba87 # stable
+      - uses: pnpm/action-setup@ea17c68df8912ef543352723c149a84f56e3d413 # v6.1.0
+      - uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7.0.0
+        with:
+          node-version: 24
+          cache: pnpm
+      - uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2.9.2
+        with:
+          key: release-windows
+      - run: pnpm install --frozen-lockfile
+
+      - name: Build and attach to the draft release
+        if: startsWith(github.ref, 'refs/tags/')
+        uses: tauri-apps/tauri-action@1deb371b0cd8bd54025b384f1cd735e725c4060f # action-v1.0.0
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        with:
+          projectPath: crates/uia-app
+          tauriScript: pnpm exec tauri
+          args: --bundles msi
+          releaseId: ${{ needs.create-release.outputs.release_id }}
+
+      - name: Build without releasing
+        if: ${{ !startsWith(github.ref, 'refs/tags/') }}
+        working-directory: crates/uia-app
+        run: pnpm exec tauri build --bundles msi
+      - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        if: ${{ !startsWith(github.ref, 'refs/tags/') }}
+        with:
+          name: uia-windows
+          path: target/release/bundle/msi/*.msi
+          if-no-files-found: error

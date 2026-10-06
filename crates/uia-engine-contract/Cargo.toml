@@ -1,0 +1,13 @@
+[package]
+name = "uia-engine-contract"
+version = "0.1.0"
+edition.workspace = true
+rust-version.workspace = true
+authors.workspace = true
+license.workspace = true
+publish.workspace = true
+
+[dependencies]
+uia-core = { path = "../uia-core" }
+serde_json.workspace = true
+tokio = { workspace = true, features = ["sync", "time", "macros", "rt"] }

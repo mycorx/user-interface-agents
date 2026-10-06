@@ -1,0 +1,39 @@
+[package]
+name = "uia-foundry"
+version = "0.1.0"
+edition.workspace = true
+rust-version.workspace = true
+authors.workspace = true
+license.workspace = true
+publish.workspace = true
+
+[dependencies]
+uia-core = { path = "../uia-core" }
+# Azure OpenAI's GA Realtime protocol is byte-for-byte the same event schema
+# and ephemeral-secret response shape as OpenAI's own (Microsoft's own
+# migration guide: "GA protocol and message format are only supported in the
+# SDKs provided by OpenAI") - only the connection URLs and the credential-mint
+# auth header differ. Reusing `uia_openai::protocol`/`creds::parse_client_secret`
+# here avoids a second copy of that event-parsing state machine that would
+# have to be kept in lockstep by hand.
+uia-openai = { path = "../uia-openai" }
+# `default-features = false` drops the `cpal-io` feature: this crate imports
+# only `uia_audio::codec::OpusCodec` and never opens a device, same as
+# `uia-openai`.
+uia-audio = { path = "../uia-audio", default-features = false }
+async-trait.workspace = true
+serde_json.workspace = true
+tokio.workspace = true
+reqwest = { version = "0.12", default-features = false, features = ["json", "rustls-tls"] }
+# Version-locked with `uia-openai`'s pair for the same reason: the codec
+# parameter types a local media track needs are not re-exported by the facade.
+webrtc = "=0.20.2"
+rtc = "=0.20.2"
+rand = "0.9"
+bytes = "1"
+
+[dev-dependencies]
+tokio = { version = "1.53.1", features = ["full", "test-util"] }
+reqwest = { version = "0.12", default-features = false, features = ["json", "rustls-tls"] }
+serde_json = "1"
+uia-engine-contract = { path = "../uia-engine-contract" }
