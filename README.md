@@ -133,4 +133,4 @@ Three things sit outside those licenses:
   license to use the work — see [CLA.md](CLA.md) and
   [CONTRIBUTING.md](CONTRIBUTING.md).
 
-Copyright © 2026 MycorX (Daniel, Sole Trader). All rights reserved.
+Copyright © 2026 MycorX. All rights reserved.
