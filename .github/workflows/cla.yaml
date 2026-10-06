@@ -23,7 +23,7 @@ jobs:
   # Gate: has the author of this pull request accepted the CLA?
   check:
     if: github.event.action != 'closed'
-    runs-on: mycorx-ubuntu #ubuntu-latest
+    runs-on: ubuntu-latest #mycorx-ubuntu
     steps:
       # Checks out the BASE branch, not the pull request head. A fork otherwise
       # supplies the very script that judges it, and could edit the check to
@@ -58,7 +58,7 @@ jobs:
   # Record: a merged author never has to accept again.
   ledger:
     if: github.event.action == 'closed' && github.event.pull_request.merged == true
-    runs-on: mycorx-ubuntu #ubuntu-latest
+    runs-on: ubuntu-latest #mycorx-ubuntu
     # A job-level block replaces the workflow-level one rather than adding to
     # it, so `pull-requests: read` has to be restated here to fetch the commit
     # list.

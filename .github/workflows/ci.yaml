@@ -5,7 +5,7 @@ on:
   workflow_dispatch:
 jobs:
   test:
-    runs-on: mycorx-ubuntu #ubuntu-latest
+    runs-on: ubuntu-latest #mycorx-ubuntu
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
       - uses: dtolnay/rust-toolchain@6bed0761d98439e5a578e2877258200ad565ba87 # stable
@@ -25,7 +25,7 @@ jobs:
   # otherwise carry — and `pnpm licenses list` reads the installed store, so
   # node_modules must exist for the npm half to mean anything.
   notice:
-    runs-on: mycorx-ubuntu #ubuntu-latest
+    runs-on: ubuntu-latest #mycorx-ubuntu
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
       - uses: dtolnay/rust-toolchain@6bed0761d98439e5a578e2877258200ad565ba87 # stable
@@ -56,7 +56,7 @@ jobs:
   # libwebkit2gtk-4.1-dev alone is ~190 packages, which has no business on the
   # critical path.
   desktop-build:
-    runs-on: mycorx-ubuntu #ubuntu-latest
+    runs-on: ubuntu-latest #mycorx-ubuntu
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
       - uses: dtolnay/rust-toolchain@6bed0761d98439e5a578e2877258200ad565ba87 # stable
@@ -87,7 +87,7 @@ jobs:
   # runner does not carry. Building it nowhere meant the whole path was
   # untested in CI. Its own job keeps that toolchain off the critical path.
   aec-feature:
-    runs-on: mycorx-ubuntu #ubuntu-latest
+    runs-on: ubuntu-latest #mycorx-ubuntu
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
       - uses: dtolnay/rust-toolchain@6bed0761d98439e5a578e2877258200ad565ba87 # stable
