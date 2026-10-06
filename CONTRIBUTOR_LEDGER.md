@@ -13,4 +13,4 @@ hand only to correct a mistake, and say so in the commit message.
 
 | GitHub login | Name | CLA version | Accepted in | Date |
 | --- | --- | --- | --- | --- |
-| @exp4bra1n | Daniel Palermi | owner | — | — |
+| @exp4bra1n | Daniel | owner | — | — |
