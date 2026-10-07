@@ -9,17 +9,18 @@ use objc2_core_audio::{
     AudioDeviceID, AudioObjectAddPropertyListener, AudioObjectGetPropertyData,
     AudioObjectGetPropertyDataSize, AudioObjectID, AudioObjectPropertyAddress,
     AudioObjectPropertyScope, AudioObjectPropertySelector, AudioObjectRemovePropertyListener,
+    AudioObjectSetPropertyData, kAudioDevicePropertyAvailableNominalSampleRates,
     kAudioDevicePropertyDeviceIsAlive, kAudioDevicePropertyDeviceNameCFString,
-    kAudioDevicePropertyStreamConfiguration, kAudioDevicePropertyStreams,
-    kAudioHardwarePropertyDefaultInputDevice, kAudioHardwarePropertyDefaultOutputDevice,
-    kAudioHardwarePropertyDevices, kAudioObjectPropertyElementMain,
-    kAudioObjectPropertyScopeGlobal, kAudioObjectPropertyScopeInput,
-    kAudioObjectPropertyScopeOutput, kAudioObjectSystemObject, kAudioStreamPropertyTerminalType,
-    kAudioStreamTerminalTypeHeadphones, kAudioStreamTerminalTypeLFESpeaker,
-    kAudioStreamTerminalTypeReceiverSpeaker, kAudioStreamTerminalTypeSpeaker,
-    kAudioStreamTerminalTypeUnknown,
+    kAudioDevicePropertyNominalSampleRate, kAudioDevicePropertyStreamConfiguration,
+    kAudioDevicePropertyStreams, kAudioHardwarePropertyDefaultInputDevice,
+    kAudioHardwarePropertyDefaultOutputDevice, kAudioHardwarePropertyDevices,
+    kAudioObjectPropertyElementMain, kAudioObjectPropertyScopeGlobal,
+    kAudioObjectPropertyScopeInput, kAudioObjectPropertyScopeOutput, kAudioObjectSystemObject,
+    kAudioStreamPropertyTerminalType, kAudioStreamTerminalTypeHeadphones,
+    kAudioStreamTerminalTypeLFESpeaker, kAudioStreamTerminalTypeReceiverSpeaker,
+    kAudioStreamTerminalTypeSpeaker, kAudioStreamTerminalTypeUnknown,
 };
-use objc2_core_audio_types::{AudioBuffer, AudioBufferList};
+use objc2_core_audio_types::{AudioBuffer, AudioBufferList, AudioValueRange};
 use objc2_core_foundation::{CFRetained, CFString};
 use std::ffi::c_void;
 use std::mem::size_of;
@@ -142,6 +143,16 @@ fn get_ids(
     object: AudioObjectID,
     addr: AudioObjectPropertyAddress,
 ) -> Result<Vec<AudioObjectID>, i32> {
+    get_array(object, addr, 0)
+}
+
+/// Read a variable-length property holding an array of `T`. `zero` fills
+/// the buffer before CoreAudio writes it. `Err` carries the OSStatus.
+fn get_array<T: Copy>(
+    object: AudioObjectID,
+    addr: AudioObjectPropertyAddress,
+    zero: T,
+) -> Result<Vec<T>, i32> {
     let mut size = 0u32;
     // SAFETY: `addr` and `size` are valid for the call.
     let status = unsafe {
@@ -156,13 +167,14 @@ fn get_ids(
     if status != 0 {
         return Err(status);
     }
-    let mut ids = vec![0 as AudioObjectID; size as usize / size_of::<AudioObjectID>()];
+    let mut ids = vec![zero; size as usize / size_of::<T>()];
     if ids.is_empty() {
         return Ok(ids);
     }
     // Never let CoreAudio write more than `ids` holds.
-    let mut size = (ids.len() * size_of::<AudioObjectID>()) as u32;
-    // SAFETY: `ids` has room for exactly `size` bytes.
+    let mut size = (ids.len() * size_of::<T>()) as u32;
+    // SAFETY: `ids` is a properly aligned `[T]` with room for exactly `size`
+    // bytes.
     let status = unsafe {
         AudioObjectGetPropertyData(
             object,
@@ -177,7 +189,7 @@ fn get_ids(
         return Err(status);
     }
     // The list can shrink between the two calls.
-    ids.truncate(size as usize / size_of::<AudioObjectID>());
+    ids.truncate(size as usize / size_of::<T>());
     Ok(ids)
 }
 
@@ -408,6 +420,60 @@ fn is_vpio_private(name: &str) -> bool {
 /// feeds is a best effort, never a reason to stop reopening.
 pub(crate) fn vpio_aggregate_present() -> bool {
     device_ids().is_ok_and(|ids| ids.into_iter().any(|id| is_vpio_private(&device_name(id))))
+}
+
+fn nominal_rate_address() -> AudioObjectPropertyAddress {
+    address(
+        kAudioDevicePropertyNominalSampleRate,
+        kAudioObjectPropertyScopeGlobal,
+    )
+}
+
+/// The rate a device runs at, or `None` if it cannot be read (a dead
+/// device, say) or is not a positive number.
+pub(crate) fn nominal_rate(id: AudioDeviceID) -> Option<f64> {
+    get(id, nominal_rate_address(), 0.0f64)
+        .ok()
+        .filter(|rate| rate.is_finite() && *rate > 0.0)
+}
+
+/// The nominal rates a device supports, as `(min, max)` ranges (`min ==
+/// max` for a discrete rate). Empty if they cannot be read.
+pub(crate) fn available_rates(id: AudioDeviceID) -> Vec<(f64, f64)> {
+    get_array(
+        id,
+        address(
+            kAudioDevicePropertyAvailableNominalSampleRates,
+            kAudioObjectPropertyScopeGlobal,
+        ),
+        AudioValueRange {
+            mMinimum: 0.0,
+            mMaximum: 0.0,
+        },
+    )
+    .unwrap_or_default()
+    .into_iter()
+    .map(|r| (r.mMinimum, r.mMaximum))
+    .collect()
+}
+
+/// Ask a device to run at `rate`. It may take a moment to read back; `Err`
+/// carries the OSStatus.
+pub(crate) fn set_nominal_rate(id: AudioDeviceID, rate: f64) -> Result<(), i32> {
+    let addr = nominal_rate_address();
+    // SAFETY: `rate` is the one f64 this property takes, valid for
+    // `size_of::<f64>()` bytes for the call; `addr` lives for the call.
+    let status = unsafe {
+        AudioObjectSetPropertyData(
+            id,
+            NonNull::from(&addr),
+            0,
+            null(),
+            size_of::<f64>() as u32,
+            NonNull::from(&rate).cast(),
+        )
+    };
+    if status == 0 { Ok(()) } else { Err(status) }
 }
 
 /// False once a device has been unplugged (or its ID never existed).

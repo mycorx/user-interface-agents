@@ -17,11 +17,18 @@
 //! while a unit runs: a running unit makes every output device in this
 //! process show an input stream (its echo-reference taps) and adds a private
 //! aggregate device, so names are only resolved once a torn-down unit's
-//! aggregate has left the list. Spike results behind these choices are in
+//! aggregate has left the list.
+//!
+//! VPIO processes both directions at the slower device's rate, so before each
+//! open a bound device below 24 kHz that supports more is raised (to at most
+//! 48 kHz) and restored once the unit releases it — see `rate`. A device that
+//! cannot go higher keeps the assistant's voice band-limited, which the
+//! opened line notes. Spike results behind these choices are in
 //! `docs/superpowers/specs/2026-10-07-macos-native-aec-design.md`.
 
 mod capture;
 mod device;
+mod rate;
 mod render;
 mod unit;
 
@@ -30,6 +37,7 @@ pub use render::CoreAudioSink;
 
 use crate::backoff::reopen_delay_ms;
 use device::{DeviceInfo, Direction, Listeners};
+use rate::{FULL_VOICE_RATE_HZ, RateGuard};
 use std::sync::mpsc::{Receiver, RecvTimeoutError, Sender};
 use std::sync::{Arc, Mutex, PoisonError};
 use std::thread::JoinHandle;
@@ -140,11 +148,24 @@ fn await_teardown(
     wake: &Receiver<Wake>,
     limit: Duration,
     poll: Duration,
-    mut aggregate_present: impl FnMut() -> bool,
+    aggregate_present: impl FnMut() -> bool,
+) -> Option<bool> {
+    wait_while(wake, limit, poll, aggregate_present)
+}
+
+/// Poll `pending` at most every `poll` until it reports false or `limit`
+/// passes, waking for nothing but a stop. `Some(true)`: done. `Some(false)`:
+/// still pending at `limit`. `None`: a stop arrived. The shape of every
+/// bounded, Stop-aware wait before opening a unit — see [`await_teardown`].
+fn wait_while(
+    wake: &Receiver<Wake>,
+    limit: Duration,
+    poll: Duration,
+    mut pending: impl FnMut() -> bool,
 ) -> Option<bool> {
     let deadline = std::time::Instant::now() + limit;
     loop {
-        if !aggregate_present() {
+        if !pending() {
             return Some(true);
         }
         let left = deadline.saturating_duration_since(std::time::Instant::now());
@@ -197,6 +218,14 @@ impl Wanted {
     }
 }
 
+/// A running unit and the device rates raised for it. Fields drop in
+/// declaration order, so the unit — which holds the devices — is disposed
+/// before the guard puts their rates back.
+struct Running {
+    voice: VoiceUnit,
+    _rates: RateGuard,
+}
+
 /// What the supervisor reports once the unit is running.
 struct Opened {
     input: String,
@@ -212,7 +241,7 @@ impl std::fmt::Display for Opened {
         } else {
             write!(f, "processing at {} Hz", self.processing_rate_hz)?;
         }
-        if self.processing_rate_hz != 0 && self.processing_rate_hz < CLIENT_RATE_HZ {
+        if self.processing_rate_hz != 0 && self.processing_rate_hz < FULL_VOICE_RATE_HZ {
             write!(
                 f,
                 " (the assistant's voice is band-limited on this device pairing)"
@@ -348,6 +377,8 @@ fn supervise(
     // Whether the teardown wait has already been reported unsettled since
     // the last successful open.
     let mut settle_logged = false;
+    // Devices whose rate could not be raised, each reported once.
+    let mut rate_refused = Vec::new();
 
     loop {
         // Before every resolve, the first one included: a previous backend in
@@ -374,10 +405,30 @@ fn supervise(
         // Resolution reads the unfiltered device list on purpose: some real
         // mics report terminal type 0, so filtering taps by terminal type
         // here could hide them. The wait above is what keeps taps out.
-        let opened = wanted.resolve().and_then(|(input, output)| {
-            VoiceUnit::open(input.id, output.id, &shared, &frames_tx).map(|u| (u, input, output))
-        });
-        let (voice, input, output) = match opened {
+        let opened = match wanted.resolve() {
+            Ok((input, output)) => {
+                // Raised after resolving and before opening: VPIO picks its
+                // processing rate from the devices' rates when it opens.
+                let Some(rates) = RateGuard::raise(&wake, &[&input, &output], &mut rate_refused)
+                else {
+                    return;
+                };
+                // On failure `rates` drops here, putting the rates back
+                // before the backoff below.
+                VoiceUnit::open(input.id, output.id, &shared, &frames_tx).map(|voice| {
+                    (
+                        Running {
+                            voice,
+                            _rates: rates,
+                        },
+                        input,
+                        output,
+                    )
+                })
+            }
+            Err(e) => Err(e),
+        };
+        let (running, input, output) = match opened {
             Ok(opened) => opened,
             Err(e) => {
                 if let Some(tx) = ready_tx.take() {
@@ -414,7 +465,7 @@ fn supervise(
         let info = Opened {
             input: input.name,
             output: output.name,
-            processing_rate_hz: voice.processing_rate_hz,
+            processing_rate_hz: running.voice.processing_rate_hz,
         };
         match ready_tx.take() {
             Some(tx) => {
@@ -450,7 +501,8 @@ fn supervise(
             }
         }
         drop(listeners);
-        drop(voice);
+        // The unit first, then its raised rates: see `Running`.
+        drop(running);
     }
 }
 
@@ -703,8 +755,23 @@ mod tests {
         assert!(!text.contains("band-limited"), "got: {text}");
     }
 
+    /// The engine's voice is 24 kHz PCM, so processing at 24 kHz or more
+    /// loses nothing and must not be called band-limited.
     #[test]
-    fn a_known_rate_below_48k_notes_band_limiting() {
+    fn a_rate_at_or_above_24k_is_not_band_limited() {
+        for rate in [FULL_VOICE_RATE_HZ, 32_000, 44_100, 48_000] {
+            let opened = Opened {
+                input: "Webcam".to_string(),
+                output: "Speakers".to_string(),
+                processing_rate_hz: rate,
+            };
+            let text = opened.to_string();
+            assert!(!text.contains("band-limited"), "got: {text}");
+        }
+    }
+
+    #[test]
+    fn a_known_rate_below_24k_notes_band_limiting() {
         let opened = Opened {
             input: "Webcam".to_string(),
             output: "Speakers".to_string(),
@@ -846,6 +913,53 @@ mod tests {
                  (baseline {baseline:?}, now {inputs:?})"
             );
         }
+    }
+
+    /// A slow mic is raised for voice processing and put back on release.
+    /// Runs the real supervisor so the opened processing rate is visible.
+    #[test]
+    #[ignore = "requires real audio devices; run manually on a Mac with --test-threads=1; \
+                set UIA_TEST_SLOW_INPUT to a mic whose rate is below 24 kHz but supports more"]
+    fn a_slow_input_is_raised_while_open_and_restored_on_release() {
+        let name = std::env::var("UIA_TEST_SLOW_INPUT").expect("set UIA_TEST_SLOW_INPUT");
+        let mic = device::resolve(Direction::Input, Some(&name)).unwrap();
+        let before = device::nominal_rate(mic.id).expect("unreadable nominal rate");
+        assert!(
+            before < f64::from(FULL_VOICE_RATE_HZ),
+            "{name:?} already runs at {before} Hz; pick a slower mic"
+        );
+
+        let (frames_tx, _frames_rx) = tokio::sync::mpsc::channel(64);
+        let shared = Arc::new(Shared::new());
+        let (wake_tx, wake_rx) = std::sync::mpsc::channel();
+        let (ready_tx, ready_rx) = std::sync::mpsc::channel();
+        let listener_tx: &'static Sender<Wake> = Box::leak(Box::new(wake_tx.clone()));
+        let wanted = Wanted {
+            input: Some(name.clone()),
+            output: None,
+        };
+        let worker = std::thread::spawn(move || {
+            supervise(ready_tx, wake_rx, listener_tx, shared, frames_tx, wanted)
+        });
+        let opened = ready_rx
+            .recv()
+            .unwrap()
+            .expect("voice processing did not open");
+        let rate = opened.processing_rate_hz;
+        wake_tx.send(Wake::Stop).unwrap();
+        worker.join().unwrap();
+        assert!(
+            rate >= FULL_VOICE_RATE_HZ,
+            "processing at {rate} Hz: {opened}"
+        );
+
+        let deadline = Instant::now() + Duration::from_secs(1);
+        let mut after = device::nominal_rate(mic.id);
+        while after != Some(before) && Instant::now() < deadline {
+            std::thread::sleep(Duration::from_millis(50));
+            after = device::nominal_rate(mic.id);
+        }
+        assert_eq!(after, Some(before), "{name:?} was not restored");
     }
 
     /// Barge-in budget: what still plays after `clear()` is one callback

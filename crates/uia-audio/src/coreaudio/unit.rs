@@ -93,8 +93,9 @@ pub(crate) struct VoiceUnit {
     ctx: *mut CallbackCtx,
     initialized: bool,
     /// Element 1's input-scope (hardware-side) sample rate, 0 if unreadable.
-    /// The spike saw VPIO run both sides at the slower device's rate, so this
-    /// is expected to reflect that device. Logged, because below 48 kHz the
+    /// VPIO runs both sides at the slower device's rate (measured), so this
+    /// reflects that device — after the supervisor has raised it where it
+    /// can. Logged, because below 24 kHz (the engine's voice rate) the
     /// assistant's voice is band-limited.
     pub(crate) processing_rate_hz: u32,
 }

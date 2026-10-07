@@ -308,9 +308,13 @@ barely hears the speakers — use a webcam or built-in mic for the echo checks.
       input "…" / output "…", processing at N Hz (OS echo cancellation
       active)`, naming the devices you expect. If it instead shows `could not
       open the macOS voice-processing audio devices ... WITHOUT echo
-      cancellation`, the checks below fail by design. A "band-limited" note
-      means one device runs below 48 kHz (e.g. a 16 kHz webcam mic) and the
-      assistant will sound duller on that pairing — expected.
+      cancellation`, the checks below fail by design. A device running below
+      24 kHz that supports more (e.g. a 16 kHz webcam mic) is raised first —
+      stderr shows `coreaudio raised "…" from N Hz to M Hz for voice
+      processing (restored on release)` — and put back when the app lets go
+      of it. A "band-limited" note now means processing is below 24 kHz
+      because a device cannot go higher, and the assistant will sound duller
+      on that pairing — expected.
 - [x] With speakers (not headphones) at a normal volume, the assistant does
       not hear itself: it must not interrupt or answer its own voice.
 - [x] Talking over the assistant interrupts it promptly (the spike measured
