@@ -149,8 +149,9 @@ calling all behaved identically to the OpenAI pass. The only expected
 difference between engines is latency (see "Known gaps to expect").
 Both passes were on **Windows**. On macOS, the shared sections (Shell,
 Session, Personas, Failure behaviour) apply unchanged; for audio, run "Audio
-quality on macOS" instead of the Windows audio section. No macOS pass has been
-recorded yet; ticked boxes below reflect the Windows runs.
+quality on macOS" instead of the Windows audio section. Outside that macOS
+section, ticked boxes reflect the Windows runs; the macOS section records its
+own (partial) pass.
 
 ### Shell (S13's surface, unverified until now)
 
@@ -293,14 +294,20 @@ The app opens one Voice Processing IO unit for both directions. With no
 device configured it follows the system default input and output, including
 when you switch them while it runs; a configured name stays pinned.
 
-- [ ] At startup, stderr shows `uia-audio: coreaudio voice processing opened
+**Partial pass 2026-10-07** (Apple silicon, C920 mic + Creative Pebble X
+speakers): the startup line, no self-hearing on speakers, and the
+`aec_enabled = false` A/B are confirmed. With a close-talking headset boom mic
+(Jabra Evolve2 30 SE) the on/off A/B shows little difference because the mic
+barely hears the speakers — use a webcam or built-in mic for the echo checks.
+
+- [x] At startup, stderr shows `uia-audio: coreaudio voice processing opened
       input "…" / output "…", processing at N Hz (OS echo cancellation
       active)`, naming the devices you expect. If it instead shows `could not
       open the macOS voice-processing audio devices ... WITHOUT echo
       cancellation`, the checks below fail by design. A "band-limited" note
       means one device runs below 48 kHz (e.g. a 16 kHz webcam mic) and the
       assistant will sound duller on that pairing — expected.
-- [ ] With speakers (not headphones) at a normal volume, the assistant does
+- [x] With speakers (not headphones) at a normal volume, the assistant does
       not hear itself: it must not interrupt or answer its own voice.
 - [ ] Talking over the assistant interrupts it promptly (the spike measured
       no loss of your voice during playback, so barge-in should feel the same
@@ -312,7 +319,7 @@ when you switch them while it runs; a configured name stays pinned.
       headphones) while the app runs: the assistant's voice moves with it.
 - [ ] Music playing in another app is only minimally ducked while the
       assistant listens.
-- [ ] `aec_enabled = false` under `[audio]`: stderr shows `OS echo
+- [x] `aec_enabled = false` under `[audio]`: stderr shows `OS echo
       cancellation disabled via config`, and with speakers the assistant now
       does hear itself — confirming the toggle is not a no-op.
 
