@@ -278,7 +278,8 @@ fn list(dir: Direction) -> Result<Vec<DeviceInfo>, AudioError> {
         .collect())
 }
 
-fn default_device(dir: Direction) -> Option<AudioDeviceID> {
+/// The current system default device for `dir`, if there is one.
+pub(crate) fn default_device(dir: Direction) -> Option<AudioDeviceID> {
     get(
         SYSTEM,
         address(dir.default_selector(), kAudioObjectPropertyScopeGlobal),
@@ -291,6 +292,21 @@ fn default_device(dir: Direction) -> Option<AudioDeviceID> {
 /// The device `wanted` names in `dir` right now, or the current default.
 pub(crate) fn resolve(dir: Direction, wanted: Option<&str>) -> Result<DeviceInfo, AudioError> {
     choose(&list(dir)?, default_device(dir), wanted, dir)
+}
+
+/// The private aggregate a running Voice Processing IO unit adds to this
+/// process's device list (measured: `VPAUAggregateAudioDevice-0x<hex>`,
+/// transport `'grup'`). Never a device a user chose.
+fn is_vpio_private(name: &str) -> bool {
+    name.starts_with("VPAUAggregateAudioDevice")
+}
+
+/// Whether a voice-processing unit's private aggregate is still in this
+/// process's device list — i.e. a torn-down unit's echo-reference taps may
+/// still be visible. A failed listing counts as "not present": the wait this
+/// feeds is a best effort, never a reason to stop reopening.
+pub(crate) fn vpio_aggregate_present() -> bool {
+    device_ids().is_ok_and(|ids| ids.into_iter().any(|id| is_vpio_private(&device_name(id))))
 }
 
 /// False once a device has been unplugged (or its ID never existed).
@@ -463,6 +479,18 @@ mod tests {
             err.to_string().contains("no default output device"),
             "got: {err}"
         );
+    }
+
+    /// The private aggregate VPIO creates while it runs (measured name:
+    /// `VPAUAggregateAudioDevice-0x<hex>`) is never a user's device.
+    #[test]
+    fn the_vpio_aggregate_is_recognised_by_name() {
+        assert!(is_vpio_private("VPAUAggregateAudioDevice-0x600003a1c000"));
+        assert!(is_vpio_private("VPAUAggregateAudioDevice"));
+        assert!(!is_vpio_private("Creative Pebble X"));
+        assert!(!is_vpio_private("MacBook Pro Speakers"));
+        // A prefix, not a substring: a user's own aggregate is kept.
+        assert!(!is_vpio_private("My VPAUAggregateAudioDevice"));
     }
 
     /// Aggregate and multi-stream USB devices report several buffers; the

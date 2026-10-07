@@ -13,7 +13,11 @@
 //! streams, `CoreAudioSource` and `CoreAudioSink` share one supervisor thread
 //! that owns the unit, rebuilds it when a bound device disappears or (with no
 //! device configured) the system default moves, and backs off patiently when
-//! a device is gone. Spike results behind these choices are in
+//! a device is gone. A pinned name is resolved only when (re)opening, never
+//! while a unit runs: a running unit makes every output device in this
+//! process show an input stream (its echo-reference taps) and adds a private
+//! aggregate device, so names are only resolved once a torn-down unit's
+//! aggregate has left the list. Spike results behind these choices are in
 //! `docs/superpowers/specs/2026-10-07-macos-native-aec-design.md`.
 
 mod capture;
@@ -56,12 +60,96 @@ fn app_format() -> AudioFormat {
     }
 }
 
-/// Whether the unit must be rebuilt. `bound` is what the unit is using,
-/// `alive` whether each still exists, `now` what the configuration resolves
-/// to today (`None` when it resolves to nothing). Pinned names and followed
-/// defaults both reduce to "does `now` still equal `bound`".
-fn should_rebuild(bound: (u32, u32), alive: (bool, bool), now: Option<(u32, u32)>) -> bool {
-    !alive.0 || !alive.1 || now != Some(bound)
+/// How long to wait for a torn-down unit's private aggregate (and with it the
+/// echo-reference taps) to leave the device list before resolving names.
+const TEARDOWN_SETTLE_LIMIT: Duration = Duration::from_secs(1);
+/// How often that wait re-checks.
+const TEARDOWN_SETTLE_POLL: Duration = Duration::from_millis(50);
+
+/// One direction of the running unit, as the watch loop sees it.
+#[derive(Clone, Copy, Debug)]
+struct Observed {
+    /// The device the unit is using.
+    bound: u32,
+    /// Whether that device still exists.
+    alive: bool,
+    /// True when no name is configured, so the direction follows the system
+    /// default; false when a name pins it.
+    follows_default: bool,
+    /// The system default right now (`None` when there is none). Only
+    /// consulted when `follows_default`.
+    default_now: Option<u32>,
+}
+
+/// Whether one direction of the running unit is out of date: its device has
+/// died, or it follows the default and the default is now something else (or
+/// nothing).
+///
+/// A pinned direction rebuilds only when its device dies. This is
+/// deliberately not "does the name still resolve to `bound`": while a VPIO
+/// unit runs, every output device in this process also shows an input stream
+/// (the unit's echo-reference taps), so re-resolving a pinned input name
+/// mid-run can find a speaker sharing the name and rebuild every check. The
+/// trade-off: plugging in a second device that also matches a pinned name no
+/// longer switches to it — the bound device is kept until it goes away.
+fn direction_stale(
+    bound: u32,
+    alive: bool,
+    follows_default: bool,
+    default_now: Option<u32>,
+) -> bool {
+    !alive || (follows_default && default_now != Some(bound))
+}
+
+/// Whether the unit must be rebuilt: either direction is stale, see
+/// [`direction_stale`].
+fn should_rebuild(input: Observed, output: Observed) -> bool {
+    [input, output]
+        .into_iter()
+        .any(|d| direction_stale(d.bound, d.alive, d.follows_default, d.default_now))
+}
+
+/// Read one bound direction's state for [`should_rebuild`], without
+/// resolving any names. The default is only queried when it matters.
+fn observe(bound: u32, dir: Direction, pinned: bool) -> Observed {
+    Observed {
+        bound,
+        alive: device::is_alive(bound),
+        follows_default: !pinned,
+        default_now: if pinned {
+            None
+        } else {
+            device::default_device(dir)
+        },
+    }
+}
+
+/// After a unit is disposed, wait until `aggregate_present` reports the
+/// teardown has settled, polling every `poll` for at most `limit`, so names
+/// are never resolved while the old unit's echo-reference taps are still in
+/// the device list.
+///
+/// `Some(true)`: settled. `Some(false)`: still present at `limit`; the caller
+/// resolves anyway. `None`: a stop arrived — return promptly.
+fn await_teardown(
+    wake: &Receiver<Wake>,
+    limit: Duration,
+    poll: Duration,
+    mut aggregate_present: impl FnMut() -> bool,
+) -> Option<bool> {
+    let deadline = std::time::Instant::now() + limit;
+    loop {
+        if !aggregate_present() {
+            return Some(true);
+        }
+        let left = deadline.saturating_duration_since(std::time::Instant::now());
+        if left.is_zero() {
+            return Some(false);
+        }
+        if !wait_or_stop(wake, poll.min(left)) {
+            return None;
+        }
+    }
 }
 
 /// Park for `delay` or until woken. False means stop.
@@ -72,7 +160,9 @@ fn wait_or_stop(rx: &Receiver<Wake>, delay: Duration) -> bool {
     }
 }
 
-/// The configured device names, owned for the supervisor thread.
+/// The configured device names, owned for the supervisor thread. Resolved
+/// only when opening a unit; while one runs, `Some` just means "pinned" —
+/// see [`direction_stale`].
 struct Wanted {
     input: Option<String>,
     output: Option<String>,
@@ -132,7 +222,9 @@ impl Drop for Backend {
 /// Open the echo-cancelling microphone and speaker as one Voice Processing
 /// IO unit. `input`/`output`, when `Some`, pin the first device of that
 /// direction whose name contains them (case-insensitive); `None` follows the
-/// system default, including when it changes later.
+/// system default, including when it changes later. A pinned device is kept
+/// until it disappears: a second matching device plugged in later is not
+/// switched to (see [`direction_stale`] for why).
 ///
 /// Failure to open is returned here, never as a source that silently yields
 /// nothing — `uia-app` falls back to plain cpal devices on any error.
@@ -217,8 +309,36 @@ fn supervise(
     let mut ready_tx = Some(ready_tx);
     let mut attempt = 0u32;
     let mut loss_logged = false;
+    // Whether this backend has run a unit before, so a teardown may still be
+    // settling, and whether that wait has already been reported unsettled
+    // since the last successful open.
+    let mut had_unit = false;
+    let mut settle_logged = false;
 
     loop {
+        if had_unit {
+            match await_teardown(
+                &wake,
+                TEARDOWN_SETTLE_LIMIT,
+                TEARDOWN_SETTLE_POLL,
+                device::vpio_aggregate_present,
+            ) {
+                None => return,
+                Some(true) => {}
+                Some(false) => {
+                    if !settle_logged {
+                        eprintln!(
+                            "uia-audio: coreaudio voice-processing teardown did not settle \
+                             within 1 s; resolving anyway"
+                        );
+                        settle_logged = true;
+                    }
+                }
+            }
+        }
+        // Resolution reads the unfiltered device list on purpose: some real
+        // mics report terminal type 0, so filtering taps by terminal type
+        // here could hide them. The wait above is what keeps taps out.
         let opened = wanted.resolve().and_then(|(input, output)| {
             VoiceUnit::open(input.id, output.id, &shared, &frames_tx).map(|u| (u, input, output))
         });
@@ -271,6 +391,8 @@ fn supervise(
         }
         attempt = 0;
         loss_logged = false;
+        had_unit = true;
+        settle_logged = false;
 
         loop {
             if !wait_or_stop(&wake, WATCH_INTERVAL) {
@@ -282,9 +404,11 @@ fn supervise(
                     return;
                 }
             }
-            let now = wanted.resolve().ok().map(|(i, o)| (i.id, o.id));
-            let alive = (device::is_alive(bound.0), device::is_alive(bound.1));
-            if should_rebuild(bound, alive, now) {
+            // Never `wanted.resolve()` here: the unit is running, so the
+            // device list includes its echo-reference taps.
+            let input = observe(bound.0, Direction::Input, wanted.input.is_some());
+            let output = observe(bound.1, Direction::Output, wanted.output.is_some());
+            if should_rebuild(input, output) {
                 eprintln!(
                     "uia-audio: coreaudio audio devices changed; rebuilding voice processing"
                 );
@@ -301,33 +425,165 @@ mod tests {
     use super::*;
     use std::time::{Duration, Instant};
 
-    const BOUND: (u32, u32) = (90, 107);
+    const MIC: u32 = 90;
+    const SPEAKER: u32 = 107;
+
+    /// A healthy direction as the watch loop sees it: alive, and (when it
+    /// follows the default) the default still is the bound device.
+    fn healthy(bound: u32, follows_default: bool) -> Observed {
+        Observed {
+            bound,
+            alive: true,
+            follows_default,
+            default_now: Some(bound),
+        }
+    }
 
     /// Review focus 1: notification bursts with nothing actually changed
-    /// must not tear the unit down.
+    /// must not tear the unit down — pinned or following the default.
     #[test]
     fn unchanged_bound_devices_never_rebuild() {
-        assert!(!should_rebuild(BOUND, (true, true), Some(BOUND)));
+        for follows in [true, false] {
+            assert!(!should_rebuild(
+                healthy(MIC, follows),
+                healthy(SPEAKER, follows)
+            ));
+        }
     }
 
     #[test]
     fn a_dead_device_rebuilds() {
-        assert!(should_rebuild(BOUND, (false, true), Some(BOUND)));
-        assert!(should_rebuild(BOUND, (true, false), Some(BOUND)));
+        for follows in [true, false] {
+            let dead_mic = Observed {
+                alive: false,
+                ..healthy(MIC, follows)
+            };
+            let dead_speaker = Observed {
+                alive: false,
+                ..healthy(SPEAKER, follows)
+            };
+            assert!(should_rebuild(dead_mic, healthy(SPEAKER, follows)));
+            assert!(should_rebuild(healthy(MIC, follows), dead_speaker));
+        }
     }
 
-    /// An unpinned default moved, or a pinned name now resolves elsewhere.
+    /// The whole point of following the default: when it moves, rebuild.
     #[test]
-    fn a_different_resolution_rebuilds() {
-        assert!(should_rebuild(BOUND, (true, true), Some((90, 81))));
-        assert!(should_rebuild(BOUND, (true, true), Some((76, 107))));
+    fn a_moved_default_rebuilds_an_unpinned_direction() {
+        let moved_output = Observed {
+            default_now: Some(81),
+            ..healthy(SPEAKER, true)
+        };
+        let moved_input = Observed {
+            default_now: Some(76),
+            ..healthy(MIC, true)
+        };
+        assert!(should_rebuild(healthy(MIC, true), moved_output));
+        assert!(should_rebuild(moved_input, healthy(SPEAKER, true)));
     }
 
-    /// A configured device that no longer resolves goes through the reopen
-    /// backoff, not a silent switch to something else.
+    /// No default at all goes through the reopen backoff, which reports
+    /// it, rather than keeping a device the system no longer offers.
     #[test]
-    fn an_unresolvable_configuration_rebuilds() {
-        assert!(should_rebuild(BOUND, (true, true), None));
+    fn no_default_rebuilds_an_unpinned_direction() {
+        let gone = Observed {
+            default_now: None,
+            ..healthy(SPEAKER, true)
+        };
+        assert!(should_rebuild(healthy(MIC, true), gone));
+    }
+
+    /// A pinned name keeps its device until it dies, whatever the default
+    /// does — the watch loop never re-resolves names while VPIO's echo
+    /// reference taps are visible.
+    #[test]
+    fn a_pinned_direction_ignores_a_moved_default() {
+        let moved = Observed {
+            default_now: Some(81),
+            ..healthy(SPEAKER, false)
+        };
+        assert!(!should_rebuild(healthy(MIC, false), moved));
+        assert!(!direction_stale(SPEAKER, true, false, Some(81)));
+        // ...but still rebuilds once it dies.
+        assert!(direction_stale(SPEAKER, false, false, Some(SPEAKER)));
+    }
+
+    #[test]
+    fn a_pinned_direction_ignores_no_default() {
+        let none = Observed {
+            default_now: None,
+            ..healthy(MIC, false)
+        };
+        assert!(!should_rebuild(none, healthy(SPEAKER, false)));
+        assert!(!direction_stale(MIC, true, false, None));
+    }
+
+    /// Nothing to wait for: the teardown has already settled.
+    #[test]
+    fn a_settled_teardown_does_not_wait() {
+        let (_tx, rx) = std::sync::mpsc::channel();
+        let started = Instant::now();
+        let got = await_teardown(
+            &rx,
+            Duration::from_secs(1),
+            Duration::from_millis(50),
+            || false,
+        );
+        assert_eq!(got, Some(true));
+        assert!(started.elapsed() < Duration::from_millis(40));
+    }
+
+    /// The aggregate goes away after a few polls: settled, and no longer
+    /// than it took.
+    #[test]
+    fn a_teardown_that_settles_late_is_waited_for() {
+        let (_tx, rx) = std::sync::mpsc::channel();
+        let mut polls = 0;
+        let got = await_teardown(
+            &rx,
+            Duration::from_secs(1),
+            Duration::from_millis(5),
+            || {
+                polls += 1;
+                polls < 4
+            },
+        );
+        assert_eq!(got, Some(true));
+        assert_eq!(polls, 4);
+    }
+
+    /// Never settles: give up at the limit and report it, rather than
+    /// blocking reopen forever.
+    #[test]
+    fn a_teardown_that_never_settles_gives_up_at_the_limit() {
+        let (_tx, rx) = std::sync::mpsc::channel();
+        let started = Instant::now();
+        let got = await_teardown(
+            &rx,
+            Duration::from_millis(100),
+            Duration::from_millis(10),
+            || true,
+        );
+        assert_eq!(got, Some(false));
+        let took = started.elapsed();
+        assert!(took >= Duration::from_millis(100), "took {took:?}");
+        assert!(took < Duration::from_millis(500), "took {took:?}");
+    }
+
+    /// Dropping the backend must not wait out the settle limit.
+    #[test]
+    fn a_stop_during_the_teardown_wait_is_not_waited_out() {
+        let (tx, rx) = std::sync::mpsc::channel();
+        tx.send(Wake::Stop).unwrap();
+        let started = Instant::now();
+        let got = await_teardown(
+            &rx,
+            Duration::from_secs(5),
+            Duration::from_millis(50),
+            || true,
+        );
+        assert_eq!(got, None);
+        assert!(started.elapsed() < Duration::from_millis(200));
     }
 
     /// Review focus 2: dropping the backend mid-backoff must not wait out a
