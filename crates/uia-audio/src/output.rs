@@ -36,19 +36,21 @@ fn find_output_device_by_name(host: &cpal::Host, name: &str) -> Result<cpal::Dev
 /// for a settings UI's device picker, not for opening a stream. Matches
 /// exactly what [`find_output_device_by_name`]'s substring match and the
 /// app's own startup log line show, so a name copied from here always
-/// resolves.
+/// resolves. Repeated names appear once (see `crate::dedupe_names` for why).
 pub fn list_output_devices() -> Result<Vec<String>, AudioError> {
     let host = cpal::default_host();
     let devices = host
         .output_devices()
         .map_err(|e| AudioError::DeviceUnavailable(format!("cpal: could not list outputs: {e}")))?;
-    Ok(devices
-        .map(|d| {
-            d.description()
-                .map(|d| d.name().to_string())
-                .unwrap_or_else(|_| "<unknown device>".into())
-        })
-        .collect())
+    Ok(crate::dedupe_names(
+        devices
+            .map(|d| {
+                d.description()
+                    .map(|d| d.name().to_string())
+                    .unwrap_or_else(|_| "<unknown device>".into())
+            })
+            .collect(),
+    ))
 }
 
 /// Speaker playback over cpal, exposed as an `AudioSink`.

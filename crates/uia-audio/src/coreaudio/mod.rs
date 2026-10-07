@@ -292,6 +292,22 @@ pub fn open_voice_processing(
     ))
 }
 
+/// Names for a settings UI's input picker, straight from CoreAudio: real
+/// microphones only — not a running voice-processing unit's echo-reference
+/// taps on output devices, nor its private aggregate — each name once.
+///
+/// cpal's list cannot be used for this on macOS while voice processing runs
+/// in the same process: it shows every speaker as an input too.
+pub fn list_input_device_names() -> Result<Vec<String>, AudioError> {
+    device::list_names(Direction::Input)
+}
+
+/// Names for a settings UI's output picker: every output device except a
+/// running voice-processing unit's private aggregate, each name once.
+pub fn list_output_device_names() -> Result<Vec<String>, AudioError> {
+    device::list_names(Direction::Output)
+}
+
 /// Own the unit for the backend's lifetime: open, watch, rebuild, back off.
 ///
 /// `frames_tx` lives on this thread's stack (each unit's callbacks hold only
@@ -736,6 +752,39 @@ mod tests {
         let output = std::env::var("UIA_TEST_OUTPUT").expect("set UIA_TEST_OUTPUT");
         let opened = open_voice_processing(Some(&input), Some(&output));
         assert!(opened.is_ok(), "{:?}", opened.err().map(|e| e.to_string()));
+    }
+
+    /// While VPIO runs, CoreAudio shows every speaker as an input and adds a
+    /// private aggregate. The Settings lists must not: no aggregate, no
+    /// repeats, and no input that was not an input before the unit opened.
+    #[test]
+    #[ignore = "requires real audio devices; run manually on a Mac"]
+    fn the_device_lists_hide_voice_processing_taps_and_aggregate() {
+        let baseline = list_input_device_names().unwrap();
+        let (_source, _sink) = open_voice_processing(None, None).unwrap();
+        std::thread::sleep(Duration::from_millis(500));
+        let inputs = list_input_device_names().unwrap();
+        let outputs = list_output_device_names().unwrap();
+
+        for name in inputs.iter().chain(&outputs) {
+            assert!(
+                !name.contains("VPAUAggregateAudioDevice"),
+                "aggregate listed: {inputs:?} / {outputs:?}"
+            );
+        }
+        let unique: std::collections::HashSet<&String> = inputs.iter().collect();
+        assert_eq!(
+            unique.len(),
+            inputs.len(),
+            "repeated input names: {inputs:?}"
+        );
+        for name in &inputs {
+            assert!(
+                baseline.contains(name),
+                "{name:?} only appears as an input while VPIO runs \
+                 (baseline {baseline:?}, now {inputs:?})"
+            );
+        }
     }
 
     /// Barge-in budget: what still plays after `clear()` is one callback

@@ -10,10 +10,14 @@ use objc2_core_audio::{
     AudioObjectGetPropertyDataSize, AudioObjectID, AudioObjectPropertyAddress,
     AudioObjectPropertyScope, AudioObjectPropertySelector, AudioObjectRemovePropertyListener,
     kAudioDevicePropertyDeviceIsAlive, kAudioDevicePropertyDeviceNameCFString,
-    kAudioDevicePropertyStreamConfiguration, kAudioHardwarePropertyDefaultInputDevice,
-    kAudioHardwarePropertyDefaultOutputDevice, kAudioHardwarePropertyDevices,
-    kAudioObjectPropertyElementMain, kAudioObjectPropertyScopeGlobal,
-    kAudioObjectPropertyScopeInput, kAudioObjectPropertyScopeOutput, kAudioObjectSystemObject,
+    kAudioDevicePropertyStreamConfiguration, kAudioDevicePropertyStreams,
+    kAudioHardwarePropertyDefaultInputDevice, kAudioHardwarePropertyDefaultOutputDevice,
+    kAudioHardwarePropertyDevices, kAudioObjectPropertyElementMain,
+    kAudioObjectPropertyScopeGlobal, kAudioObjectPropertyScopeInput,
+    kAudioObjectPropertyScopeOutput, kAudioObjectSystemObject, kAudioStreamPropertyTerminalType,
+    kAudioStreamTerminalTypeHeadphones, kAudioStreamTerminalTypeLFESpeaker,
+    kAudioStreamTerminalTypeReceiverSpeaker, kAudioStreamTerminalTypeSpeaker,
+    kAudioStreamTerminalTypeUnknown,
 };
 use objc2_core_audio_types::{AudioBuffer, AudioBufferList};
 use objc2_core_foundation::{CFRetained, CFString};
@@ -132,16 +136,17 @@ fn get<T: Copy>(
     if status == 0 { Ok(value) } else { Err(status) }
 }
 
-fn device_ids() -> Result<Vec<AudioDeviceID>, AudioError> {
-    let addr = address(
-        kAudioHardwarePropertyDevices,
-        kAudioObjectPropertyScopeGlobal,
-    );
+/// Read a variable-length property holding an array of object IDs (devices,
+/// streams). `Err` carries the OSStatus.
+fn get_ids(
+    object: AudioObjectID,
+    addr: AudioObjectPropertyAddress,
+) -> Result<Vec<AudioObjectID>, i32> {
     let mut size = 0u32;
     // SAFETY: `addr` and `size` are valid for the call.
     let status = unsafe {
         AudioObjectGetPropertyDataSize(
-            SYSTEM,
+            object,
             NonNull::from(&addr),
             0,
             null(),
@@ -149,18 +154,18 @@ fn device_ids() -> Result<Vec<AudioDeviceID>, AudioError> {
         )
     };
     if status != 0 {
-        return Err(AudioError::DeviceUnavailable(format!(
-            "coreaudio: could not list devices (OSStatus {status})"
-        )));
+        return Err(status);
     }
-    let mut ids = vec![0 as AudioDeviceID; size as usize / size_of::<AudioDeviceID>()];
+    let mut ids = vec![0 as AudioObjectID; size as usize / size_of::<AudioObjectID>()];
     if ids.is_empty() {
         return Ok(ids);
     }
+    // Never let CoreAudio write more than `ids` holds.
+    let mut size = (ids.len() * size_of::<AudioObjectID>()) as u32;
     // SAFETY: `ids` has room for exactly `size` bytes.
     let status = unsafe {
         AudioObjectGetPropertyData(
-            SYSTEM,
+            object,
             NonNull::from(&addr),
             0,
             null(),
@@ -169,13 +174,102 @@ fn device_ids() -> Result<Vec<AudioDeviceID>, AudioError> {
         )
     };
     if status != 0 {
-        return Err(AudioError::DeviceUnavailable(format!(
-            "coreaudio: could not list devices (OSStatus {status})"
-        )));
+        return Err(status);
     }
     // The list can shrink between the two calls.
-    ids.truncate(size as usize / size_of::<AudioDeviceID>());
+    ids.truncate(size as usize / size_of::<AudioObjectID>());
     Ok(ids)
+}
+
+fn device_ids() -> Result<Vec<AudioDeviceID>, AudioError> {
+    get_ids(
+        SYSTEM,
+        address(
+            kAudioHardwarePropertyDevices,
+            kAudioObjectPropertyScopeGlobal,
+        ),
+    )
+    .map_err(|status| {
+        AudioError::DeviceUnavailable(format!(
+            "coreaudio: could not list devices (OSStatus {status})"
+        ))
+    })
+}
+
+/// A device's input streams; empty if it has none or they cannot be read.
+fn input_stream_ids(id: AudioDeviceID) -> Vec<AudioObjectID> {
+    get_ids(
+        id,
+        address(kAudioDevicePropertyStreams, kAudioObjectPropertyScopeInput),
+    )
+    .unwrap_or_default()
+}
+
+/// What a stream says it is connected to (`kAudioStreamTerminalType*`, or a
+/// USB terminal type). Unreadable reads as 0, "unknown", like a stream that
+/// reports nothing.
+fn terminal_type(stream: AudioObjectID) -> u32 {
+    get(
+        stream,
+        address(
+            kAudioStreamPropertyTerminalType,
+            kAudioObjectPropertyScopeGlobal,
+        ),
+        kAudioStreamTerminalTypeUnknown,
+    )
+    .unwrap_or(kAudioStreamTerminalTypeUnknown)
+}
+
+/// Whether an input stream is one of a running Voice Processing IO unit's
+/// echo-reference taps rather than a microphone.
+///
+/// While VPIO runs in this process, every output device gains input streams
+/// carrying what it plays. Measured: taps report the output terminal they
+/// mirror ('spkr', 'hdph') or 0; real mics report 'micr', 'hmic' or a USB
+/// input terminal such as 0x201. Only a device that has outputs can carry a
+/// tap, so on an input-only device nothing is one — which is what keeps a
+/// real mic that reports 0 listed.
+fn is_echo_reference_tap(terminal_type: u32, device_has_outputs: bool) -> bool {
+    const OUTPUT_TERMINALS: [u32; 5] = [
+        kAudioStreamTerminalTypeUnknown,
+        kAudioStreamTerminalTypeSpeaker,
+        kAudioStreamTerminalTypeHeadphones,
+        kAudioStreamTerminalTypeLFESpeaker,
+        kAudioStreamTerminalTypeReceiverSpeaker,
+    ];
+    // USB Audio Class output terminal types.
+    const USB_OUTPUT_TERMINALS: std::ops::RangeInclusive<u32> = 0x300..=0x3FF;
+    device_has_outputs
+        && (OUTPUT_TERMINALS.contains(&terminal_type)
+            || USB_OUTPUT_TERMINALS.contains(&terminal_type))
+}
+
+/// Whether `id` has at least one input stream that is not an echo-reference
+/// tap, i.e. is a microphone a user could pick.
+fn has_real_input(id: AudioDeviceID) -> bool {
+    let has_outputs = channel_count(id, Direction::Output) > 0;
+    input_stream_ids(id)
+        .into_iter()
+        .any(|stream| !is_echo_reference_tap(terminal_type(stream), has_outputs))
+}
+
+/// Names for a settings UI's `dir` device picker: no echo-reference taps
+/// (inputs), no VPIO private aggregate, each name once, in CoreAudio's order.
+///
+/// Only for listing. Opening resolves against the unfiltered list (see
+/// `resolve`), after the supervisor has waited for any torn-down unit's taps
+/// to go away.
+pub(crate) fn list_names(dir: Direction) -> Result<Vec<String>, AudioError> {
+    let names = device_ids()?
+        .into_iter()
+        .filter(|&id| match dir {
+            Direction::Input => has_real_input(id),
+            Direction::Output => channel_count(id, Direction::Output) > 0,
+        })
+        .map(device_name)
+        .filter(|name| !is_vpio_private(name))
+        .collect();
+    Ok(crate::dedupe_names(names))
 }
 
 /// Total channels a device has in `dir`; 0 means it is not a device of that
@@ -491,6 +585,57 @@ mod tests {
         assert!(!is_vpio_private("MacBook Pro Speakers"));
         // A prefix, not a substring: a user's own aggregate is kept.
         assert!(!is_vpio_private("My VPAUAggregateAudioDevice"));
+    }
+
+    fn code(c: &[u8; 4]) -> u32 {
+        u32::from_be_bytes(*c)
+    }
+
+    /// Measured on real mics with VPIO running: C920 and Pebble mic report
+    /// 'micr', the Jabra mic 'hmic', the MacBook mic 0x201 (USB-style
+    /// "microphone"). Never taps, even on a device that also has outputs.
+    #[test]
+    fn real_microphones_are_not_taps() {
+        for t in [code(b"micr"), code(b"hmic"), 0x201] {
+            assert!(!is_echo_reference_tap(t, true), "{t:#x}");
+        }
+    }
+
+    /// Measured taps: Pebble speaker 'spkr', Jabra speaker 'hdph', Odyssey
+    /// HDMI and MacBook speakers 0.
+    #[test]
+    fn measured_speaker_taps_are_taps() {
+        for t in [code(b"spkr"), code(b"hdph"), 0] {
+            assert!(is_echo_reference_tap(t, true), "{t:#x}");
+        }
+    }
+
+    /// The rest of the output-terminal family: LFE, receiver speaker, and
+    /// USB output terminals (0x300..=0x3FF).
+    #[test]
+    fn other_output_terminals_are_taps() {
+        for t in [code(b"lfes"), code(b"rspk"), 0x300, 0x301, 0x3FF] {
+            assert!(is_echo_reference_tap(t, true), "{t:#x}");
+        }
+        assert!(!is_echo_reference_tap(0x400, true));
+        assert!(!is_echo_reference_tap(0x2FF, true));
+    }
+
+    /// An input-only device has no speaker for VPIO to tap, so whatever its
+    /// stream calls itself — even 0 — it is a real input.
+    #[test]
+    fn nothing_on_an_input_only_device_is_a_tap() {
+        for t in [
+            code(b"micr"),
+            code(b"hmic"),
+            0x201,
+            code(b"spkr"),
+            code(b"hdph"),
+            0,
+            0x301,
+        ] {
+            assert!(!is_echo_reference_tap(t, false), "{t:#x}");
+        }
     }
 
     /// Aggregate and multi-stream USB devices report several buffers; the

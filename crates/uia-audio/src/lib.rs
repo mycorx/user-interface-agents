@@ -40,6 +40,24 @@ pub fn device_name_matches(device_name: &str, wanted: &str) -> bool {
     device_name.to_lowercase().contains(&wanted.to_lowercase())
 }
 
+/// `names` with repeats removed, keeping each name's first position.
+///
+/// Every device list a settings UI gets goes through this. Devices are
+/// selected by name (see [`device_name_matches`]), so a second device with an
+/// identical name could never be selected anyway, and the Settings UI keys
+/// its options by name — a repeat makes it throw and show no devices at all.
+#[cfg(any(
+    feature = "cpal-io",
+    all(target_os = "macos", feature = "coreaudio-aec")
+))]
+pub(crate) fn dedupe_names(names: Vec<String>) -> Vec<String> {
+    let mut seen = std::collections::HashSet::new();
+    names
+        .into_iter()
+        .filter(|name| seen.insert(name.clone()))
+        .collect()
+}
+
 #[cfg(test)]
 mod device_name_tests {
     use super::device_name_matches;
@@ -69,5 +87,40 @@ mod device_name_tests {
     #[test]
     fn an_unrelated_name_does_not_match() {
         assert!(!device_name_matches("Some Other Mic", "HD Pro Webcam C920"));
+    }
+}
+
+#[cfg(all(
+    test,
+    any(
+        feature = "cpal-io",
+        all(target_os = "macos", feature = "coreaudio-aec")
+    )
+))]
+mod dedupe_tests {
+    use super::dedupe_names;
+
+    fn names(v: &[&str]) -> Vec<String> {
+        v.iter().map(|s| s.to_string()).collect()
+    }
+
+    #[test]
+    fn duplicates_are_dropped_keeping_first_seen_order() {
+        assert_eq!(
+            dedupe_names(names(&[
+                "Creative Pebble X",
+                "Jabra",
+                "Creative Pebble X",
+                "C920",
+                "Jabra",
+            ])),
+            names(&["Creative Pebble X", "Jabra", "C920"])
+        );
+    }
+
+    #[test]
+    fn unique_and_empty_lists_are_unchanged() {
+        assert_eq!(dedupe_names(names(&["B", "A"])), names(&["B", "A"]));
+        assert_eq!(dedupe_names(Vec::new()), Vec::<String>::new());
     }
 }
