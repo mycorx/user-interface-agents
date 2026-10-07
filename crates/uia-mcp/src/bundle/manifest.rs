@@ -114,11 +114,27 @@ pub struct McpbPlatformOverride {
 }
 
 /// What the bundle says to run, with every template already substituted.
-#[derive(Debug, PartialEq, Clone)]
+#[derive(PartialEq, Clone)]
 pub struct ResolvedLaunch {
     pub command: String,
     pub args: Vec<String>,
     pub env: Vec<(String, String)>,
+}
+
+/// Hand-written ON PURPOSE: after `apply_user_config` the args and env hold
+/// substituted setting values, which can be keyring secrets. Prints the
+/// command, the env variable names and the argument count only.
+impl std::fmt::Debug for ResolvedLaunch {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("ResolvedLaunch")
+            .field("command", &self.command)
+            .field("args", &format_args!("<{} redacted>", self.args.len()))
+            .field(
+                "env",
+                &self.env.iter().map(|(k, _)| k.as_str()).collect::<Vec<_>>(),
+            )
+            .finish()
+    }
 }
 
 /// MCPB platform names are Node's, not Rust's: `win32`/`darwin`/`linux`.
@@ -428,7 +444,8 @@ mod tests {
         assert!(matches!(current_platform(), "win32" | "darwin" | "linux"));
     }
 
-    /// The real manifest shipped by the `mymy-assistant` bundle.
+    /// Modeled on the `mymy-assistant` bundle's manifest, with extra fields
+    /// (`api_token`, `retries`) added to exercise more setting types.
     const USER_CONFIG_MANIFEST: &str = r#"{
         "manifest_version": "0.3",
         "name": "mymy-assistant",
@@ -454,6 +471,21 @@ mod tests {
             "retries": { "type": "number", "min": 0, "max": 5, "default": 2, "future_key": 1 }
         }
     }"#;
+
+    /// Substituted values can be keyring secrets, in env or in args.
+    #[test]
+    fn a_resolved_launchs_debug_prints_neither_env_values_nor_args() {
+        let launch = ResolvedLaunch {
+            command: "/b/server".into(),
+            args: vec!["--token=sk-secret-arg".into()],
+            env: vec![("API_TOKEN".into(), "sk-secret-env".into())],
+        };
+        let printed = format!("{launch:?}");
+        assert!(printed.contains("/b/server"), "{printed}");
+        assert!(printed.contains("API_TOKEN"), "{printed}");
+        assert!(!printed.contains("sk-secret-env"), "{printed}");
+        assert!(!printed.contains("sk-secret-arg"), "{printed}");
+    }
 
     #[test]
     fn user_config_fields_parse_with_their_declared_attributes() {

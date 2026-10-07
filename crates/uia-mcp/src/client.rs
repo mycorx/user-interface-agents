@@ -63,16 +63,22 @@ const REDACTED: &str = "<redacted>";
 /// message, and this impl is what enforces that for callers who never thought
 /// about it.
 ///
-/// `Stdio` prints in full: its `env` comes from a bundle manifest that shipped
-/// in the clear, so there is nothing there to protect.
+/// `Stdio` prints the command, the env variable NAMES (values redacted) and
+/// only the argument COUNT: a local server's env and args can carry keyring
+/// secrets substituted from its `${user_config.*}` settings.
 impl std::fmt::Debug for McpServerConfig {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
             McpServerConfig::Stdio { command, args, env } => f
                 .debug_struct("Stdio")
                 .field("command", command)
-                .field("args", args)
-                .field("env", env)
+                .field("args", &format_args!("<{} redacted>", args.len()))
+                .field(
+                    "env",
+                    &env.iter()
+                        .map(|(name, _)| (name.as_str(), REDACTED))
+                        .collect::<Vec<_>>(),
+                )
                 .finish(),
             McpServerConfig::Http {
                 url,
@@ -444,21 +450,21 @@ mod tests {
         assert!(printed.contains(REDACTED), "{printed}");
     }
 
-    /// The other variant stays fully printable: a bundle manifest's `env`
-    /// shipped in the clear, so redacting it would cost debuggability for no
-    /// secrecy gain.
+    /// A stdio server's env can carry a keyring secret (a substituted
+    /// `${user_config.*}` value), so only the variable NAMES are printed.
     #[test]
-    fn a_stdio_configs_env_is_still_printed_in_full() {
+    fn a_stdio_configs_env_values_are_never_printed() {
         let cfg = McpServerConfig::Stdio {
             command: "uvx".into(),
             args: vec!["mcp-server-time".into()],
-            env: vec![("TZ".into(), "UTC".into())],
+            env: vec![("API_TOKEN".into(), "sk-super-secret-value".into())],
         };
         let printed = format!("{cfg:?}");
         assert!(printed.contains("uvx"), "{printed}");
-        assert!(printed.contains("mcp-server-time"), "{printed}");
-        assert!(printed.contains("TZ"), "{printed}");
-        assert!(printed.contains("UTC"), "{printed}");
+        assert!(!printed.contains("mcp-server-time"), "{printed}");
+        assert!(printed.contains("API_TOKEN"), "{printed}");
+        assert!(!printed.contains("sk-super-secret-value"), "{printed}");
+        assert!(printed.contains(REDACTED), "{printed}");
     }
 
     /// A remote server's auth header is the whole reason a private MCP
