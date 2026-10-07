@@ -45,9 +45,10 @@ stays strict.
 
 ### 2. Substitution — `uia-mcp`
 
-A new `apply_user_config(launch, fields, values)` takes the user's values
+A new `apply_user_config(launch, fields, values, vars)` takes the user's values
 (`BTreeMap<String, String>`) and replaces `${user_config.<key>}` in `args` and
-`env` at launch. It runs after `validate_bundle`; `resolve_launch` and
+`env` at launch; path variables (`vars`) expand first, in defaults, `args` and
+`env` values. It runs after `validate_bundle`; `resolve_launch` and
 `validate_bundle` are unchanged in how they treat templates.
 
 `${user_config.*}` in the launch `command` is unsupported and refused at
@@ -56,8 +57,9 @@ executable runs.
 
 Precedence: stored value, then manifest default, then an error when the field
 is `required`, else an empty string. Booleans render as `"true"`/`"false"`,
-numbers in their plain decimal form. Defaults are shown in the form but only stored when the user changes them. A `multiple` field is parsed but
-substituted as its first value only; joining several values is out of scope.
+numbers in their plain decimal form. Defaults are shown in the form but only
+stored when the user changes them. A `multiple` field is parsed but substituted
+as its first value only; joining several values is out of scope.
 
 Path variables: `${HOME}`, `${DESKTOP}`, `${DOCUMENTS}`, `${DOWNLOADS}`,
 `${/}` and `${pathSeparator}` expand in manifest-authored text only — field
@@ -126,9 +128,10 @@ returned.
 In a local server's expanded Details panel, a **Configuration** section
 appears only when the manifest declares fields. A field renders as a toggle
 when it is `boolean`, or when it is a non-sensitive, non-`multiple` `string`
-whose loaded default or saved value is exactly `true` or `false` (decided from
-the loaded field, never the live draft; the stored value stays that string, and
-an unset toggle with no default saves as `"false"`). Other `string` fields and
+whose declared default is exactly `true` or `false` (decided from the loaded
+field, never the live draft; the stored value stays that string). A stored
+value alone does not make a toggle, and a string setting with no default stays a
+text box. Other `string` fields and
 `number` render text inputs (`sensitive` renders a password input with a "set"
 indicator); `number` is plain text with a decimal keypad hint, no `min`/`max`
 attributes, and a save with a non-numeric entry is refused with an inline
@@ -141,7 +144,7 @@ nothing (and a previously stored value is cleared). An empty sensitive field
 means "keep". Saving shows the same restart-required notice the rest of the tab
 uses; a stale note is dropped when a row is expanded or collapsed.
 `mymy-assistant` declares `enable_system_toasts` as a `string`; it renders as a
-toggle when its default or saved value is `true`/`false`, and as a text input
+toggle when its declared default is `true`/`false`, and as a text input
 otherwise.
 
 ## Error handling
