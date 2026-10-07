@@ -9,20 +9,31 @@ tag is easy to push by accident and a published release is not easy to retract.
 | Platform | Runner | Artifact |
 |---|---|---|
 | Windows | `windows-latest` (GitHub-hosted) | `.msi` |
-| Linux | `mycorx-ubuntu` (self-hosted) | `.deb` |
+| Linux | `ubuntu-latest` (GitHub-hosted) | `.deb` |
+| macOS | — (local build only, for now) | none |
 
 Windows needs a GitHub-hosted runner: an MSI is built by WiX, which only runs
 on Windows. While this repository is private those minutes bill at 2×; that
 stops mattering when it goes public.
 
-macOS is not built by this workflow yet; a CI job is planned. For now it is a
-local build: `scripts/build-macos-package.sh` produces an unsigned `.app` and
-`.dmg` (see the header of that script), which is enough for anyone building from
-this public repository. Publishing a downloadable macOS release is the part that
-needs an Apple Developer ID certificate — without one, Gatekeeper quarantines a
+macOS is not built by this workflow yet. For now it is a local build:
+`scripts/build-macos-package.sh` produces an unsigned `.app` and `.dmg` (see the
+header of that script), which is enough for anyone building from this public
+repository. Publishing a downloadable macOS release is the part that needs an
+Apple Developer ID certificate — without one, Gatekeeper quarantines a
 downloaded `.app` and users cannot open it by double-clicking, which is worse
 than offering nothing. So there is deliberately no macOS artifact on the
-releases page until that is set up.
+releases page until that is set up. Until then the temporary
+`macos-local-build-note` job builds nothing and only leaves a notice and a
+run-summary note pointing at the script.
+
+The signed build is already written: the `macos` job at the end of
+`.github/workflows/release.yaml` is commented out and lists what it needs —
+the entitlement below, and the `APPLE_*` repository secrets (certificate,
+signing identity, notarization credentials). It builds one universal `.app` +
+`.dmg` on `macos-latest` and fails the run unless the result is signed,
+carries the microphone entitlement, passes Gatekeeper and is notarized. To
+switch it on, uncomment it and delete `macos-local-build-note`.
 
 **Before a signed macOS release, do not forget the microphone entitlement.**
 `crates/uia-app/Info.plist` already carries `NSMicrophoneUsageDescription`, which
@@ -85,14 +96,15 @@ To check a version bump before tagging anything:
 
 ## Dry runs
 
-Run the workflow manually (**Actions → release → Run workflow**) to build both
-platforms without touching a release. The installers land as Actions artifacts
-(`uia-linux`, `uia-windows`), which is how you get a build to a tester without
+Run the workflow manually (**Actions → release → Run workflow**) to build every
+platform without touching a release. The installers land as Actions artifacts
+(`uia-linux`, `uia-windows`, and `uia-macos` once that job is enabled),
+which is how you get a build to a tester without
 committing to a version number.
 
 ## Installers are unsigned
 
-Neither installer is code-signed, so:
+Neither published installer is code-signed, so:
 
 - **Windows** shows a SmartScreen "unknown publisher" warning that the user
   must click through (More info → Run anyway).
