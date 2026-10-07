@@ -391,6 +391,18 @@ pub fn mcp_targets(
         // resolve.
         match uia_mcp::bundle::validate_bundle(&parsed, uia_mcp::bundle::current_platform(), &dir) {
             Ok(launch) => {
+                // A bundle installed before install restored unix modes sits
+                // on disk 0644 and would fail to spawn with EACCES. A chmod
+                // failure must not skip the server: the spawn then reports
+                // the real error. Never log setting values here.
+                if let Err(e) =
+                    uia_mcp::bundle::ensure_executable(std::path::Path::new(&launch.command))
+                {
+                    eprintln!(
+                        "mcp: local server {:?}: could not make its command executable: {e}",
+                        server.name
+                    );
+                }
                 let values =
                     crate::mcp_registry::local_config_values(server, &parsed.user_config, secrets);
                 let launch = match uia_mcp::bundle::apply_user_config(
@@ -1032,6 +1044,26 @@ mod tests {
         };
         assert!(env.contains(&("TOASTS".into(), "false".into())), "{env:?}");
         assert!(env.contains(&("TOKEN".into(), "tok".into())), "{env:?}");
+    }
+
+    /// A bundle installed before install restored unix modes is 0644 on disk
+    /// and would fail to spawn with EACCES.
+    #[cfg(unix)]
+    #[test]
+    fn a_non_executable_bundle_binary_is_made_executable_at_launch() {
+        use std::os::unix::fs::PermissionsExt;
+        let (reg, dir) = user_config_fixture("exec");
+        let bin = dir.join("mymy/server/mymy");
+        std::fs::set_permissions(&bin, std::fs::Permissions::from_mode(0o644)).unwrap();
+        let secrets = crate::secrets::FakeSecretStore::new();
+        secrets.set("mcp-config.mymy.token", "tok").unwrap();
+
+        let plan = mcp_targets(&reg, &dir, None, &secrets);
+        let mode = std::fs::metadata(&bin).unwrap().permissions().mode();
+        std::fs::remove_dir_all(&dir).ok();
+
+        assert_eq!(plan.targets.len(), 1, "{:?}", plan.skipped);
+        assert_ne!(mode & 0o111, 0, "mode was {mode:o}");
     }
 
     #[test]
