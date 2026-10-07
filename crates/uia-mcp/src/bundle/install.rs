@@ -63,7 +63,42 @@ fn extract_to(source: &Path, staging: &Path) -> Result<(), BundleError> {
         }
         let mut sink = std::fs::File::create(&out)?;
         std::io::copy(&mut entry, &mut sink)?;
+        drop(sink);
+        restore_mode(&out, entry.unix_mode())?;
     }
+    Ok(())
+}
+
+/// `File::create` gives 0644, so without this every binary in the archive
+/// loses its execute bit and fails at spawn with EACCES. Only the permission
+/// bits come back — setuid/setgid/sticky from an untrusted archive do not.
+#[cfg(unix)]
+fn restore_mode(path: &Path, mode: Option<u32>) -> std::io::Result<()> {
+    use std::os::unix::fs::PermissionsExt;
+    match mode {
+        Some(mode) => std::fs::set_permissions(path, std::fs::Permissions::from_mode(mode & 0o777)),
+        None => Ok(()),
+    }
+}
+
+#[cfg(not(unix))]
+fn restore_mode(_path: &Path, _mode: Option<u32>) -> std::io::Result<()> {
+    Ok(())
+}
+
+/// An archive zipped where unix modes don't exist records none, so the
+/// command the manifest names — already validated to be a file inside the
+/// bundle — is made runnable explicitly.
+#[cfg(unix)]
+fn make_executable(path: &Path) -> std::io::Result<()> {
+    use std::os::unix::fs::PermissionsExt;
+    let mut perms = std::fs::metadata(path)?.permissions();
+    perms.set_mode(perms.mode() | 0o111);
+    std::fs::set_permissions(path, perms)
+}
+
+#[cfg(not(unix))]
+fn make_executable(_path: &Path) -> std::io::Result<()> {
     Ok(())
 }
 
@@ -133,6 +168,11 @@ pub fn install_bundle(
             return Err(e);
         }
     };
+
+    if let Err(e) = make_executable(Path::new(&launch.command)) {
+        std::fs::remove_dir_all(&final_dir).ok();
+        return Err(BundleError::Io(e));
+    }
 
     Ok(InstalledBundle {
         name: manifest.name,
@@ -206,6 +246,58 @@ mod tests {
         assert_eq!(version.as_deref(), Some("1.4.0"));
         assert!(landed, "the bundle's files did not land under <dest>/clock");
         assert!(command_ok, "got {}", installed.launch.command);
+    }
+
+    /// `File::create` yields 0644, so a binary that came out of the zip
+    /// without its execute bit fails at spawn with EACCES ("Permission denied
+    /// (os error 13)") — the server then shows as Failed before it ever runs.
+    #[cfg(unix)]
+    #[test]
+    fn an_executable_in_the_archive_stays_executable_once_installed() {
+        use std::os::unix::fs::PermissionsExt;
+        let src =
+            std::env::temp_dir().join(format!("uia-mcpb-src-{}-exec.mcpb", std::process::id()));
+        {
+            let mut zip = zip::ZipWriter::new(std::fs::File::create(&src).unwrap());
+            let plain: zip::write::FileOptions<'_, ()> = zip::write::FileOptions::default();
+            zip.start_file("manifest.json", plain).unwrap();
+            zip.write_all(GOOD_MANIFEST.as_bytes()).unwrap();
+            zip.start_file("server/clock", plain.unix_permissions(0o755))
+                .unwrap();
+            zip.write_all(ELF).unwrap();
+            zip.finish().unwrap();
+        }
+        let dest = local_servers_dir("exec");
+
+        let installed = install_bundle(&src, &dest).unwrap();
+
+        let mode = std::fs::metadata(&installed.launch.command)
+            .unwrap()
+            .permissions()
+            .mode();
+        std::fs::remove_file(&src).ok();
+        std::fs::remove_dir_all(&dest).ok();
+        assert_eq!(mode & 0o111, 0o111, "mode was {mode:o}");
+    }
+
+    /// An archive built where unix modes don't exist (zipped on Windows) names
+    /// no mode at all. The approved launch command must still be runnable.
+    #[cfg(unix)]
+    #[test]
+    fn the_launch_command_is_executable_even_when_the_archive_records_no_mode() {
+        use std::os::unix::fs::PermissionsExt;
+        let src = write_mcpb("nomode", GOOD_MANIFEST, &[("server/clock", ELF)]);
+        let dest = local_servers_dir("nomode");
+
+        let installed = install_bundle(&src, &dest).unwrap();
+
+        let mode = std::fs::metadata(&installed.launch.command)
+            .unwrap()
+            .permissions()
+            .mode();
+        std::fs::remove_file(&src).ok();
+        std::fs::remove_dir_all(&dest).ok();
+        assert_eq!(mode & 0o111, 0o111, "mode was {mode:o}");
     }
 
     /// The install must be all-or-nothing: a half-extracted rejected bundle
