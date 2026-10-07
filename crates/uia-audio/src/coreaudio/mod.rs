@@ -37,7 +37,7 @@ pub use render::CoreAudioSink;
 
 use crate::backoff::reopen_delay_ms;
 use device::{DeviceInfo, Direction, Listeners};
-use rate::{FULL_VOICE_RATE_HZ, RateGuard};
+use rate::{FULL_VOICE_RATE_HZ, RaiseLog, RateGuard};
 use std::sync::mpsc::{Receiver, RecvTimeoutError, Sender};
 use std::sync::{Arc, Mutex, PoisonError};
 use std::thread::JoinHandle;
@@ -377,8 +377,9 @@ fn supervise(
     // Whether the teardown wait has already been reported unsettled since
     // the last successful open.
     let mut settle_logged = false;
-    // Devices whose rate could not be raised, each reported once.
-    let mut rate_refused = Vec::new();
+    // What has been said about raising device rates, so a long outage does
+    // not repeat it per attempt.
+    let mut raise_log = RaiseLog::default();
 
     loop {
         // Before every resolve, the first one included: a previous backend in
@@ -409,7 +410,7 @@ fn supervise(
             Ok((input, output)) => {
                 // Raised after resolving and before opening: VPIO picks its
                 // processing rate from the devices' rates when it opens.
-                let Some(rates) = RateGuard::raise(&wake, &[&input, &output], &mut rate_refused)
+                let Some(rates) = RateGuard::raise(&wake, &[&input, &output], &mut raise_log)
                 else {
                     return;
                 };
@@ -478,6 +479,7 @@ fn supervise(
         attempt = 0;
         loss_logged = false;
         settle_logged = false;
+        raise_log.opened();
 
         loop {
             if !wait_or_stop(&wake, WATCH_INTERVAL) {

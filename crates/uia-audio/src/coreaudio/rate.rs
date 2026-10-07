@@ -14,12 +14,16 @@ use super::device::{self, DeviceInfo};
 use super::{Wake, wait_while};
 use objc2_core_audio::AudioDeviceID;
 use std::sync::mpsc::Receiver;
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
 /// How long to wait for a raised rate to read back before opening anyway.
 const RATE_SETTLE_LIMIT: Duration = Duration::from_millis(500);
-/// How often that wait re-checks.
+/// How often that wait (and the restore wait) re-checks.
 const RATE_SETTLE_POLL: Duration = Duration::from_millis(50);
+/// How long a restore may take to read back. CoreAudio applies a rate change
+/// asynchronously: measured, a C920 put back from 32 kHz still read 32 kHz
+/// right after the set and 16 kHz about 1 s later.
+const RESTORE_SETTLE_LIMIT: Duration = Duration::from_secs(1);
 
 /// The processing rate at and above which the assistant loses nothing: the
 /// engine's voice arrives as 24 kHz PCM (OpenAI Realtime), so it carries at
@@ -55,6 +59,55 @@ fn reads_back(id: AudioDeviceID, rate: f64) -> bool {
     device::nominal_rate(id).is_some_and(|now| (now - rate).abs() < 0.5)
 }
 
+/// Call `done` at most every `poll` until it returns true or `limit` passes;
+/// true if it did. Not Stop-aware: only for the bounded restore wait on
+/// drop, when the backend is ending or about to reopen anyway.
+fn poll_until(limit: Duration, poll: Duration, mut done: impl FnMut() -> bool) -> bool {
+    let deadline = Instant::now() + limit;
+    loop {
+        if done() {
+            return true;
+        }
+        let left = deadline.saturating_duration_since(Instant::now());
+        if left.is_zero() {
+            return false;
+        }
+        std::thread::sleep(poll.min(left));
+    }
+}
+
+/// What has already been logged about raising, so a long outage — devices
+/// present, but the unit failing to open on every retry — logs each thing
+/// once rather than per attempt. The supervisor keeps one across rebuilds.
+#[derive(Default)]
+pub(super) struct RaiseLog {
+    /// Devices whose raise was reported since the last successful open.
+    raised: Vec<AudioDeviceID>,
+    /// Devices reported as not reaching their raised rate in time, since
+    /// the last successful open.
+    unsettled: Vec<AudioDeviceID>,
+    /// Devices that refused a raise; reported once for the backend's life.
+    refused: Vec<AudioDeviceID>,
+}
+
+impl RaiseLog {
+    /// A unit opened: report the next raise again (e.g. after a rebuild).
+    pub(super) fn opened(&mut self) {
+        self.raised.clear();
+        self.unsettled.clear();
+    }
+}
+
+/// Record `id` in `logged`; true the first time, i.e. when to log.
+fn first_time(logged: &mut Vec<AudioDeviceID>, id: AudioDeviceID) -> bool {
+    if logged.contains(&id) {
+        false
+    } else {
+        logged.push(id);
+        true
+    }
+}
+
 /// One device this guard raised.
 struct Raised {
     id: AudioDeviceID,
@@ -81,13 +134,14 @@ impl RateGuard {
     /// rates to read back. Opening goes ahead whatever they read.
     ///
     /// A device that refuses is not fatal: it is logged once per device ID
-    /// (tracked in `refused`, which the caller keeps across rebuilds) and the
-    /// unit opens at the slower rate. `None` means a stop arrived; anything
-    /// already raised has been restored by the time it returns.
+    /// for the backend's life and the unit opens at the slower rate. Raises
+    /// and slow read-backs are logged once per device until the next
+    /// successful open (see [`RaiseLog`]). `None` means a stop arrived;
+    /// anything already raised has been restored by the time it returns.
     pub(super) fn raise(
         wake: &Receiver<Wake>,
         devices: &[&DeviceInfo],
-        refused: &mut Vec<AudioDeviceID>,
+        log: &mut RaiseLog,
     ) -> Option<Self> {
         let mut guard = Self { raised: Vec::new() };
         let mut seen: Vec<AudioDeviceID> = Vec::new();
@@ -104,11 +158,13 @@ impl RateGuard {
             };
             match device::set_nominal_rate(device.id, target) {
                 Ok(()) => {
-                    eprintln!(
-                        "uia-audio: coreaudio raised {:?} from {original} Hz to {target} Hz \
-                         for voice processing (restored on release)",
-                        device.name
-                    );
+                    if first_time(&mut log.raised, device.id) {
+                        eprintln!(
+                            "uia-audio: coreaudio raised {:?} from {original} Hz to {target} Hz \
+                             for voice processing (restored on release)",
+                            device.name
+                        );
+                    }
                     guard.raised.push(Raised {
                         id: device.id,
                         name: device.name.clone(),
@@ -117,8 +173,7 @@ impl RateGuard {
                     });
                 }
                 Err(status) => {
-                    if !refused.contains(&device.id) {
-                        refused.push(device.id);
+                    if first_time(&mut log.refused, device.id) {
                         eprintln!(
                             "uia-audio: coreaudio could not raise {:?} from {original} Hz to \
                              {target} Hz ({}); voice processing will run at the slower rate",
@@ -133,7 +188,19 @@ impl RateGuard {
             return Some(guard);
         }
         let pending = || guard.raised.iter().any(|r| !reads_back(r.id, r.target));
-        wait_while(wake, RATE_SETTLE_LIMIT, RATE_SETTLE_POLL, pending)?;
+        if !wait_while(wake, RATE_SETTLE_LIMIT, RATE_SETTLE_POLL, pending)? {
+            for r in &guard.raised {
+                if !reads_back(r.id, r.target) && first_time(&mut log.unsettled, r.id) {
+                    eprintln!(
+                        "uia-audio: coreaudio {:?} did not reach {} Hz within {} ms; \
+                         opening anyway",
+                        r.name,
+                        r.target,
+                        RATE_SETTLE_LIMIT.as_millis()
+                    );
+                }
+            }
+        }
         Some(guard)
     }
 }
@@ -142,26 +209,92 @@ impl Drop for RateGuard {
     /// Put each raised device back — unless it reads neither the rate we set
     /// nor (our change still in flight, e.g. a stop during the settle wait)
     /// its original, which means it is gone or someone else changed it since.
+    ///
+    /// Then waits (at most `RESTORE_SETTLE_LIMIT`) for the restores to read
+    /// back: CoreAudio applies them late, and the next `raise` must not read
+    /// the stale raised rate, decide there is nothing to do, and then have
+    /// the late restore drop the device under the new unit.
     fn drop(&mut self) {
+        let mut restored: Vec<&Raised> = Vec::new();
         for r in &self.raised {
             if !reads_back(r.id, r.target) && !reads_back(r.id, r.original) {
                 continue;
             }
-            if let Err(status) = device::set_nominal_rate(r.id, r.original) {
-                eprintln!(
+            match device::set_nominal_rate(r.id, r.original) {
+                Ok(()) => restored.push(r),
+                Err(status) => eprintln!(
                     "uia-audio: coreaudio could not restore {:?} to {} Hz ({})",
                     r.name,
                     r.original,
                     super::unit::describe_status(status)
-                );
+                ),
             }
         }
+        if restored.is_empty() {
+            return;
+        }
+        // A device that has gone away has nothing left to wait for.
+        poll_until(RESTORE_SETTLE_LIMIT, RATE_SETTLE_POLL, || {
+            restored.iter().all(|r| {
+                device::nominal_rate(r.id).is_none_or(|now| (now - r.original).abs() < 0.5)
+            })
+        });
     }
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// The restore wait stops as soon as the read-back lands.
+    #[test]
+    fn the_restore_wait_ends_when_the_rate_lands() {
+        let mut reads = 0;
+        let started = Instant::now();
+        let landed = poll_until(Duration::from_secs(1), Duration::from_millis(5), || {
+            reads += 1;
+            reads >= 3
+        });
+        assert!(landed);
+        assert_eq!(reads, 3);
+        assert!(started.elapsed() < Duration::from_millis(500));
+    }
+
+    /// ...and never waits past its bound when it does not.
+    #[test]
+    fn the_restore_wait_gives_up_at_its_limit() {
+        let mut reads = 0;
+        let started = Instant::now();
+        let landed = poll_until(
+            Duration::from_millis(100),
+            Duration::from_millis(20),
+            || {
+                reads += 1;
+                false
+            },
+        );
+        assert!(!landed);
+        let took = started.elapsed();
+        assert!(took >= Duration::from_millis(100), "took {took:?}");
+        assert!(took < Duration::from_millis(500), "took {took:?}");
+        assert!(reads <= 7, "read {reads} times");
+    }
+
+    /// Each kind of raise message is logged once per device until a unit
+    /// opens; refusals once for good.
+    #[test]
+    fn raise_logs_reset_on_open_but_refusals_do_not() {
+        let mut log = RaiseLog::default();
+        assert!(first_time(&mut log.raised, 90));
+        assert!(!first_time(&mut log.raised, 90));
+        assert!(first_time(&mut log.raised, 91));
+        assert!(first_time(&mut log.unsettled, 90));
+        assert!(first_time(&mut log.refused, 90));
+        log.opened();
+        assert!(first_time(&mut log.raised, 90));
+        assert!(first_time(&mut log.unsettled, 90));
+        assert!(!first_time(&mut log.refused, 90));
+    }
 
     /// Measured: a C920 runs at 16 kHz and offers 16, 24 and 32 kHz.
     #[test]

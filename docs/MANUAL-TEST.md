@@ -312,7 +312,7 @@ barely hears the speakers — use a webcam or built-in mic for the echo checks.
       24 kHz that supports more (e.g. a 16 kHz webcam mic) is raised first —
       stderr shows `coreaudio raised "…" from N Hz to M Hz for voice
       processing (restored on release)` — and put back when the app lets go
-      of it. A "band-limited" note now means processing is below 24 kHz
+      of it. A "band-limited" note means processing is below 24 kHz
       because a device cannot go higher, and the assistant will sound duller
       on that pairing — expected.
 - [x] With speakers (not headphones) at a normal volume, the assistant does
