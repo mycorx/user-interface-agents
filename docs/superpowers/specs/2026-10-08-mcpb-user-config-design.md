@@ -39,8 +39,14 @@ the manifest, so an unfamiliar field never makes a bundle uninstallable.
 
 ### 2. Substitution — `uia-mcp`
 
-`resolve_launch` takes the user's values (`BTreeMap<String, String>`) and
-replaces `${user_config.<key>}` in `command`, `args` and `env`.
+A new `apply_user_config(launch, fields, values)` takes the user's values
+(`BTreeMap<String, String>`) and replaces `${user_config.<key>}` in `args` and
+`env` at launch. It runs after `validate_bundle`; `resolve_launch` and
+`validate_bundle` are unchanged in how they treat templates.
+
+`${user_config.*}` in the launch `command` is unsupported and refused at
+validation (error `UserConfigInCommand`) — a setting can never choose what
+executable runs.
 
 Precedence: stored value, then manifest default, then an error when the field
 is `required`, else an empty string. Booleans render as `"true"`/`"false"`,
@@ -93,7 +99,10 @@ first, credentials second.
 As with `describe_local_server`, the logic lives in `mcp_registry.rs` so it is
 testable without the `desktop` feature; the commands are thin adapters.
 `mcp_targets` and `describe_local_server` load stored values (keyring
-included, via an injected `SecretStore`) and pass them to `resolve_launch`.
+included, via an injected `SecretStore`) and pass them to the launcher.
+`describe_local_server` (the Details panel) is unchanged and shows the
+validated launch with `${user_config.*}` unresolved, so the panel still works
+while a required setting is missing — that is where the form lives.
 `LocalServerDetails.env_keys` is unchanged; resolved values are still never
 returned.
 

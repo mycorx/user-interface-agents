@@ -12,7 +12,9 @@ Exactly two transports are supported.
 
 A `.mcpb` is a zip containing a `manifest.json` that declares a command to
 launch. UIA extracts it, validates it, and — only if it passes — records it
-as an installed local server and runs it as a subprocess over stdio.
+as an installed local server and runs it as a subprocess over stdio. Extraction
+restores each file's permission bits from the archive and makes the manifest's
+launch command executable, so a bundle's binary is runnable after install.
 
 **Desktop only.** iOS's sandbox forbids spawning subprocesses and Android
 heavily restricts it, so a `.mcpb` local server is unavailable on mobile builds.
@@ -20,10 +22,10 @@ heavily restricts it, so a `.mcpb` local server is unavailable on mobile builds.
 
 ### Manifest fields UIA acts on
 
-Everything else in the MCPB schema (`description`, `author`, `tools`,
-`dxt_version`, ...) is parsed but ignored — an unknown key must never make
-an otherwise-valid bundle uninstallable, and none of those fields affect
-what gets executed.
+`user_config`, `server`, and `name`/`version` are acted on. Everything else
+in the MCPB schema (`description`, `author`, `tools`, `dxt_version`, ...) is
+parsed but ignored — an unknown key must never make an otherwise-valid bundle
+uninstallable, and none of those fields affect what gets executed.
 
 ```json
 {
@@ -72,6 +74,21 @@ Four checks, deliberately overlapping — no single one is trusted alone:
 Together, these stop a manifest from pointing at an interpreter already on
 the machine and calling itself a binary local server, or from launching anything
 outside the bundle it shipped in.
+
+### Settings: `user_config`
+
+A manifest's `user_config` declares settings the user fills in once. UIA shows
+them under **Settings → MCP → (server) → Configuration** and substitutes
+`${user_config.<key>}` in `args` and `env` at launch, after validation — so a
+setting can never change which executable runs. `${user_config.*}` in `command`
+is not supported: it resolves outside the bundle and is refused.
+
+Value order: the saved value, then the manifest `default`, then an error if
+the field is `required` (the server shows as Failed with the reason). Plain
+values are stored in `uia-mcp.json`; `sensitive` ones only in the OS keyring
+(macOS Keychain, Windows Credential Manager, Secret Service on Linux) under
+`mcp-config.<server>.<key>`, and are deleted when the server is removed.
+Changes apply on the next restart.
 
 ### What the rule actually enforces: self-contained, not compiled
 
