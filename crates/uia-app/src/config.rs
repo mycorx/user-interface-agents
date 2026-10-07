@@ -110,14 +110,11 @@ mod tests {
             c.openai.enable_audio_cache,
             "audio caching must default on (PLAN.md FD14: a standing constraint,              not a task — no stage may turn it off, and S6 measures its hit rate)"
         );
-        assert!(
-            c.audio.aec_enabled,
-            "WASAPI echo cancellation must default on"
-        );
+        assert!(c.audio.aec_enabled, "OS echo cancellation must default on");
     }
 
     #[test]
-    fn wasapi_aec_can_be_disabled_via_config() {
+    fn os_aec_can_be_disabled_via_config() {
         let toml = r#"
             [audio]
             aec_enabled = false
@@ -1522,16 +1519,19 @@ pub struct MemorySection {
     pub backend: MemoryBackend,
 }
 
-/// The runtime off switch S17's Windows WASAPI path never had, unlike S15's
-/// `EchoCancellerConfig.enabled` on Linux/macOS.
+/// Audio devices and the OS echo-cancellation switch.
 #[derive(Debug, Deserialize, Serialize, Clone, PartialEq)]
 pub struct AudioSection {
+    /// Use the operating system's own echo cancellation (WASAPI's
+    /// Communications category on Windows, Voice Processing IO on macOS).
+    /// `false` opens plain devices with none. No effect on Linux, where echo
+    /// cancellation is the `aec` Cargo feature instead.
     #[serde(default = "default_true")]
     pub aec_enabled: bool,
-    /// Overrides Windows' `eCommunications` (or, with `aec_enabled = false`,
-    /// cpal's plain) default input device with the first active device whose
-    /// name contains this (case-insensitive). `None` keeps trusting whichever
-    /// device Windows/cpal calls default.
+    /// Pins the input device to the first one whose name contains this
+    /// (case-insensitive). `None` uses the OS default: Windows'
+    /// `eCommunications` role, or macOS's default input (followed when it
+    /// changes).
     ///
     /// Exists because that default is not always trustworthy: a real case
     /// found Windows silently holding the render communications role on a

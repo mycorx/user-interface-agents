@@ -135,8 +135,9 @@ tauri-plugin-opener = { version = "2.5.4", optional = true }
 # `default = ["..."]` could not do this — Cargo's default feature list is not
 # platform-conditional, which is why the dependency table is the lever.
 #
-# `scripts/check-windows-wasapi-default.sh` asserts both halves of that from
+# `scripts/check-os-aec-defaults.sh` asserts both halves of that from
 # any host, so this stays honest without a Windows machine to check it on.
+# The `target_os = "macos"` table below does the same for `coreaudio-aec`.
 [target.'cfg(windows)'.dependencies]
 uia-audio = { path = "../uia-audio", features = ["wasapi-aec"] }
 
@@ -157,6 +158,9 @@ keyring = { version = "3.6", features = ["windows-native"] }
 
 [target.'cfg(target_os = "macos")'.dependencies]
 keyring = { version = "3.6", features = ["apple-native"] }
+# macOS-native echo cancellation by default, for the same reasons and by the
+# same mechanism as the Windows stanza above.
+uia-audio = { path = "../uia-audio", features = ["coreaudio-aec"] }
 
 # On Linux, `sync-secret-service` (see the note above) pulls in the
 # `dbus-secret-service` crate, whose `libdbus-sys` dependency links the
