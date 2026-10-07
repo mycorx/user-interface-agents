@@ -32,6 +32,8 @@ aec = ["webrtc-audio-processing"]
 # Windows-only: `windows` below is gated to `cfg(windows)`, so this feature is
 # a no-op (undefined symbols) anywhere else.
 wasapi-aec = ["dep:windows"]
+# macOS-native echo cancellation via Voice Processing IO audio unit.
+coreaudio-aec = []
 
 [dependencies]
 uia-core = { path = "../uia-core" }

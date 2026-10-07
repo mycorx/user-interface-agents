@@ -3,6 +3,7 @@
 
 #[cfg(feature = "aec")]
 pub mod aec;
+mod backoff;
 pub mod codec;
 // Gated together: these two are the only modules that touch cpal, and the
 // `cpal-io` feature exists purely to keep them (and cpal) out of
