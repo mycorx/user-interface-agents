@@ -84,11 +84,17 @@ setting can never change which executable runs. `${user_config.*}` in `command`
 is not supported: it resolves outside the bundle and is refused.
 
 Value order: the saved value, then the manifest `default`, then an error if
-the field is `required` (the server shows as Failed with the reason). Plain
-values are stored in `uia-mcp.json`; `sensitive` ones only in the OS keyring
+the field is `required` (the server shows as Failed with the reason). Substitution
+is a single pass — a value that itself contains `${...}` is never expanded again.
+Plain values are stored in `uia-mcp.json`; `sensitive` ones only in the OS keyring
 (macOS Keychain, Windows Credential Manager, Secret Service on Linux) under
-`mcp-config.<server>.<key>`, and are deleted when the server is removed.
-Changes apply on the next restart.
+`mcp-config.<server>.<key>`, and are deleted when the server is removed. Sensitive
+values are never returned to the UI; Settings only learns whether one is set.
+Supported types: `string`, `number`, `boolean`, `directory`, `file`; numbers
+must be finite and within `min`/`max` if declared; a `multiple` field uses its
+first value only. Saving is all-or-nothing — validation and required checks run
+first, then keyring writes are rolled back if a later write or the registry write
+fails. Changes apply on the next restart.
 
 ### What the rule actually enforces: self-contained, not compiled
 

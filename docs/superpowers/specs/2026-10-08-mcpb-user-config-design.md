@@ -16,7 +16,7 @@ server with that literal text, and the user has no way to change it.
 
 - Settings → MCP shows a **Configuration** section for any installed local
   server whose manifest declares `user_config`.
-- The saved values are substituted into `command`, `args` and `env` at launch.
+- The saved values are substituted into `args` and `env` at launch.
 - `mymy-assistant` shows "Desktop toast notifications", and the chosen value
   reaches the server as `ENABLE_SYSTEM_TOASTS`.
 - Sensitive values never touch `uia-mcp.json` or the frontend.
@@ -98,11 +98,11 @@ first, credentials second.
 
 As with `describe_local_server`, the logic lives in `mcp_registry.rs` so it is
 testable without the `desktop` feature; the commands are thin adapters.
-`mcp_targets` and `describe_local_server` load stored values (keyring
-included, via an injected `SecretStore`) and pass them to the launcher.
-`describe_local_server` (the Details panel) is unchanged and shows the
-validated launch with `${user_config.*}` unresolved, so the panel still works
-while a required setting is missing — that is where the form lives.
+`mcp_targets` loads stored values (keyring included, via an injected
+`SecretStore`) and passes them to the launcher. `describe_local_server` (the
+Details panel) is unchanged and shows the validated launch with
+`${user_config.*}` unresolved, so the panel still works while a required
+setting is missing — that is where the form lives.
 `LocalServerDetails.env_keys` is unchanged; resolved values are still never
 returned.
 
