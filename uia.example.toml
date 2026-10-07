@@ -104,12 +104,13 @@ region = "ap-northeast-1"
 backend = "local"
 
 [audio]
-# On Windows, capture and render open under WASAPI's Communications category
-# by default, which gets the OS's own AEC/AGC/NS for free (no C++ toolchain
-# needed). Set false to open plain devices instead, with no echo cancellation
-# at all — useful for A/B-testing whether it's doing anything, or if it's
-# misbehaving with a particular audio device. Has no effect on Linux/macOS,
-# where echo cancellation is instead the `aec` Cargo feature (off by default).
+# On Windows and macOS, capture and playback use the operating system's own
+# echo cancellation by default (WASAPI's Communications category on Windows,
+# Voice Processing IO on macOS): AEC/AGC/NS for free, no C++ toolchain. Set
+# false to open plain devices instead, with no echo cancellation at all —
+# useful for A/B-testing whether it's doing anything, or if it misbehaves with
+# a particular audio device. Has no effect on Linux, where echo cancellation is
+# instead the `aec` Cargo feature (off by default).
 aec_enabled = true
 
 # RMS level (0.0-1.0) above which your voice counts as speaking over the

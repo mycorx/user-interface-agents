@@ -230,6 +230,35 @@ the machine — expected behaviour, but confusing if you are not looking for it.
       (own-voice audible in a loopback test, or the barge-in RMS check firing
       on playback) is sufficient evidence cancellation is genuinely absent.
 
+### Audio quality on macOS (Voice Processing IO)
+
+The app opens one Voice Processing IO unit for both directions. With no
+device configured it follows the system default input and output, including
+when you switch them while it runs; a configured name stays pinned.
+
+- [ ] At startup, stderr shows `uia-audio: coreaudio voice processing opened
+      input "…" / output "…", processing at N Hz (OS echo cancellation
+      active)`, naming the devices you expect. If it instead shows `could not
+      open the macOS voice-processing audio devices ... WITHOUT echo
+      cancellation`, the checks below fail by design. A "band-limited" note
+      means one device runs below 48 kHz (e.g. a 16 kHz webcam mic) and the
+      assistant will sound duller on that pairing — expected.
+- [ ] With speakers (not headphones) at a normal volume, the assistant does
+      not hear itself: it must not interrupt or answer its own voice.
+- [ ] Talking over the assistant interrupts it promptly (the spike measured
+      no loss of your voice during playback, so barge-in should feel the same
+      as with headphones).
+- [ ] Unplug the configured or default microphone mid-session, plug it back:
+      stderr shows `rebuilding voice processing` then `reopened`, and the
+      conversation continues without restarting the app. Same for speakers.
+- [ ] With no output device configured, switch the system output (e.g. to
+      headphones) while the app runs: the assistant's voice moves with it.
+- [ ] Music playing in another app is only minimally ducked while the
+      assistant listens.
+- [ ] `aec_enabled = false` under `[audio]`: stderr shows `OS echo
+      cancellation disabled via config`, and with speakers the assistant now
+      does hear itself — confirming the toggle is not a no-op.
+
 ## Known gaps to expect
 
 - **`crates/uia-app/icons/` is a placeholder icon set**, not a real logo —
@@ -248,7 +277,8 @@ the machine — expected behaviour, but confusing if you are not looking for it.
   vendor tree. **Superseded on Windows by S17**, which uses the OS's own
   AEC/AGC/NS via WASAPI's Communications category instead — no C++ toolchain,
   on by default, nothing to pass. `--features aec` remains the path for
-  Linux/macOS and is untouched; do not pass it on Windows.
+  Linux; on Windows and macOS the OS's own cancellation is used and AEC3 is
+  compiled out of that path.
 
 - **The engine selector is restart-to-switch, not live** (landed S18).
   Clicking Nova/OpenAI in the HUD persists the choice to
