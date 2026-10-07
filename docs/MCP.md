@@ -102,6 +102,29 @@ fails. Changes apply on the next restart.
 A sensitive value placed in `args` is visible to anyone who can list processes,
 so prefer `env` for secrets.
 
+**Path variables.** In the manifest's `default`, `args` and `env` values, UIA
+expands `${HOME}`, `${DESKTOP}`, `${DOCUMENTS}`, `${DOWNLOADS}`, `${/}` and
+`${pathSeparator}` (the last two are the OS path separator), alongside
+`${__dirname}`. They are never expanded in `command` (it must stay inside the
+bundle), in `env` keys, or in a value the user typed. A variable UIA does not
+know, or whose directory does not exist on this machine, is left in the text
+unchanged and does not fail the server. On Windows `${HOME}` contains
+backslashes, so authors who want native separators should use `${/}`.
+
+**Forgiving fields.** Only the attributes of each `user_config` field are read
+leniently: a wrongly typed attribute (a numeric `title`, say) falls back to its
+default instead of failing the whole manifest, and
+an entry that is not an object is skipped. An unparseable `sensitive` is
+treated as sensitive, so a secret never ends up in plain text. The rest of the
+manifest stays strict.
+
+**Form behavior.** Defaults are shown in the form but stored only when you
+change them: a value equal to the default is not saved, and saving it clears an
+earlier stored value. A string setting whose default or saved value is exactly
+`true` or `false` is shown as a toggle (it still stores that text); sensitive
+and `multiple` fields never are. Number settings are typed as text and refused
+at save if not a number; `min`/`max` are enforced when saving.
+
 ### What the rule actually enforces: self-contained, not compiled
 
 The property being protected is **self-containment** — everything that

@@ -37,6 +37,12 @@ as declared by the MCPB schema. Supported types: `string`, `number`,
 `boolean`, `directory`, `file`. Unknown keys are ignored, as for the rest of
 the manifest, so an unfamiliar field never makes a bundle uninstallable.
 
+Parsing of a field's attributes is lenient: a wrongly typed attribute falls
+back to its default rather than failing the manifest, and a non-object entry is
+skipped. `sensitive` fails safe: a value that cannot be read as a boolean is
+treated as `true`. Everything outside `user_config` (`name`, `server`, ...)
+stays strict.
+
 ### 2. Substitution — `uia-mcp`
 
 A new `apply_user_config(launch, fields, values)` takes the user's values
@@ -50,8 +56,17 @@ executable runs.
 
 Precedence: stored value, then manifest default, then an error when the field
 is `required`, else an empty string. Booleans render as `"true"`/`"false"`,
-numbers in their plain decimal form. A `multiple` field is parsed but
+numbers in their plain decimal form. Defaults are shown in the form but only stored when the user changes them. A `multiple` field is parsed but
 substituted as its first value only; joining several values is out of scope.
+
+Path variables: `${HOME}`, `${DESKTOP}`, `${DOCUMENTS}`, `${DOWNLOADS}`,
+`${/}` and `${pathSeparator}` expand in manifest-authored text only — field
+defaults and `args`/`env` values (not env keys). They never expand in `command`
+(`validate_bundle` is unchanged) or in a user-typed value. A variable that is
+unknown, or has no resolvable directory here, is left unchanged and does not
+fail the server. `${HOME}` contains backslashes on Windows; authors wanting
+native separators use `${/}`. The form receives defaults already expanded
+(`mcp_path_vars` in `mcp_registry.rs`).
 
 Order and safety:
 
@@ -109,13 +124,25 @@ returned.
 ### 5. UI — `src/SettingsMcp.svelte`
 
 In a local server's expanded Details panel, a **Configuration** section
-appears only when the manifest declares fields. `boolean` renders a toggle;
-`string` and `number` render inputs (`sensitive` renders a password input
-with a "set" indicator); `directory` and `file` use the existing
-`@tauri-apps/plugin-dialog` picker. Saving shows the same restart-required
-notice the rest of the tab uses. `mymy-assistant` declares
-`enable_system_toasts` as a `string`, so it renders as a text input; giving
-that one field a toggle is the bundle author's change to make.
+appears only when the manifest declares fields. A field renders as a toggle
+when it is `boolean`, or when it is a non-sensitive, non-`multiple` `string`
+whose loaded default or saved value is exactly `true` or `false` (decided from
+the loaded field, never the live draft; the stored value stays that string, and
+an unset toggle with no default saves as `"false"`). Other `string` fields and
+`number` render text inputs (`sensitive` renders a password input with a "set"
+indicator); `number` is plain text with a decimal keypad hint, no `min`/`max`
+attributes, and a save with a non-numeric entry is refused with an inline
+message (the backend still enforces the range). `directory` and `file` use the
+existing `@tauri-apps/plugin-dialog` picker.
+
+The form prefills defaults so the user sees them, but save sends `null` for a
+non-sensitive field whose text equals its default, so an unchanged value stores
+nothing (and a previously stored value is cleared). An empty sensitive field
+means "keep". Saving shows the same restart-required notice the rest of the tab
+uses; a stale note is dropped when a row is expanded or collapsed.
+`mymy-assistant` declares `enable_system_toasts` as a `string`; it renders as a
+toggle when its default or saved value is `true`/`false`, and as a text input
+otherwise.
 
 ## Error handling
 
