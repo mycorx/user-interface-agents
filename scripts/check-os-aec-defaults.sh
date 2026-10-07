@@ -10,13 +10,29 @@
 # OS, so this runs anywhere, including Ubuntu CI.
 set -euo pipefail
 
+# Captured, not piped into `grep -q`: a failing `cargo tree` must stop the
+# check loudly, never read as "feature absent" and let `refuse` pass.
 features_for() {
-  cargo tree -p uia-app --target "$1" -e features
+  local out
+  if ! out="$(cargo tree -p uia-app --target "$1" -e features)"; then
+    echo "FAIL: \`cargo tree -p uia-app --target $1 -e features\` failed;" >&2
+    echo "      cannot tell which echo cancellation $1 gets" >&2
+    exit 1
+  fi
+  printf '%s\n' "$out"
+}
+
+has_feature() {
+  local target="$1" feature="$2" tree
+  # Explicit: `set -e` does not apply inside an `if` condition, and the
+  # `exit` in `features_for` only leaves its command-substitution subshell.
+  tree="$(features_for "$target")" || exit 1
+  grep -qF "uia-audio feature \"$feature\"" <<<"$tree"
 }
 
 expect() {
   local target="$1" feature="$2"
-  if ! features_for "$target" | grep -qF "uia-audio feature \"$feature\""; then
+  if ! has_feature "$target" "$feature"; then
     echo "FAIL: $feature is not active for $target; echo cancellation would"
     echo "      silently not ship (see crates/uia-app/Cargo.toml's target stanzas)"
     exit 1
@@ -25,7 +41,7 @@ expect() {
 
 refuse() {
   local target="$1" feature="$2"
-  if features_for "$target" | grep -qF "uia-audio feature \"$feature\""; then
+  if has_feature "$target" "$feature"; then
     echo "FAIL: $feature leaked into $target"
     exit 1
   fi
