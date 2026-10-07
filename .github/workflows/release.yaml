@@ -3,7 +3,7 @@ name: release
 # Two ways in, deliberately different:
 #
 #   * pushing a semver tag creates a DRAFT GitHub Release, builds the installers
-#     for both platforms in parallel, and attaches them to it. A human then
+#     for each platform in parallel, and attaches them to it. A human then
 #     publishes it. Draft rather than published because a tag is cheap to push
 #     by accident and a published release is not cheap to retract.
 #   * `workflow_dispatch` is a dry run: the same builds, uploaded as Actions
@@ -118,82 +118,82 @@ jobs:
             core.info(`Created draft release ${data.id} for ${tag}`)
             return String(data.id)
 
-  # linux:
-  #   needs: [version-gate, create-release]
-  #   runs-on: ubuntu-latest #mycorx-ubuntu
-  #   permissions:
-  #     contents: write
-  #   steps:
-  #     - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
-  #     - uses: dtolnay/rust-toolchain@6bed0761d98439e5a578e2877258200ad565ba87 # stable
-  #     - uses: pnpm/action-setup@ea17c68df8912ef543352723c149a84f56e3d413 # v6.1.0
-  #     - uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7.0.0
-  #       with:
-  #         node-version: 24
-  #         cache: pnpm
-  #     # The same closure `desktop-build` installs in ci.yaml -- tauri needs
-  #     # GTK3 + WebKit2GTK-4.1 dev headers, and uia-audio needs ALSA.
-  #     - run: >
-  #         sudo apt-get update && sudo apt-get install -y
-  #         libasound2-dev pkg-config
-  #         libwebkit2gtk-4.1-dev libgtk-3-dev librsvg2-dev
-  #         libayatana-appindicator3-dev libsoup-3.0-dev libjavascriptcoregtk-4.1-dev
-  #     - uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2.9.2
-  #       with:
-  #         key: release-linux
-  #     - run: pnpm install --frozen-lockfile
+  linux:
+    needs: [version-gate, create-release]
+    runs-on: ubuntu-latest #mycorx-ubuntu
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - uses: dtolnay/rust-toolchain@6bed0761d98439e5a578e2877258200ad565ba87 # stable
+      - uses: pnpm/action-setup@ea17c68df8912ef543352723c149a84f56e3d413 # v6.1.0
+      - uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7.0.0
+        with:
+          node-version: 24
+          cache: pnpm
+      # The same closure `desktop-build` installs in ci.yaml -- tauri needs
+      # GTK3 + WebKit2GTK-4.1 dev headers, and uia-audio needs ALSA.
+      - run: >
+          sudo apt-get update && sudo apt-get install -y
+          libasound2-dev pkg-config
+          libwebkit2gtk-4.1-dev libgtk-3-dev librsvg2-dev
+          libayatana-appindicator3-dev libsoup-3.0-dev libjavascriptcoregtk-4.1-dev
+      - uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2.9.2
+        with:
+          key: release-linux
+      - run: pnpm install --frozen-lockfile
 
-  #     - name: Build and attach to the draft release
-  #       if: startsWith(github.ref, 'refs/tags/')
-  #       uses: tauri-apps/tauri-action@1deb371b0cd8bd54025b384f1cd735e725c4060f # action-v1.0.0
-  #       env:
-  #         GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-  #       with:
-  #         # Not the repository root: tauri.conf.json lives beside the crate,
-  #         # and its `frontendDist` is resolved relative to itself.
-  #         projectPath: crates/uia-app
-  #         # Exactly the invocation scripts/build-windows-package.ps1 uses
-  #         # locally, so CI and a developer's machine run the same command.
-  #         tauriScript: pnpm exec tauri
-  #         # Linux ships as a .deb only. AppImage was dropped deliberately:
-  #         # its bundler downloads and executes *unpinned* content at build
-  #         # time -- linuxdeploy from a rolling tag, linuxdeploy-plugin-appimage
-  #         # from the literal `continuous` tag, and linuxdeploy-plugin-gtk.sh
-  #         # from `master` -- inside the job that produces the binaries we
-  #         # ship. Every other step in this workflow is pinned to a commit SHA,
-  #         # and that one exception is not worth a format nothing asks for:
-  #         # nothing in the README offers an AppImage, and tauri.conf.json
-  #         # declares only `msi`.
-  #         #
-  #         # The cost is real and accepted: the .deb depends on the
-  #         # webkit2gtk-4.1 runtime, so Ubuntu 22.04 and non-Debian distros
-  #         # (Fedora, Arch, openSUSE) now have no Linux artifact. Add
-  #         # `appimage` back -- ideally with the bundler tools mirrored or
-  #         # pinned -- the day one of them is a real audience.
-  #         args: --bundles deb
-  #         releaseId: ${{ needs.create-release.outputs.release_id }}
+      - name: Build and attach to the draft release
+        if: startsWith(github.ref, 'refs/tags/')
+        uses: tauri-apps/tauri-action@1deb371b0cd8bd54025b384f1cd735e725c4060f # action-v1.0.0
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        with:
+          # Not the repository root: tauri.conf.json lives beside the crate,
+          # and its `frontendDist` is resolved relative to itself.
+          projectPath: crates/uia-app
+          # Exactly the invocation scripts/build-windows-package.ps1 uses
+          # locally, so CI and a developer's machine run the same command.
+          tauriScript: pnpm exec tauri
+          # Linux ships as a .deb only. AppImage was dropped deliberately:
+          # its bundler downloads and executes *unpinned* content at build
+          # time -- linuxdeploy from a rolling tag, linuxdeploy-plugin-appimage
+          # from the literal `continuous` tag, and linuxdeploy-plugin-gtk.sh
+          # from `master` -- inside the job that produces the binaries we
+          # ship. Every other step in this workflow is pinned to a commit SHA,
+          # and that one exception is not worth a format nothing asks for:
+          # nothing in the README offers an AppImage, and tauri.conf.json
+          # declares only `msi`.
+          #
+          # The cost is real and accepted: the .deb depends on the
+          # webkit2gtk-4.1 runtime, so Ubuntu 22.04 and non-Debian distros
+          # (Fedora, Arch, openSUSE) now have no Linux artifact. Add
+          # `appimage` back -- ideally with the bundler tools mirrored or
+          # pinned -- the day one of them is a real audience.
+          args: --bundles deb
+          releaseId: ${{ needs.create-release.outputs.release_id }}
 
-  #     - name: Build without releasing
-  #       if: ${{ !startsWith(github.ref, 'refs/tags/') }}
-  #       working-directory: crates/uia-app
-  #       run: pnpm exec tauri build --bundles deb
+      - name: Build without releasing
+        if: ${{ !startsWith(github.ref, 'refs/tags/') }}
+        working-directory: crates/uia-app
+        run: pnpm exec tauri build --bundles deb
 
-  #     # Either build step above links the real shipped binary, so this needs
-  #     # no `if`. Replaces the +1.95 MiB figure C5/T6 measured by hand against
-  #     # a release *test* binary -- this tracks the actual artifact on every
-  #     # release run instead of one point-in-time comparison.
-  #     - name: Record shipped binary size
-  #       run: |
-  #         size=$(stat -c%s target/release/uia)
-  #         echo "### Shipped binary size" >> "$GITHUB_STEP_SUMMARY"
-  #         echo "\`target/release/uia\`: ${size} bytes" >> "$GITHUB_STEP_SUMMARY"
+      # Either build step above links the real shipped binary, so this needs
+      # no `if`. Replaces the +1.95 MiB figure C5/T6 measured by hand against
+      # a release *test* binary -- this tracks the actual artifact on every
+      # release run instead of one point-in-time comparison.
+      - name: Record shipped binary size
+        run: |
+          size=$(stat -c%s target/release/uia)
+          echo "### Shipped binary size" >> "$GITHUB_STEP_SUMMARY"
+          echo "\`target/release/uia\`: ${size} bytes" >> "$GITHUB_STEP_SUMMARY"
 
-  #     - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
-  #       if: ${{ !startsWith(github.ref, 'refs/tags/') }}
-  #       with:
-  #         name: uia-linux
-  #         path: target/release/bundle/deb/*.deb
-  #         if-no-files-found: error
+      - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        if: ${{ !startsWith(github.ref, 'refs/tags/') }}
+        with:
+          name: uia-linux
+          path: target/release/bundle/deb/*.deb
+          if-no-files-found: error
 
   windows:
     needs: [version-gate, create-release]
@@ -236,3 +236,116 @@ jobs:
           name: uia-windows
           path: target/release/bundle/msi/*.msi
           if-no-files-found: error
+
+  # TEMPORARY -- delete this job when the `macos` job below is uncommented.
+  #
+  # There is no Apple Developer ID certificate yet, and an unsigned .app
+  # downloaded from a release is quarantined by Gatekeeper and will not open
+  # by double-clicking (docs/RELEASE.md). So nothing is built or attached
+  # here; the job only leaves a visible note on the run that macOS users
+  # build locally. It runs on Linux, not macOS, because it compiles nothing
+  # and a macOS runner bills at 10x while this repository is private.
+  macos-local-build-note:
+    needs: version-gate
+    runs-on: ubuntu-latest #mycorx-ubuntu
+    steps:
+      - name: Point macOS users at the local build
+        run: |
+          echo "::notice title=No macOS artifact::macOS is not built by this workflow until a Developer ID certificate exists. Build locally with ./scripts/build-macos-package.sh (see docs/RELEASE.md)."
+          {
+            echo "### macOS: build locally"
+            echo
+            echo "This release has no macOS artifact: an unsigned \`.app\` downloaded"
+            echo "from GitHub is blocked by Gatekeeper. On a Mac, from a checkout of"
+            echo "\`${GITHUB_REF_NAME}\`:"
+            echo
+            echo '```bash'
+            echo "./scripts/build-macos-package.sh            # tests, then .app + .dmg (native arch)"
+            echo "./scripts/build-macos-package.sh --target universal-apple-darwin"
+            echo '```'
+            echo
+            echo "Output: \`target/[<triple>/]release/bundle/{macos/*.app,dmg/*.dmg}\`."
+          } >> "$GITHUB_STEP_SUMMARY"
+
+  # Signed + notarized macOS build. Commented out until the Apple Developer ID
+  # certificate exists; when uncommenting it, delete `macos-local-build-note`.
+  #
+  # Before enabling:
+  #   1. Add crates/uia-app/Entitlements.plist with
+  #      `com.apple.security.device.audio-input` = true, and point
+  #      `bundle.macOS.entitlements` in tauri.conf.json at it. A Developer ID
+  #      build runs under the hardened runtime, which blocks the microphone
+  #      without that entitlement: no prompt, just silence (docs/RELEASE.md).
+  #   2. Add the repository secrets read below. APPLE_CERTIFICATE is the
+  #      "Developer ID Application" certificate exported as .p12, then
+  #      base64-encoded (`base64 -i cert.p12 | pbcopy`); the Tauri bundler
+  #      imports it into a temporary keychain itself. APPLE_PASSWORD is an
+  #      app-specific password for APPLE_ID, not the account password.
+  #   3. Do a dry run (workflow_dispatch) and check the `uia-macos` artifact
+  #      on a second Mac before tagging.
+  #
+  # macos:
+  #   needs: [version-gate, create-release]
+  #   # GitHub-hosted, Apple silicon. One universal binary covers both Intel
+  #   # and Apple silicon Macs, so one job is enough.
+  #   runs-on: macos-latest
+  #   permissions:
+  #     contents: write
+  #   env:
+  #     APPLE_CERTIFICATE: ${{ secrets.APPLE_CERTIFICATE }}
+  #     APPLE_CERTIFICATE_PASSWORD: ${{ secrets.APPLE_CERTIFICATE_PASSWORD }}
+  #     APPLE_SIGNING_IDENTITY: ${{ secrets.APPLE_SIGNING_IDENTITY }}
+  #     # Notarization. The App Store Connect API key trio (APPLE_API_KEY,
+  #     # APPLE_API_ISSUER, APPLE_API_KEY_PATH) works instead of these three.
+  #     APPLE_ID: ${{ secrets.APPLE_ID }}
+  #     APPLE_PASSWORD: ${{ secrets.APPLE_PASSWORD }}
+  #     APPLE_TEAM_ID: ${{ secrets.APPLE_TEAM_ID }}
+  #   steps:
+  #     - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+  #     - uses: dtolnay/rust-toolchain@6bed0761d98439e5a578e2877258200ad565ba87 # stable
+  #       with:
+  #         targets: aarch64-apple-darwin,x86_64-apple-darwin
+  #     - uses: pnpm/action-setup@ea17c68df8912ef543352723c149a84f56e3d413 # v6.1.0
+  #     - uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7.0.0
+  #       with:
+  #         node-version: 24
+  #         cache: pnpm
+  #     - uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2.9.2
+  #       with:
+  #         key: release-macos
+  #     - run: pnpm install --frozen-lockfile
+  #
+  #     - name: Build and attach to the draft release
+  #       if: startsWith(github.ref, 'refs/tags/')
+  #       uses: tauri-apps/tauri-action@1deb371b0cd8bd54025b384f1cd735e725c4060f # action-v1.0.0
+  #       env:
+  #         GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+  #       with:
+  #         projectPath: crates/uia-app
+  #         tauriScript: pnpm exec tauri
+  #         # tauri.conf.json declares only `msi`; the same bundles
+  #         # scripts/build-macos-package.sh names locally.
+  #         args: --target universal-apple-darwin --bundles app,dmg
+  #         releaseId: ${{ needs.create-release.outputs.release_id }}
+  #
+  #     - name: Build without releasing
+  #       if: ${{ !startsWith(github.ref, 'refs/tags/') }}
+  #       working-directory: crates/uia-app
+  #       run: pnpm exec tauri build --target universal-apple-darwin --bundles app,dmg
+  #
+  #     # Fails the run rather than shipping an app that opens to silence or
+  #     # that Gatekeeper rejects.
+  #     - name: Verify signature, entitlement and notarization
+  #       run: |
+  #         app=$(ls -d target/universal-apple-darwin/release/bundle/macos/*.app)
+  #         codesign --verify --deep --strict --verbose=2 "$app"
+  #         codesign -d --entitlements - --xml "$app" | grep -q 'com.apple.security.device.audio-input'
+  #         spctl --assess --type execute --verbose "$app"
+  #         xcrun stapler validate "$app"
+  #
+  #     - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+  #       if: ${{ !startsWith(github.ref, 'refs/tags/') }}
+  #       with:
+  #         name: uia-macos
+  #         path: target/universal-apple-darwin/release/bundle/dmg/*.dmg
+  #         if-no-files-found: error
