@@ -213,13 +213,33 @@ fn channel_count(id: AudioDeviceID, dir: Direction) -> u32 {
     if status != 0 {
         return 0;
     }
+    // Never trust more bytes than both CoreAudio reported and `storage` holds.
+    let written = (size as usize).min(storage.len() * size_of::<u64>());
     let list = storage.as_ptr().cast::<AudioBufferList>();
-    // SAFETY: CoreAudio wrote a valid AudioBufferList of `mNumberBuffers`
-    // buffers into `storage`, which outlives this slice.
-    let buffers: &[AudioBuffer] = unsafe {
-        std::slice::from_raw_parts((*list).mBuffers.as_ptr(), (*list).mNumberBuffers as usize)
-    };
+    // SAFETY: `storage` is zero-initialised, 8-byte aligned and at least
+    // `size_of::<AudioBufferList>()` bytes (checked against the first `size`
+    // above), so reading the header field is in bounds of initialised memory.
+    let declared = unsafe { (*list).mNumberBuffers };
+    let count = buffers_that_fit(declared, written);
+    // `addr_of!` avoids a reference to the 1-element `mBuffers` array, so the
+    // pointer keeps `storage`'s whole-allocation provenance rather than one
+    // `AudioBuffer`'s, which is what makes indexing past element 0 sound.
+    // SAFETY: `list` points into `storage`; no reference is created.
+    let first = unsafe { std::ptr::addr_of!((*list).mBuffers) }.cast::<AudioBuffer>();
+    // SAFETY: `first` is aligned (AudioBuffer's alignment divides 8) and
+    // `buffers_that_fit` guarantees `count` whole buffers lie within the
+    // `written` bytes CoreAudio initialised in `storage`, which outlives
+    // this slice.
+    let buffers: &[AudioBuffer] = unsafe { std::slice::from_raw_parts(first, count) };
     buffers.iter().map(|b| b.mNumberChannels).sum()
+}
+
+/// How many of a list's `declared` buffers actually lie inside the `written`
+/// bytes, so a count CoreAudio disagrees with is never read past the data.
+fn buffers_that_fit(declared: u32, written: usize) -> usize {
+    let room = written.saturating_sub(std::mem::offset_of!(AudioBufferList, mBuffers))
+        / size_of::<AudioBuffer>();
+    (declared as usize).min(room)
 }
 
 /// The same name cpal reports, so a name chosen in Settings resolves here.
@@ -448,6 +468,24 @@ mod tests {
             err.to_string().contains("no default output device"),
             "got: {err}"
         );
+    }
+
+    /// Aggregate and multi-stream USB devices report several buffers; the
+    /// count read from the list must never reach past the bytes written.
+    #[test]
+    fn the_buffer_count_is_clamped_to_the_bytes_written() {
+        let header = std::mem::offset_of!(AudioBufferList, mBuffers);
+        let one = size_of::<AudioBuffer>();
+        // Declared and written agree: all of them.
+        assert_eq!(buffers_that_fit(3, header + 3 * one), 3);
+        // Declares more than were written: only whole written buffers.
+        assert_eq!(buffers_that_fit(5, header + 2 * one), 2);
+        assert_eq!(buffers_that_fit(5, header + 2 * one + one - 1), 2);
+        // Fewer bytes than the header: none, and no underflow.
+        assert_eq!(buffers_that_fit(4, 0), 0);
+        assert_eq!(buffers_that_fit(4, header), 0);
+        // Declares fewer than would fit: the declared count.
+        assert_eq!(buffers_that_fit(1, header + 4 * one), 1);
     }
 
     /// Review focus 3: "Creative Pebble X" is a microphone (id 103) AND a
