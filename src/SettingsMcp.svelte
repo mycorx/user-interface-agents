@@ -61,6 +61,23 @@
     env_keys: string[];
   };
 
+  // Mirrors `uia_app::mcp_registry::ConfigFieldView`. A sensitive field
+  // never has `value`; `is_set` is all the backend will say about it.
+  type ConfigField = {
+    key: string;
+    kind: string;
+    title: string;
+    description: string | null;
+    required: boolean;
+    sensitive: boolean;
+    multiple: boolean;
+    min: number | null;
+    max: number | null;
+    default: string | null;
+    value: string | null;
+    is_set: boolean;
+  };
+
   // What the Status column shows. `pending` is the honest answer for a
   // server the running session never attempted — it is neither healthy nor
   // broken, and showing either would be a lie.
@@ -103,6 +120,11 @@
   // each, so fetching them all on mount would stat every installed bundle
   // just to draw the list. `string` is the failure reason.
   let localDetails = $state<Record<string, LocalServerDetails | string>>({});
+  // Per local server: its settings schema (`string` is the reason it could
+  // not be read), the text currently in each input, and the last save outcome.
+  let configFields = $state<Record<string, ConfigField[] | string>>({});
+  let configDraft = $state<Record<string, Record<string, string>>>({});
+  let configNote = $state<Record<string, { ok: boolean; text: string }>>({});
 
   let installError = $state<string | null>(null);
   let installing = $state(false);
@@ -235,6 +257,56 @@
     } catch (e) {
       localDetails[row.name] = String(e);
     }
+    await loadConfig(row.name);
+  }
+
+  async function loadConfig(name: string) {
+    try {
+      const fields = await invoke<ConfigField[]>('get_mcp_local_server_config', { name });
+      configFields[name] = fields;
+      // A sensitive input starts empty: leaving it empty means "keep".
+      configDraft[name] = Object.fromEntries(
+        fields.map((f) => [f.key, f.sensitive ? '' : (f.value ?? f.default ?? '')]),
+      );
+    } catch (e) {
+      configFields[name] = String(e);
+    }
+  }
+
+  async function saveConfig(name: string) {
+    const fields = configFields[name];
+    if (typeof fields === 'string' || fields === undefined) return;
+    // A key left out of `values` is unchanged; `null` clears it.
+    const values: Record<string, string | null> = {};
+    for (const f of fields) {
+      const text = configDraft[name][f.key] ?? '';
+      if (f.sensitive && text === '') continue; // keep the stored secret
+      values[f.key] = text === '' ? null : text;
+    }
+    try {
+      await invoke('set_mcp_local_server_config', { name, values });
+      configNote[name] = { ok: true, text: 'Saved. Restart UIA to apply.' };
+      onchange();
+      await loadConfig(name);
+    } catch (e) {
+      configNote[name] = { ok: false, text: String(e) };
+    }
+  }
+
+  async function clearSecret(name: string, key: string) {
+    try {
+      await invoke('set_mcp_local_server_config', { name, values: { [key]: null } });
+      configNote[name] = { ok: true, text: 'Removed. Restart UIA to apply.' };
+      onchange();
+    } catch (e) {
+      configNote[name] = { ok: false, text: String(e) };
+    }
+    await loadConfig(name);
+  }
+
+  async function pickPath(name: string, key: string, directory: boolean) {
+    const chosen = await open({ directory, multiple: false });
+    if (typeof chosen === 'string') configDraft[name][key] = chosen;
   }
 
   refreshLocalServers();
@@ -681,6 +753,69 @@
                       Re-checked every launch, not just at install &mdash; this is what
                       would run now.
                     </p>
+                    {#if Array.isArray(configFields[row.name]) && (configFields[row.name] as ConfigField[]).length > 0}
+                      {@const cfgFields = configFields[row.name] as ConfigField[]}
+                      <p class="declaration-head"><strong>Configuration</strong></p>
+                      {#each cfgFields as f (f.key)}
+                        {@const inputId = `cfg-${row.name}-${f.key}`}
+                        <div class="field">
+                          <label for={inputId}>{f.title}{f.required ? ' *' : ''}</label>
+                          {#if f.kind === 'boolean'}
+                            <input
+                              id={inputId}
+                              type="checkbox"
+                              checked={configDraft[row.name]?.[f.key] === 'true'}
+                              onchange={(e) =>
+                                (configDraft[row.name][f.key] = e.currentTarget.checked
+                                  ? 'true'
+                                  : 'false')}
+                            />
+                          {:else if f.kind === 'directory' || f.kind === 'file'}
+                            <div class="cfg-row">
+                              <input id={inputId} type="text" bind:value={configDraft[row.name][f.key]} />
+                              <button
+                                type="button"
+                                onclick={() => pickPath(row.name, f.key, f.kind === 'directory')}
+                              >
+                                Browse&hellip;
+                              </button>
+                            </div>
+                          {:else}
+                            <div class="cfg-row">
+                              <input
+                                id={inputId}
+                                type={f.sensitive ? 'password' : f.kind === 'number' ? 'number' : 'text'}
+                                min={f.min ?? undefined}
+                                max={f.max ?? undefined}
+                                autocomplete="off"
+                                placeholder={f.sensitive && f.is_set
+                                  ? '•••••••• (saved — type to replace)'
+                                  : ''}
+                                bind:value={configDraft[row.name][f.key]}
+                              />
+                              {#if f.sensitive && f.is_set}
+                                <button type="button" onclick={() => clearSecret(row.name, f.key)}>
+                                  Remove
+                                </button>
+                              {/if}
+                            </div>
+                          {/if}
+                          {#if f.description}<p class="hint">{f.description}</p>{/if}
+                        </div>
+                      {/each}
+                      <div class="save-row">
+                        <button type="button" onclick={() => saveConfig(row.name)}>
+                          Save settings
+                        </button>
+                      </div>
+                      {#if configNote[row.name]}
+                        <p class={configNote[row.name].ok ? 'hint' : 'field-error'}>
+                          {configNote[row.name].text}
+                        </p>
+                      {/if}
+                    {:else if typeof configFields[row.name] === 'string'}
+                      <p class="hint">Settings unavailable: {configFields[row.name]}</p>
+                    {/if}
                   {/if}
                 </td>
               </tr>
@@ -1053,6 +1188,7 @@
 
   .field input[type='text'],
   .field input[type='password'],
+  .field input[type='number'],
   .header-fields input {
     width: 100%;
     box-sizing: border-box;
@@ -1366,6 +1502,13 @@
     color: #8890a0;
   }
 
+  /* A settings input with its Browse / Remove button beside it. */
+  .cfg-row {
+    display: flex;
+    align-items: center;
+    gap: 8px;
+  }
+
   .save-row {
     display: flex;
     align-items: center;
@@ -1373,6 +1516,7 @@
   }
 
   .save-row button,
+  .cfg-row button,
   .actions button {
     font: inherit;
     color: inherit;
