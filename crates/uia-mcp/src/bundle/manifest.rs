@@ -24,7 +24,7 @@ pub struct McpbManifest {
     pub version: Option<String>,
     pub server: McpbServer,
     /// Settings the user fills in once; referenced as `${user_config.<key>}`.
-    #[serde(default)]
+    #[serde(default, deserialize_with = "lenient_user_config")]
     pub user_config: BTreeMap<String, UserConfigField>,
 }
 
@@ -43,28 +43,91 @@ pub struct McpbServer {
 
 /// One entry of a manifest's `user_config`. Only what the Settings form and
 /// the substitution need; unknown keys are ignored like everywhere else here.
+///
+/// Every attribute is parsed leniently (see the helpers below): a bundle author
+/// writing `"required": "true"` or `"min": "0"` must not make the whole bundle
+/// uninstallable, or turn an installed one Failed. The rest of the manifest
+/// stays strict, because `name` and `server` decide what gets executed.
 #[derive(Debug, Deserialize, PartialEq, Clone, Default)]
 pub struct UserConfigField {
-    /// `string`, `number`, `boolean`, `directory` or `file`. Anything else is
-    /// treated as `string` by its consumers.
-    #[serde(rename = "type", default)]
+    /// `string`, `number`, `boolean`, `directory` or `file`. Anything else
+    /// (including a wrongly typed value, which becomes `""`) is treated as
+    /// `string` by its consumers.
+    #[serde(rename = "type", default, deserialize_with = "lenient_string_or_empty")]
     pub kind: String,
-    #[serde(default)]
+    #[serde(default, deserialize_with = "lenient_string")]
     pub title: Option<String>,
-    #[serde(default)]
+    #[serde(default, deserialize_with = "lenient_string")]
     pub description: Option<String>,
-    #[serde(default)]
+    #[serde(default, deserialize_with = "lenient_bool_false")]
     pub required: bool,
-    #[serde(default)]
+    /// Present but unparseable means `true`: showing or storing a would-be
+    /// secret as plain text is worse than hiding an ordinary value.
+    #[serde(default, deserialize_with = "lenient_bool_true")]
     pub sensitive: bool,
     #[serde(default)]
     pub default: Option<serde_json::Value>,
-    #[serde(default)]
+    #[serde(default, deserialize_with = "lenient_number")]
     pub min: Option<f64>,
-    #[serde(default)]
+    #[serde(default, deserialize_with = "lenient_number")]
     pub max: Option<f64>,
-    #[serde(default)]
+    #[serde(default, deserialize_with = "lenient_bool_false")]
     pub multiple: bool,
+}
+
+/// A JSON bool, or the text `true`/`false` in any case; `None` otherwise.
+fn coerce_bool(v: &serde_json::Value) -> Option<bool> {
+    match v {
+        serde_json::Value::Bool(b) => Some(*b),
+        serde_json::Value::String(s) if s.trim().eq_ignore_ascii_case("true") => Some(true),
+        serde_json::Value::String(s) if s.trim().eq_ignore_ascii_case("false") => Some(false),
+        _ => None,
+    }
+}
+
+fn lenient_bool_false<'de, D: serde::Deserializer<'de>>(d: D) -> Result<bool, D::Error> {
+    let v = serde_json::Value::deserialize(d)?;
+    Ok(coerce_bool(&v).unwrap_or(false))
+}
+
+fn lenient_bool_true<'de, D: serde::Deserializer<'de>>(d: D) -> Result<bool, D::Error> {
+    let v = serde_json::Value::deserialize(d)?;
+    Ok(coerce_bool(&v).unwrap_or(true))
+}
+
+fn lenient_string<'de, D: serde::Deserializer<'de>>(d: D) -> Result<Option<String>, D::Error> {
+    match serde_json::Value::deserialize(d)? {
+        serde_json::Value::String(s) => Ok(Some(s)),
+        _ => Ok(None),
+    }
+}
+
+fn lenient_string_or_empty<'de, D: serde::Deserializer<'de>>(d: D) -> Result<String, D::Error> {
+    Ok(lenient_string(d)?.unwrap_or_default())
+}
+
+fn lenient_number<'de, D: serde::Deserializer<'de>>(d: D) -> Result<Option<f64>, D::Error> {
+    Ok(match serde_json::Value::deserialize(d)? {
+        serde_json::Value::Number(n) => n.as_f64(),
+        serde_json::Value::String(s) => s.trim().parse().ok(),
+        _ => None,
+    })
+}
+
+/// A `user_config` that is not an object is treated as empty, and an entry
+/// that is not an object (`null`, a string) is skipped: neither is worth
+/// rejecting a bundle over.
+fn lenient_user_config<'de, D: serde::Deserializer<'de>>(
+    d: D,
+) -> Result<BTreeMap<String, UserConfigField>, D::Error> {
+    let serde_json::Value::Object(entries) = serde_json::Value::deserialize(d)? else {
+        return Ok(BTreeMap::new());
+    };
+    Ok(entries
+        .into_iter()
+        .filter(|(_, v)| v.is_object())
+        .filter_map(|(k, v)| serde_json::from_value(v).ok().map(|f| (k, f)))
+        .collect())
 }
 
 impl UserConfigField {
@@ -551,6 +614,55 @@ mod tests {
                 .user_config
                 .is_empty()
         );
+    }
+
+    fn manifest_with_user_config(user_config: &str) -> String {
+        format!(r#"{{"name":"m","server":{{"type":"binary"}},"user_config":{user_config}}}"#)
+    }
+
+    #[test]
+    fn wrongly_typed_user_config_attributes_do_not_reject_the_manifest() {
+        let m = parse_manifest(&manifest_with_user_config(
+            r#"{
+                "a": {"type":1,"title":5,"required":"true","min":"0","max":"5","multiple":"False"},
+                "b": null,
+                "c": "oops",
+                "d": {"sensitive":"yes please"},
+                "e": {"sensitive":"false"},
+                "f": {"type":"number","min":2.5}
+            }"#,
+        ))
+        .unwrap();
+        let a = &m.user_config["a"];
+        assert_eq!(a.kind, "");
+        assert_eq!(a.title, None);
+        assert!(a.required);
+        assert_eq!((a.min, a.max), (Some(0.0), Some(5.0)));
+        assert!(!a.multiple);
+        assert!(!m.user_config.contains_key("b"));
+        assert!(!m.user_config.contains_key("c"));
+        // Fail safe: an unparseable `sensitive` must never become plain text.
+        assert!(m.user_config["d"].sensitive);
+        assert!(!m.user_config["e"].sensitive);
+        let f = &m.user_config["f"];
+        assert_eq!((f.kind.as_str(), f.min), ("number", Some(2.5)));
+        assert!(!f.sensitive);
+    }
+
+    #[test]
+    fn a_user_config_that_is_not_an_object_is_empty() {
+        for raw in ["[]", "null", r#""x""#, "5"] {
+            let m = parse_manifest(&manifest_with_user_config(raw)).unwrap();
+            assert!(m.user_config.is_empty(), "{raw}");
+        }
+    }
+
+    #[test]
+    fn leniency_does_not_leak_to_the_rest_of_the_manifest() {
+        let raw = r#"{"name":"m","server":{"type":5},"user_config":{}}"#;
+        assert!(parse_manifest(raw).is_err());
+        let raw = r#"{"name":"m","server":"binary"}"#;
+        assert!(parse_manifest(raw).is_err());
     }
 
     #[test]
