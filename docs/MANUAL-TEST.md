@@ -294,12 +294,13 @@ The app opens one Voice Processing IO unit for both directions. With no
 device configured it follows the system default input and output, including
 when you switch them while it runs; a configured name stays pinned.
 
-**Partial pass 2026-10-07** (Apple silicon, C920 mic + Creative Pebble X
+**Pass 2026-10-07** (Apple silicon, C920 mic + Creative Pebble X
 speakers): the startup line, no self-hearing on speakers, the
 `aec_enabled = false` A/B, barge-in, following a default-output switch, and
-minimal ducking are confirmed. Device unplug/replug recovery is confirmed at
-the audio layer (Jabra in / Pebble out, switch unplugged: rebuild, backoff,
-reopened ~2 s after return) but not yet in the running app. With a close-talking headset boom mic
+minimal ducking are confirmed, as are clean Settings device lists and
+unplug/replug recovery in the running app (Jabra in / Pebble out pinned, the
+USB switch carrying the Pebble unplugged and replugged: the conversation
+resumed without a restart). **Full macOS pass.** With a close-talking headset boom mic
 (Jabra Evolve2 30 SE) the on/off A/B shows little difference because the mic
 barely hears the speakers — use a webcam or built-in mic for the echo checks.
 
@@ -315,12 +316,12 @@ barely hears the speakers — use a webcam or built-in mic for the echo checks.
 - [x] Talking over the assistant interrupts it promptly (the spike measured
       no loss of your voice during playback, so barge-in should feel the same
       as with headphones).
-- [ ] Unplug the configured or default microphone mid-session, plug it back:
+- [x] Unplug the configured or default microphone mid-session, plug it back:
       stderr shows `rebuilding voice processing` then `reopened`, and the
       conversation continues without restarting the app. Same for speakers.
       One unit serves both directions, so while either device is gone the
       other is silent too — both come back together when it returns.
-- [ ] While voice processing runs, Settings → Audio lists each microphone
+- [x] While voice processing runs, Settings → Audio lists each microphone
       and speaker once: no speakers in the Input list, and no
       `VPAUAggregateAudioDevice-…` entry in either list.
 - [x] With no output device configured, switch the system output (e.g. to
