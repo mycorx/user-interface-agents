@@ -205,20 +205,57 @@ pub fn resolve_launch(
 
 const USER_CONFIG_OPEN: &str = "${user_config.";
 
+/// Replace `${NAME}` with `vars[NAME]` for every NAME that is a key of `vars`.
+///
+/// This is MCPB's path-variable pass (`${HOME}`, `${DOCUMENTS}`, `${/}`, ...).
+/// It only ever runs on text the manifest author wrote. Anything not in `vars`
+/// (`${user_config.x}`, `${__dirname}`, a typo) and an unterminated `${` are
+/// left as they are, so an unresolvable directory never fails a launch.
+/// Single pass: a replacement is never rescanned.
+pub fn expand_path_vars(text: &str, vars: &BTreeMap<String, String>) -> String {
+    let mut out = String::with_capacity(text.len());
+    let mut rest = text;
+    while let Some(start) = rest.find("${") {
+        out.push_str(&rest[..start]);
+        let after = &rest[start + 2..];
+        match after
+            .find('}')
+            .and_then(|end| vars.get(&after[..end]).map(|v| (end, v)))
+        {
+            Some((end, value)) => {
+                out.push_str(value);
+                rest = &after[end + 1..];
+            }
+            None => {
+                out.push_str("${");
+                rest = after;
+            }
+        }
+    }
+    out.push_str(rest);
+    out
+}
+
 /// Substitute `${user_config.<key>}` in an already-validated launch.
 ///
 /// Runs after `validate_bundle` on purpose: the trust checks must judge the
-/// manifest as shipped, not as a user configured it. Single pass — the
+/// manifest as shipped, not as a user configured it. Path variables are
+/// expanded FIRST, in args and env values only (never the command, which must
+/// stay inside the bundle, and never env keys); the user-config pass runs
+/// second, so a typed value or a keyring secret is inserted after path
+/// expansion and can never be treated as a path template. Single pass — the
 /// replacement text is never rescanned, so a value that happens to contain
 /// `${...}` stays data.
 pub fn apply_user_config(
     launch: ResolvedLaunch,
     fields: &BTreeMap<String, UserConfigField>,
     values: &BTreeMap<String, String>,
+    vars: &BTreeMap<String, String>,
 ) -> Result<ResolvedLaunch, BundleError> {
-    let sub = |text: &str| substitute_user_config(text, fields, values);
+    let sub =
+        |text: &str| substitute_user_config(&expand_path_vars(text, vars), fields, values, vars);
     Ok(ResolvedLaunch {
-        command: sub(&launch.command)?,
+        command: substitute_user_config(&launch.command, fields, values, vars)?,
         args: launch
             .args
             .iter()
@@ -236,6 +273,7 @@ fn substitute_user_config(
     text: &str,
     fields: &BTreeMap<String, UserConfigField>,
     values: &BTreeMap<String, String>,
+    vars: &BTreeMap<String, String>,
 ) -> Result<String, BundleError> {
     let mut out = String::with_capacity(text.len());
     let mut rest = text;
@@ -246,7 +284,7 @@ fn substitute_user_config(
             // Unterminated: never launch with literal `${user_config.*}` text.
             return Err(BundleError::UndeclaredUserConfig(after.to_string()));
         };
-        out.push_str(&resolve_user_config(&after[..end], fields, values)?);
+        out.push_str(&resolve_user_config(&after[..end], fields, values, vars)?);
         rest = &after[end + 1..];
     }
     out.push_str(rest);
@@ -257,6 +295,7 @@ fn resolve_user_config(
     key: &str,
     fields: &BTreeMap<String, UserConfigField>,
     values: &BTreeMap<String, String>,
+    vars: &BTreeMap<String, String>,
 ) -> Result<String, BundleError> {
     let field = fields
         .get(key)
@@ -265,7 +304,9 @@ fn resolve_user_config(
         return Ok(v.clone());
     }
     if let Some(d) = field.default_text() {
-        return Ok(d);
+        // Manifest-authored, so path variables expand here; the typed value
+        // returned above never does.
+        return Ok(expand_path_vars(&d, vars));
     }
     if field.required {
         Err(BundleError::MissingUserConfig(key.to_string()))
@@ -552,6 +593,7 @@ mod tests {
                 ("mode", "x"),
                 ("api_token", "t"),
             ]),
+            &BTreeMap::new(),
         )
         .unwrap();
         assert_eq!(out.env, vec![("TOASTS".to_string(), "false".to_string())]);
@@ -564,6 +606,7 @@ mod tests {
             launch_with_env("${user_config.enable_system_toasts}"),
             &fields_with_mode(),
             &vals(&[("mode", "x"), ("api_token", "t")]),
+            &BTreeMap::new(),
         )
         .unwrap();
         assert_eq!(out.env[0].1, "true");
@@ -574,6 +617,7 @@ mod tests {
         let out = apply_user_config(
             launch_with_env("${user_config.mode}"),
             &fields_with_mode(),
+            &BTreeMap::new(),
             &BTreeMap::new(),
         )
         .unwrap();
@@ -586,6 +630,7 @@ mod tests {
             launch_with_env("${user_config.api_token}"),
             &fields_with_mode(),
             &BTreeMap::new(),
+            &BTreeMap::new(),
         )
         .unwrap_err();
         assert!(matches!(err, BundleError::MissingUserConfig(k) if k == "api_token"));
@@ -596,6 +641,7 @@ mod tests {
         let err = apply_user_config(
             launch_with_env("${user_config.typo}"),
             &fields_with_mode(),
+            &BTreeMap::new(),
             &BTreeMap::new(),
         )
         .unwrap_err();
@@ -609,6 +655,7 @@ mod tests {
             launch_with_env("${user_config.mode}"),
             &fields_with_mode(),
             &vals(&[("mode", "${__dirname}/${user_config.api_token}")]),
+            &BTreeMap::new(),
         )
         .unwrap();
         assert_eq!(out.env[0].1, "${__dirname}/${user_config.api_token}");
@@ -621,6 +668,7 @@ mod tests {
             launch_with_env("${user_config.mode}"),
             &fields_with_mode(),
             &vals(&[("mode", nasty)]),
+            &BTreeMap::new(),
         )
         .unwrap();
         assert_eq!(out.env[0].1, nasty);
@@ -632,6 +680,7 @@ mod tests {
             launch_with_env("x-${user_config.mode}-${user_config.mode}-y"),
             &fields_with_mode(),
             &vals(&[("mode", "m")]),
+            &BTreeMap::new(),
         )
         .unwrap();
         assert_eq!(out.env[0].1, "x-m-m-y");
@@ -656,6 +705,7 @@ mod tests {
                 launch_with_env(text),
                 &fields_with_mode(),
                 &vals(&[("mode", "m")]),
+                &BTreeMap::new(),
             )
             .unwrap_err();
             assert!(
@@ -671,6 +721,7 @@ mod tests {
             launch_with_env("${user_config.}"),
             &fields_with_mode(),
             &BTreeMap::new(),
+            &BTreeMap::new(),
         )
         .unwrap_err();
         assert!(matches!(err, BundleError::UndeclaredUserConfig(k) if k.is_empty()));
@@ -682,8 +733,111 @@ mod tests {
             launch_with_env("é-${user_config.mode}-日本"),
             &fields_with_mode(),
             &vals(&[("mode", "m")]),
+            &BTreeMap::new(),
         )
         .unwrap();
         assert_eq!(out.env[0].1, "é-m-日本");
+    }
+
+    #[test]
+    fn expand_path_vars_replaces_a_known_variable() {
+        let v = vals(&[("HOME", "/h")]);
+        assert_eq!(expand_path_vars("${HOME}/x", &v), "/h/x");
+    }
+
+    #[test]
+    fn expand_path_vars_leaves_unknown_and_other_templates_alone() {
+        let v = vals(&[("HOME", "/h")]);
+        for text in ["${FOO}", "${user_config.x}", "${__dirname}/a"] {
+            assert_eq!(expand_path_vars(text, &v), text);
+        }
+    }
+
+    #[test]
+    fn expand_path_vars_handles_several_variables_and_surrounding_text() {
+        let v = vals(&[("HOME", "/h"), ("/", "|")]);
+        assert_eq!(expand_path_vars("a${HOME}b${/}c${HOME}", &v), "a/hb|c/h");
+    }
+
+    #[test]
+    fn expand_path_vars_leaves_an_unterminated_reference() {
+        let v = vals(&[("HOME", "/h")]);
+        assert_eq!(expand_path_vars("x${HOME", &v), "x${HOME");
+    }
+
+    #[test]
+    fn expand_path_vars_survives_multibyte_text() {
+        let v = vals(&[("HOME", "/h")]);
+        assert_eq!(expand_path_vars("é-${HOME}-日本", &v), "é-/h-日本");
+        assert_eq!(expand_path_vars("日${本", &v), "日${本");
+    }
+
+    #[test]
+    fn expand_path_vars_does_not_rescan_a_replacement() {
+        let v = vals(&[("HOME", "${DESKTOP}"), ("DESKTOP", "/d")]);
+        assert_eq!(expand_path_vars("${HOME}", &v), "${DESKTOP}");
+    }
+
+    #[test]
+    fn a_manifest_default_has_path_variables_expanded() {
+        let mut f = fields_with_mode();
+        f.get_mut("mode").unwrap().default = Some(serde_json::json!("${HOME}/Desktop"));
+        let out = apply_user_config(
+            launch_with_env("${user_config.mode}"),
+            &f,
+            &BTreeMap::new(),
+            &vals(&[("HOME", "/h")]),
+        )
+        .unwrap();
+        assert_eq!(out.env[0].1, "/h/Desktop");
+    }
+
+    #[test]
+    fn args_and_env_values_expand_path_variables() {
+        let launch = ResolvedLaunch {
+            command: "/b/server".into(),
+            args: vec!["--root=${DOCUMENTS}".into()],
+            env: vec![("DIR".into(), "${DOWNLOADS}${/}x".into())],
+        };
+        let out = apply_user_config(
+            launch,
+            &BTreeMap::new(),
+            &BTreeMap::new(),
+            &vals(&[("DOCUMENTS", "/docs"), ("DOWNLOADS", "/dl"), ("/", "/")]),
+        )
+        .unwrap();
+        assert_eq!(out.args, vec!["--root=/docs".to_string()]);
+        assert_eq!(out.env[0].1, "/dl/x");
+    }
+
+    /// The security point: a typed value is data, never a path template.
+    #[test]
+    fn a_user_typed_path_variable_stays_literal() {
+        let out = apply_user_config(
+            launch_with_env("${user_config.mode}"),
+            &fields_with_mode(),
+            &vals(&[("mode", "${HOME}")]),
+            &vals(&[("HOME", "/h")]),
+        )
+        .unwrap();
+        assert_eq!(out.env[0].1, "${HOME}");
+    }
+
+    #[test]
+    fn command_and_env_keys_are_never_path_expanded() {
+        let launch = ResolvedLaunch {
+            command: "${HOME}/server".into(),
+            args: vec![],
+            env: vec![("${HOME}".into(), "v".into())],
+        };
+        let out = apply_user_config(
+            launch,
+            &BTreeMap::new(),
+            &BTreeMap::new(),
+            &vals(&[("HOME", "/h")]),
+        )
+        .unwrap();
+        assert_eq!(out.command, "${HOME}/server");
+        assert_eq!(out.env[0].0, "${HOME}");
     }
 }

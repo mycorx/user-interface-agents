@@ -21,7 +21,7 @@ pub mod validate;
 pub use install::{InstalledBundle, ensure_executable, install_bundle};
 pub use manifest::{
     McpbManifest, McpbMcpConfig, McpbServer, ResolvedLaunch, UserConfigField, apply_user_config,
-    current_platform, parse_manifest, resolve_launch,
+    current_platform, expand_path_vars, parse_manifest, resolve_launch,
 };
 pub use validate::{SCRIPT_EXTENSIONS, validate_bundle};
 

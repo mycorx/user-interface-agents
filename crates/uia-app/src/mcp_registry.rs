@@ -354,6 +354,32 @@ pub fn local_config_values(
     out
 }
 
+/// The MCPB path variables for this machine, for `expand_path_vars`.
+///
+/// A directory the OS cannot name is omitted rather than guessed, so the
+/// variable stays as written in the text instead of becoming a wrong path.
+/// The lookup lives here, not in `uia-mcp`, which has no `directories`.
+pub fn mcp_path_vars() -> BTreeMap<String, String> {
+    let mut vars = BTreeMap::new();
+    if let Some(dirs) = directories::UserDirs::new() {
+        let named = [
+            ("HOME", Some(dirs.home_dir())),
+            ("DESKTOP", dirs.desktop_dir()),
+            ("DOCUMENTS", dirs.document_dir()),
+            ("DOWNLOADS", dirs.download_dir()),
+        ];
+        for (name, dir) in named {
+            if let Some(dir) = dir {
+                vars.insert(name.to_string(), dir.to_string_lossy().into_owned());
+            }
+        }
+    }
+    for name in ["/", "pathSeparator"] {
+        vars.insert(name.to_string(), std::path::MAIN_SEPARATOR_STR.to_string());
+    }
+    vars
+}
+
 pub fn describe_local_config(
     registry: &McpRegistry,
     local_servers_dir: &Path,
@@ -367,6 +393,7 @@ pub fn describe_local_config(
         .ok_or_else(|| format!("no local server named {name:?} is installed"))?;
     let fields = read_fields(local_servers_dir, name)?;
     let values = local_config_values(entry, &fields, secrets);
+    let vars = mcp_path_vars();
     Ok(fields
         .into_iter()
         .map(|(key, f)| {
@@ -379,7 +406,11 @@ pub fn describe_local_config(
                 multiple: f.multiple,
                 min: f.min,
                 max: f.max,
-                default: f.default_text(),
+                // What the server will actually get, so the form shows the real
+                // path rather than `${HOME}/...`.
+                default: f
+                    .default_text()
+                    .map(|d| uia_mcp::bundle::expand_path_vars(&d, &vars)),
                 is_set: stored.is_some(),
                 value: if f.sensitive { None } else { stored },
                 kind: if f.kind.is_empty() {
@@ -2535,6 +2566,45 @@ mod config_tests {
             .iter()
             .map(|(k, v)| (k.to_string(), v.map(str::to_string)))
             .collect()
+    }
+
+    #[test]
+    fn path_vars_carry_the_separators_and_the_home_directory() {
+        let vars = mcp_path_vars();
+        assert_eq!(
+            vars.get("/").map(String::as_str),
+            Some(std::path::MAIN_SEPARATOR_STR)
+        );
+        assert_eq!(
+            vars.get("pathSeparator").map(String::as_str),
+            Some(std::path::MAIN_SEPARATOR_STR)
+        );
+        if let Some(dirs) = directories::UserDirs::new() {
+            assert_eq!(
+                vars.get("HOME").map(String::as_str),
+                Some(dirs.home_dir().to_string_lossy().as_ref())
+            );
+        }
+    }
+
+    #[test]
+    fn the_settings_form_shows_the_default_with_path_variables_expanded() {
+        let fx = fixture("pathdefault");
+        std::fs::write(
+            fx.servers.join("mymy").join("manifest.json"),
+            r#"{"manifest_version":"0.3","name":"mymy","version":"1",
+                "server":{"type":"binary","entry_point":"server/mymy"},
+                "user_config":{"root":{"type":"directory","default":"${HOME}/x"}}}"#,
+        )
+        .unwrap();
+        let secrets = FakeSecretStore::new();
+        let view =
+            describe_local_config(&load(&fx.registry), &fx.servers, &secrets, "mymy").unwrap();
+        std::fs::remove_dir_all(&fx.dir).ok();
+        let Some(home) = mcp_path_vars().get("HOME").cloned() else {
+            return;
+        };
+        assert_eq!(view[0].default, Some(format!("{home}/x")));
     }
 
     #[test]

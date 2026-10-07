@@ -358,6 +358,8 @@ pub fn mcp_targets(
     let mut skipped: Vec<(String, String)> = Vec::new();
     let home_location = home_location.map(str::trim).filter(|s| !s.is_empty());
 
+    let path_vars = crate::mcp_registry::mcp_path_vars();
+
     for server in registry.local_servers.iter().filter(|p| p.enabled) {
         let dir = local_servers_dir.join(&server.name);
         let manifest = match std::fs::read_to_string(dir.join("manifest.json")) {
@@ -409,6 +411,7 @@ pub fn mcp_targets(
                     launch,
                     &parsed.user_config,
                     &values,
+                    &path_vars,
                 ) {
                     Ok(l) => l,
                     Err(e) => {
@@ -1044,6 +1047,52 @@ mod tests {
         };
         assert!(env.contains(&("TOASTS".into(), "false".into())), "{env:?}");
         assert!(env.contains(&("TOKEN".into(), "tok".into())), "{env:?}");
+    }
+
+    fn path_var_fixture(label: &str) -> (McpRegistry, std::path::PathBuf) {
+        let (reg, dir) = user_config_fixture(label);
+        std::fs::write(
+            dir.join("mymy/manifest.json"),
+            r#"{ "manifest_version":"0.3","name":"mymy","version":"1",
+                 "server":{"type":"binary","entry_point":"server/mymy",
+                   "mcp_config":{"command":"${__dirname}/server/mymy",
+                     "env":{"ROOT":"${user_config.root}"}}},
+                 "user_config":{"root":{"type":"directory","default":"${HOME}/data"}}}"#,
+        )
+        .unwrap();
+        (reg, dir)
+    }
+
+    #[test]
+    fn a_path_variable_in_a_manifest_default_is_expanded_at_launch() {
+        let Some(home) = crate::mcp_registry::mcp_path_vars().get("HOME").cloned() else {
+            return;
+        };
+        let (reg, dir) = path_var_fixture("pathvar-default");
+        let plan = mcp_targets(&reg, &dir, None, &crate::secrets::FakeSecretStore::new());
+        std::fs::remove_dir_all(&dir).ok();
+        let McpServerConfig::Stdio { env, .. } = &plan.targets[0].1 else {
+            panic!("not stdio")
+        };
+        assert!(
+            env.contains(&("ROOT".into(), format!("{home}/data"))),
+            "{env:?}"
+        );
+    }
+
+    /// A user-typed value is data: typing `${HOME}` must not read the home dir.
+    #[test]
+    fn a_typed_path_variable_reaches_the_server_literally() {
+        let (mut reg, dir) = path_var_fixture("pathvar-typed");
+        reg.local_servers[0]
+            .user_config
+            .insert("root".into(), "${HOME}".into());
+        let plan = mcp_targets(&reg, &dir, None, &crate::secrets::FakeSecretStore::new());
+        std::fs::remove_dir_all(&dir).ok();
+        let McpServerConfig::Stdio { env, .. } = &plan.targets[0].1 else {
+            panic!("not stdio")
+        };
+        assert!(env.contains(&("ROOT".into(), "${HOME}".into())), "{env:?}");
     }
 
     /// A bundle installed before install restored unix modes is 0644 on disk
