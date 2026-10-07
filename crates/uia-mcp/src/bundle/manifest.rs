@@ -23,6 +23,9 @@ pub struct McpbManifest {
     #[serde(default)]
     pub version: Option<String>,
     pub server: McpbServer,
+    /// Settings the user fills in once; referenced as `${user_config.<key>}`.
+    #[serde(default)]
+    pub user_config: BTreeMap<String, UserConfigField>,
 }
 
 #[derive(Debug, Deserialize, PartialEq, Clone)]
@@ -36,6 +39,50 @@ pub struct McpbServer {
     pub entry_point: Option<String>,
     #[serde(default)]
     pub mcp_config: Option<McpbMcpConfig>,
+}
+
+/// One entry of a manifest's `user_config`. Only what the Settings form and
+/// the substitution need; unknown keys are ignored like everywhere else here.
+#[derive(Debug, Deserialize, PartialEq, Clone, Default)]
+pub struct UserConfigField {
+    /// `string`, `number`, `boolean`, `directory` or `file`. Anything else is
+    /// treated as `string` by its consumers.
+    #[serde(rename = "type", default)]
+    pub kind: String,
+    #[serde(default)]
+    pub title: Option<String>,
+    #[serde(default)]
+    pub description: Option<String>,
+    #[serde(default)]
+    pub required: bool,
+    #[serde(default)]
+    pub sensitive: bool,
+    #[serde(default)]
+    pub default: Option<serde_json::Value>,
+    #[serde(default)]
+    pub min: Option<f64>,
+    #[serde(default)]
+    pub max: Option<f64>,
+    #[serde(default)]
+    pub multiple: bool,
+}
+
+impl UserConfigField {
+    /// The manifest default as the text that would be substituted. A list
+    /// default (`multiple`) yields its first element — joining several values
+    /// is out of scope.
+    pub fn default_text(&self) -> Option<String> {
+        fn text(v: &serde_json::Value) -> Option<String> {
+            match v {
+                serde_json::Value::String(s) => Some(s.clone()),
+                serde_json::Value::Bool(b) => Some(b.to_string()),
+                serde_json::Value::Number(n) => Some(n.to_string()),
+                serde_json::Value::Array(a) => a.first().and_then(text),
+                _ => None,
+            }
+        }
+        self.default.as_ref().and_then(text)
+    }
 }
 
 /// `BTreeMap` rather than `HashMap` so `env` resolves in a stable order and
@@ -308,5 +355,68 @@ mod tests {
     #[test]
     fn current_platform_is_one_of_the_three_mcpb_names() {
         assert!(matches!(current_platform(), "win32" | "darwin" | "linux"));
+    }
+
+    /// The real manifest shipped by the `mymy-assistant` bundle.
+    const USER_CONFIG_MANIFEST: &str = r#"{
+        "manifest_version": "0.3",
+        "name": "mymy-assistant",
+        "version": "0.1.1",
+        "server": {
+            "type": "binary",
+            "entry_point": "server/mymy-assistant",
+            "mcp_config": {
+                "command": "${__dirname}/server/mymy-assistant",
+                "args": [],
+                "env": { "ENABLE_SYSTEM_TOASTS": "${user_config.enable_system_toasts}" }
+            }
+        },
+        "user_config": {
+            "enable_system_toasts": {
+                "type": "string",
+                "title": "Desktop toast notifications",
+                "description": "Set to exactly \"true\" to enable.",
+                "default": "true",
+                "required": false
+            },
+            "api_token": { "type": "string", "title": "Token", "sensitive": true, "required": true },
+            "retries": { "type": "number", "min": 0, "max": 5, "default": 2, "future_key": 1 }
+        }
+    }"#;
+
+    #[test]
+    fn user_config_fields_parse_with_their_declared_attributes() {
+        let m = parse_manifest(USER_CONFIG_MANIFEST).unwrap();
+        let toasts = &m.user_config["enable_system_toasts"];
+        assert_eq!(toasts.kind, "string");
+        assert_eq!(toasts.title.as_deref(), Some("Desktop toast notifications"));
+        assert!(!toasts.required && !toasts.sensitive);
+        assert_eq!(toasts.default_text().as_deref(), Some("true"));
+        assert!(m.user_config["api_token"].sensitive);
+        assert!(m.user_config["api_token"].required);
+        let retries = &m.user_config["retries"];
+        assert_eq!((retries.min, retries.max), (Some(0.0), Some(5.0)));
+        assert_eq!(retries.default_text().as_deref(), Some("2"));
+    }
+
+    #[test]
+    fn a_manifest_without_user_config_has_an_empty_map() {
+        assert!(
+            parse_manifest(BINARY_MANIFEST)
+                .unwrap()
+                .user_config
+                .is_empty()
+        );
+    }
+
+    #[test]
+    fn default_text_renders_booleans_and_takes_the_first_of_a_list() {
+        let f: UserConfigField =
+            serde_json::from_str(r#"{"type":"boolean","default":false}"#).unwrap();
+        assert_eq!(f.default_text().as_deref(), Some("false"));
+        let f: UserConfigField =
+            serde_json::from_str(r#"{"type":"directory","multiple":true,"default":["/a","/b"]}"#)
+                .unwrap();
+        assert_eq!(f.default_text().as_deref(), Some("/a"));
     }
 }

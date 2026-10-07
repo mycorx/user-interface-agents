@@ -20,8 +20,8 @@ pub mod validate;
 
 pub use install::{InstalledBundle, install_bundle};
 pub use manifest::{
-    McpbManifest, McpbMcpConfig, McpbServer, ResolvedLaunch, current_platform, parse_manifest,
-    resolve_launch,
+    McpbManifest, McpbMcpConfig, McpbServer, ResolvedLaunch, UserConfigField, current_platform,
+    parse_manifest, resolve_launch,
 };
 pub use validate::{SCRIPT_EXTENSIONS, validate_bundle};
 
