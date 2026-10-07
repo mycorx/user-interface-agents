@@ -109,7 +109,7 @@ fn lenient_string_or_empty<'de, D: serde::Deserializer<'de>>(d: D) -> Result<Str
 fn lenient_number<'de, D: serde::Deserializer<'de>>(d: D) -> Result<Option<f64>, D::Error> {
     Ok(match serde_json::Value::deserialize(d)? {
         serde_json::Value::Number(n) => n.as_f64(),
-        serde_json::Value::String(s) => s.trim().parse().ok(),
+        serde_json::Value::String(s) => s.trim().parse::<f64>().ok().filter(|x| x.is_finite()),
         _ => None,
     })
 }
@@ -306,9 +306,10 @@ pub fn expand_path_vars(text: &str, vars: &BTreeMap<String, String>) -> String {
 /// expanded FIRST, in args and env values only (never the command, which must
 /// stay inside the bundle, and never env keys); the user-config pass runs
 /// second, so a typed value or a keyring secret is inserted after path
-/// expansion and can never be treated as a path template. Single pass — the
-/// replacement text is never rescanned, so a value that happens to contain
-/// `${...}` stays data.
+/// expansion and can never be treated as a path template. Each pass is single
+/// (its own replacement text is not rescanned), but the path pass's output IS
+/// scanned by the user-config pass; user values are never expanded, so one
+/// that happens to contain `${...}` stays data.
 pub fn apply_user_config(
     launch: ResolvedLaunch,
     fields: &BTreeMap<String, UserConfigField>,
@@ -650,6 +651,26 @@ mod tests {
     }
 
     #[test]
+    fn non_finite_min_max_strings_are_absent_and_nulls_are_handled() {
+        for bad in ["NaN", "inf", "infinity", "-inf", "1e999"] {
+            let m = parse_manifest(&manifest_with_user_config(&format!(
+                r#"{{"a":{{"min":"{bad}","max":"{bad}"}}}}"#
+            )))
+            .unwrap();
+            let a = &m.user_config["a"];
+            assert_eq!((a.min, a.max), (None, None), "{bad}");
+        }
+        let m = parse_manifest(&manifest_with_user_config(
+            r#"{"a":{"min":"2.5"},"b":{"sensitive":null,"min":null}}"#,
+        ))
+        .unwrap();
+        assert_eq!(m.user_config["a"].min, Some(2.5));
+        // Fail safe: a null `sensitive` is sensitive.
+        assert!(m.user_config["b"].sensitive);
+        assert_eq!(m.user_config["b"].min, None);
+    }
+
+    #[test]
     fn a_user_config_that_is_not_an_object_is_empty() {
         for raw in ["[]", "null", r#""x""#, "5"] {
             let m = parse_manifest(&manifest_with_user_config(raw)).unwrap();
@@ -933,6 +954,26 @@ mod tests {
         )
         .unwrap();
         assert_eq!(out.env[0].1, "${HOME}");
+    }
+
+    /// One string mixing all three: only the manifest-authored `${HOME}`
+    /// expands; the typed `${HOME}` stays data.
+    #[test]
+    fn combined_text_expands_only_the_manifest_authored_path_variable() {
+        let launch = ResolvedLaunch {
+            command: "/b/server".into(),
+            args: vec!["--root=${HOME}/${user_config.mode}".into()],
+            env: vec![("R".into(), "${HOME}/${user_config.mode}".into())],
+        };
+        let out = apply_user_config(
+            launch,
+            &fields_with_mode(),
+            &vals(&[("mode", "${HOME}")]),
+            &vals(&[("HOME", "/h")]),
+        )
+        .unwrap();
+        assert_eq!(out.args, vec!["--root=/h/${HOME}".to_string()]);
+        assert_eq!(out.env[0].1, "/h/${HOME}");
     }
 
     #[test]
