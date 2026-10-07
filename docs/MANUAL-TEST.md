@@ -295,8 +295,11 @@ device configured it follows the system default input and output, including
 when you switch them while it runs; a configured name stays pinned.
 
 **Partial pass 2026-10-07** (Apple silicon, C920 mic + Creative Pebble X
-speakers): the startup line, no self-hearing on speakers, and the
-`aec_enabled = false` A/B are confirmed. With a close-talking headset boom mic
+speakers): the startup line, no self-hearing on speakers, the
+`aec_enabled = false` A/B, barge-in, following a default-output switch, and
+minimal ducking are confirmed. Device unplug/replug recovery is confirmed at
+the audio layer (Jabra in / Pebble out, switch unplugged: rebuild, backoff,
+reopened ~2 s after return) but not yet in the running app. With a close-talking headset boom mic
 (Jabra Evolve2 30 SE) the on/off A/B shows little difference because the mic
 barely hears the speakers — use a webcam or built-in mic for the echo checks.
 
@@ -309,16 +312,22 @@ barely hears the speakers — use a webcam or built-in mic for the echo checks.
       assistant will sound duller on that pairing — expected.
 - [x] With speakers (not headphones) at a normal volume, the assistant does
       not hear itself: it must not interrupt or answer its own voice.
-- [ ] Talking over the assistant interrupts it promptly (the spike measured
+- [x] Talking over the assistant interrupts it promptly (the spike measured
       no loss of your voice during playback, so barge-in should feel the same
       as with headphones).
 - [ ] Unplug the configured or default microphone mid-session, plug it back:
       stderr shows `rebuilding voice processing` then `reopened`, and the
       conversation continues without restarting the app. Same for speakers.
-- [ ] With no output device configured, switch the system output (e.g. to
+      One unit serves both directions, so while either device is gone the
+      other is silent too — both come back together when it returns.
+- [ ] While voice processing runs, Settings → Audio lists each microphone
+      and speaker once: no speakers in the Input list, and no
+      `VPAUAggregateAudioDevice-…` entry in either list.
+- [x] With no output device configured, switch the system output (e.g. to
       headphones) while the app runs: the assistant's voice moves with it.
-- [ ] Music playing in another app is only minimally ducked while the
-      assistant listens.
+- [x] Music playing in another app keeps its volume while the assistant
+      listens. Ducking is deliberately set to the minimum, so **no** volume
+      change is the pass; an obvious dip is the failure.
 - [x] `aec_enabled = false` under `[audio]`: stderr shows `OS echo
       cancellation disabled via config`, and with speakers the assistant now
       does hear itself — confirming the toggle is not a no-op.
