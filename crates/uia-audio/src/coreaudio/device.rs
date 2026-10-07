@@ -26,7 +26,6 @@ use uia_core::audio::AudioError;
 const SYSTEM: AudioObjectID = kAudioObjectSystemObject as AudioObjectID;
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
-#[allow(dead_code)] // used by the supervisor (Task 4)
 pub(crate) enum Direction {
     Input,
     Output,
@@ -290,13 +289,11 @@ fn default_device(dir: Direction) -> Option<AudioDeviceID> {
 }
 
 /// The device `wanted` names in `dir` right now, or the current default.
-#[allow(dead_code)] // used by the supervisor (Task 4)
 pub(crate) fn resolve(dir: Direction, wanted: Option<&str>) -> Result<DeviceInfo, AudioError> {
     choose(&list(dir)?, default_device(dir), wanted, dir)
 }
 
 /// False once a device has been unplugged (or its ID never existed).
-#[allow(dead_code)] // used by the supervisor (Task 4)
 pub(crate) fn is_alive(id: AudioDeviceID) -> bool {
     get::<u32>(
         id,
@@ -313,7 +310,6 @@ pub(crate) fn is_alive(id: AudioDeviceID) -> bool {
 ///
 /// The listener only sends `Wake::Changed`; every decision and every rebuild
 /// happens on the supervisor thread, never on CoreAudio's notification thread.
-#[allow(dead_code)] // used by the supervisor (Task 4)
 pub(crate) struct Listeners {
     registered: Vec<(AudioObjectID, AudioObjectPropertyAddress)>,
     client: *mut c_void,
@@ -342,7 +338,6 @@ impl Listeners {
     /// `AudioObjectRemovePropertyListener` returns, so the sender it
     /// dereferences must never be freed. `open_voice_processing` leaks one
     /// per backend for exactly this.
-    #[allow(dead_code)] // used by the supervisor (Task 4)
     pub(crate) fn register(client: &'static Sender<Wake>, bound: &[AudioDeviceID]) -> Self {
         let mut this = Self {
             registered: Vec::new(),
