@@ -64,6 +64,10 @@ pub enum BundleError {
     MissingUserConfig(String),
     #[error("the manifest references ${{user_config.{0}}}, which it never declares")]
     UndeclaredUserConfig(String),
+    #[error(
+        "the launch command {0:?} references a user setting; a setting may not choose what runs"
+    )]
+    UserConfigInCommand(String),
     #[error("invalid local server name: {0}")]
     Name(String),
     #[error("a local server named {0:?} is already installed")]

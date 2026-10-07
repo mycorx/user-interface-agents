@@ -66,6 +66,12 @@ pub fn validate_bundle(
     if !resolved.starts_with(normalize(bundle_dir)) {
         return Err(BundleError::EscapesBundle(launch.command.clone()));
     }
+    // `user_config` is applied after validation, so a template left in the
+    // command would let a setting pick a different executable than the one
+    // approved here.
+    if launch.command.contains("${user_config.") {
+        return Err(BundleError::UserConfigInCommand(launch.command.clone()));
+    }
 
     if let Some(ext) = resolved.extension().and_then(|e| e.to_str()) {
         let lower = ext.to_ascii_lowercase();
@@ -271,5 +277,19 @@ mod tests {
         let err = validate_bundle(&m, "linux", &dir).unwrap_err();
         std::fs::remove_dir_all(&dir).ok();
         assert!(matches!(err, BundleError::EscapesBundle(_)), "got {err:?}");
+    }
+
+    /// A template inside an otherwise in-bundle path would let a setting
+    /// choose the executable after validation approved a different one.
+    #[test]
+    fn a_command_that_contains_a_user_config_reference_is_refused() {
+        let dir = bundle_with("server/${user_config.x}", b"\x7fELF");
+        let m = manifest_for("binary", "${__dirname}/server/${user_config.x}");
+        let err = validate_bundle(&m, "linux", &dir).unwrap_err();
+        std::fs::remove_dir_all(&dir).ok();
+        assert!(
+            matches!(err, BundleError::UserConfigInCommand(_)),
+            "got {err:?}"
+        );
     }
 }

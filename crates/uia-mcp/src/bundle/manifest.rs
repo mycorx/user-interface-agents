@@ -227,9 +227,8 @@ fn substitute_user_config(
         out.push_str(&rest[..start]);
         let after = &rest[start + USER_CONFIG_OPEN.len()..];
         let Some(end) = after.find('}') else {
-            // Unterminated: not a reference, leave the text alone.
-            out.push_str(&rest[start..]);
-            return Ok(out);
+            // Unterminated: never launch with literal `${user_config.*}` text.
+            return Err(BundleError::UndeclaredUserConfig(after.to_string()));
         };
         out.push_str(&resolve_user_config(&after[..end], fields, values)?);
         rest = &after[end + 1..];
@@ -616,5 +615,43 @@ mod tests {
             },
         );
         f
+    }
+
+    #[test]
+    fn an_unterminated_reference_is_an_error_not_literal_text() {
+        for text in ["a-${user_config.mode", "${user_config."] {
+            let err = apply_user_config(
+                launch_with_env(text),
+                &fields_with_mode(),
+                &vals(&[("mode", "m")]),
+            )
+            .unwrap_err();
+            assert!(
+                matches!(err, BundleError::UndeclaredUserConfig(_)),
+                "got {err:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn an_empty_key_is_an_undeclared_reference() {
+        let err = apply_user_config(
+            launch_with_env("${user_config.}"),
+            &fields_with_mode(),
+            &BTreeMap::new(),
+        )
+        .unwrap_err();
+        assert!(matches!(err, BundleError::UndeclaredUserConfig(k) if k.is_empty()));
+    }
+
+    #[test]
+    fn multibyte_text_around_a_reference_survives() {
+        let out = apply_user_config(
+            launch_with_env("é-${user_config.mode}-日本"),
+            &fields_with_mode(),
+            &vals(&[("mode", "m")]),
+        )
+        .unwrap();
+        assert_eq!(out.env[0].1, "é-m-日本");
     }
 }
