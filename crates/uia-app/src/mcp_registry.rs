@@ -477,7 +477,10 @@ pub fn save_local_config(
         for (account, prior) in &snapshot {
             let restored = match prior {
                 Some(v) => secrets.set(account, v),
-                None => secrets.delete(account),
+                // Absent is already the desired state; deleting an absent
+                // entry is an error on the real keyring.
+                None if secrets.get(account).is_some() => secrets.delete(account),
+                None => Ok(()),
             };
             if let Err(e) = restored {
                 failed.push(format!("{account}: {e}"));
@@ -2743,6 +2746,8 @@ mod config_tests {
         sets: std::sync::atomic::AtomicUsize,
         fail_set_on_nth: usize,
         fail_delete_of: Option<String>,
+        /// Like the real OS keyring: deleting an absent entry is an error.
+        strict_delete: bool,
     }
 
     impl FailingStore {
@@ -2752,6 +2757,7 @@ mod config_tests {
                 sets: std::sync::atomic::AtomicUsize::new(0),
                 fail_set_on_nth,
                 fail_delete_of: fail_delete_of.map(str::to_string),
+                strict_delete: false,
             }
         }
     }
@@ -2771,6 +2777,11 @@ mod config_tests {
             if self.fail_delete_of.as_deref() == Some(account) {
                 return Err(crate::secrets::SecretStoreError::Backend(
                     "no delete".into(),
+                ));
+            }
+            if self.strict_delete && self.inner.get(account).is_none() {
+                return Err(crate::secrets::SecretStoreError::Backend(
+                    "no such entry".into(),
                 ));
             }
             self.inner.delete(account)
@@ -2954,6 +2965,31 @@ mod config_tests {
             changes(&[("note", Some("n"))]),
         )
         .unwrap();
+        std::fs::remove_dir_all(&fx.dir).ok();
+    }
+
+    #[test]
+    fn rolling_back_never_deletes_an_entry_that_was_never_written() {
+        let fx = fixture2("rb-strict");
+        let mut secrets = FailingStore::new(2, None);
+        secrets.strict_delete = true;
+        let before = std::fs::read_to_string(&fx.registry).unwrap();
+        let err = save_local_config(
+            &fx.registry,
+            &fx.servers,
+            &secrets,
+            "mymy",
+            changes(&[("a", Some("A2")), ("b", Some("B2"))]),
+        )
+        .unwrap_err();
+        assert!(err.contains("boom"), "{err}");
+        assert!(
+            !err.contains("restor"),
+            "a spurious rollback failure was reported: {err}"
+        );
+        assert_eq!(secrets.get("mcp-config.mymy.a"), None);
+        assert_eq!(secrets.get("mcp-config.mymy.b"), None);
+        assert_eq!(std::fs::read_to_string(&fx.registry).unwrap(), before);
         std::fs::remove_dir_all(&fx.dir).ok();
     }
 }
