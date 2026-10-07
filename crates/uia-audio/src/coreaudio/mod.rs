@@ -4,6 +4,8 @@
 //! macOS-native echo cancellation, via the Voice Processing IO audio unit.
 
 mod device;
+#[allow(dead_code)] // used by the supervisor (Task 4)
+mod unit;
 
 /// What wakes the supervisor thread.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
