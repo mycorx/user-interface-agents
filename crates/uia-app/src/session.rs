@@ -350,6 +350,9 @@ pub fn mcp_targets(
     // value — trimming and blank-means-unset happen here, not upstream, so
     // every caller (including a future one) gets the same rule for free.
     home_location: Option<&str>,
+    // Where a bundle's saved `sensitive` settings live. Only read for local
+    // servers that declare `user_config`.
+    secrets: &dyn crate::secrets::SecretStore,
 ) -> McpPlan {
     let mut targets = Vec::new();
     let mut skipped: Vec<(String, String)> = Vec::new();
@@ -388,6 +391,21 @@ pub fn mcp_targets(
         // resolve.
         match uia_mcp::bundle::validate_bundle(&parsed, uia_mcp::bundle::current_platform(), &dir) {
             Ok(launch) => {
+                let values =
+                    crate::mcp_registry::local_config_values(server, &parsed.user_config, secrets);
+                let launch = match uia_mcp::bundle::apply_user_config(
+                    launch,
+                    &parsed.user_config,
+                    &values,
+                ) {
+                    Ok(l) => l,
+                    Err(e) => {
+                        let why = format!("its settings are incomplete: {e}");
+                        eprintln!("mcp: local server {:?} skipped, {why}", server.name);
+                        skipped.push((server.name.clone(), why));
+                        continue;
+                    }
+                };
                 let mut env = launch.env;
                 // Only the weather server's own process gets this — an env
                 // var is per-process anyway, but the name check is what keeps
@@ -442,6 +460,7 @@ pub async fn build_executor(
     local_servers_dir: &std::path::Path,
     health: &McpHealth,
     home_location: Option<&str>,
+    secrets: &dyn crate::secrets::SecretStore,
 ) -> Arc<dyn ToolExecutor> {
     let oauth_remote_names: std::collections::HashSet<&str> = registry
         .remote_servers
@@ -450,7 +469,7 @@ pub async fn build_executor(
         .map(|r| r.name.as_str())
         .collect();
 
-    let plan = mcp_targets(registry, local_servers_dir, home_location);
+    let plan = mcp_targets(registry, local_servers_dir, home_location, secrets);
 
     // Recorded before any connection is attempted: a server dropped by
     // `mcp_targets` never reaches the loop below, so this is the only place
@@ -763,7 +782,14 @@ pub async fn build_session(
         engine: engine_for(config, engine_choice, store)?,
         executor: persona_tools(
             time_tools(
-                build_executor(registry, local_servers_dir, mcp_health, home_location).await,
+                build_executor(
+                    registry,
+                    local_servers_dir,
+                    mcp_health,
+                    home_location,
+                    store,
+                )
+                .await,
             ),
             book,
             global_name,
@@ -961,6 +987,67 @@ mod tests {
     }
 
     use crate::mcp_registry::{LocalServerEntry, McpRegistry, RemoteEntry};
+    use crate::secrets::SecretStore;
+
+    /// A bundle on disk whose manifest uses `user_config`, plus a registry
+    /// that has it enabled.
+    fn user_config_fixture(label: &str) -> (McpRegistry, std::path::PathBuf) {
+        let dir = std::env::temp_dir().join(format!("uia-sess-cfg-{}-{label}", std::process::id()));
+        std::fs::remove_dir_all(&dir).ok();
+        let bundle = dir.join("mymy");
+        std::fs::create_dir_all(bundle.join("server")).unwrap();
+        std::fs::write(bundle.join("server/mymy"), b"\x7fELF-bytes").unwrap();
+        std::fs::write(
+            bundle.join("manifest.json"),
+            r#"{ "manifest_version":"0.3","name":"mymy","version":"1",
+                 "server":{"type":"binary","entry_point":"server/mymy",
+                   "mcp_config":{"command":"${__dirname}/server/mymy",
+                     "env":{"TOASTS":"${user_config.toasts}","TOKEN":"${user_config.token}"}}},
+                 "user_config":{
+                   "toasts":{"type":"string","default":"true"},
+                   "token":{"type":"string","sensitive":true,"required":true}}}"#,
+        )
+        .unwrap();
+        let mut reg = McpRegistry::default();
+        reg.add_local_server("mymy".into(), Some("1".into()))
+            .unwrap();
+        reg.set_local_server_enabled("mymy", true).unwrap();
+        (reg, dir)
+    }
+
+    #[test]
+    fn saved_settings_reach_the_launched_servers_environment() {
+        let (mut reg, dir) = user_config_fixture("ok");
+        reg.local_servers[0]
+            .user_config
+            .insert("toasts".into(), "false".into());
+        let secrets = crate::secrets::FakeSecretStore::new();
+        secrets.set("mcp-config.mymy.token", "tok").unwrap();
+
+        let plan = mcp_targets(&reg, &dir, None, &secrets);
+        std::fs::remove_dir_all(&dir).ok();
+
+        let McpServerConfig::Stdio { env, .. } = &plan.targets[0].1 else {
+            panic!("not stdio")
+        };
+        assert!(env.contains(&("TOASTS".into(), "false".into())), "{env:?}");
+        assert!(env.contains(&("TOKEN".into(), "tok".into())), "{env:?}");
+    }
+
+    #[test]
+    fn a_required_secret_that_is_not_in_the_keyring_fails_the_server_with_a_reason() {
+        let (reg, dir) = user_config_fixture("missing");
+        let plan = mcp_targets(&reg, &dir, None, &crate::secrets::FakeSecretStore::new());
+        std::fs::remove_dir_all(&dir).ok();
+
+        assert!(
+            plan.targets.is_empty(),
+            "launched with a missing required setting"
+        );
+        let (name, why) = &plan.skipped[0];
+        assert_eq!(name, "mymy");
+        assert!(why.contains("token") && why.contains("Settings"), "{why}");
+    }
 
     /// Lays down a local server directory the way `install_bundle` would have, so
     /// `mcp_targets` has a real manifest to resolve a launch from.
@@ -1030,7 +1117,13 @@ mod tests {
             remote_servers: vec![],
         };
 
-        let targets = mcp_targets(&registry, &dir, None).targets;
+        let targets = mcp_targets(
+            &registry,
+            &dir,
+            None,
+            &crate::secrets::FakeSecretStore::new(),
+        )
+        .targets;
 
         let names: Vec<String> = targets.iter().map(|(n, _)| n.clone()).collect();
         let transport = targets.first().map(|(_, t)| t.clone());
@@ -1075,7 +1168,13 @@ mod tests {
             remote_servers: vec![],
         };
 
-        let targets = mcp_targets(&registry, &dir, Some("Hobart")).targets;
+        let targets = mcp_targets(
+            &registry,
+            &dir,
+            Some("Hobart"),
+            &crate::secrets::FakeSecretStore::new(),
+        )
+        .targets;
         std::fs::remove_dir_all(&dir).ok();
 
         let env_of = |name: &str| {
@@ -1122,7 +1221,13 @@ mod tests {
             remote_servers: vec![],
         };
 
-        let targets = mcp_targets(&registry, &dir, None).targets;
+        let targets = mcp_targets(
+            &registry,
+            &dir,
+            None,
+            &crate::secrets::FakeSecretStore::new(),
+        )
+        .targets;
         std::fs::remove_dir_all(&dir).ok();
 
         let McpServerConfig::Stdio { env, .. } = &targets[0].1 else {
@@ -1150,7 +1255,13 @@ mod tests {
             remote_servers: vec![],
         };
 
-        let targets = mcp_targets(&registry, &dir, Some("   ")).targets;
+        let targets = mcp_targets(
+            &registry,
+            &dir,
+            Some("   "),
+            &crate::secrets::FakeSecretStore::new(),
+        )
+        .targets;
         std::fs::remove_dir_all(&dir).ok();
 
         let McpServerConfig::Stdio { env, .. } = &targets[0].1 else {
@@ -1167,7 +1278,13 @@ mod tests {
             remote_servers: vec![remote_entry("docs", true), remote_entry("wiki", false)],
         };
 
-        let targets = mcp_targets(&registry, &dir, None).targets;
+        let targets = mcp_targets(
+            &registry,
+            &dir,
+            None,
+            &crate::secrets::FakeSecretStore::new(),
+        )
+        .targets;
 
         let names: Vec<String> = targets.iter().map(|(n, _)| n.clone()).collect();
         let transport = targets.first().map(|(_, t)| t.clone());
@@ -1220,7 +1337,13 @@ mod tests {
             remote_servers: vec![],
         };
 
-        let targets = mcp_targets(&registry, &dir, None).targets;
+        let targets = mcp_targets(
+            &registry,
+            &dir,
+            None,
+            &crate::secrets::FakeSecretStore::new(),
+        )
+        .targets;
 
         let names: Vec<String> = targets.iter().map(|(n, _)| n.clone()).collect();
         std::fs::remove_dir_all(&dir).ok();
@@ -1283,7 +1406,12 @@ mod tests {
             remote_servers: vec![],
         };
 
-        let plan = mcp_targets(&registry, &dir, None);
+        let plan = mcp_targets(
+            &registry,
+            &dir,
+            None,
+            &crate::secrets::FakeSecretStore::new(),
+        );
 
         let names: Vec<String> = plan.targets.iter().map(|(n, _)| n.clone()).collect();
         let skipped = plan.skipped.clone();
@@ -1324,7 +1452,12 @@ mod tests {
             remote_servers: vec![],
         };
 
-        let plan = mcp_targets(&registry, &dir, None);
+        let plan = mcp_targets(
+            &registry,
+            &dir,
+            None,
+            &crate::secrets::FakeSecretStore::new(),
+        );
         std::fs::remove_dir_all(&dir).ok();
 
         assert!(plan.targets.is_empty());
@@ -1354,7 +1487,12 @@ mod tests {
             remote_servers: vec![],
         };
 
-        let plan = mcp_targets(&registry, &dir, None);
+        let plan = mcp_targets(
+            &registry,
+            &dir,
+            None,
+            &crate::secrets::FakeSecretStore::new(),
+        );
         std::fs::remove_dir_all(&dir).ok();
 
         assert!(plan.targets.is_empty());
@@ -1521,7 +1659,14 @@ mod tests {
     #[tokio::test]
     async fn an_empty_registry_yields_an_executor_that_declares_no_tools() {
         let dir = local_servers_root("empty");
-        let exec = build_executor(&McpRegistry::default(), &dir, &McpHealth::default(), None).await;
+        let exec = build_executor(
+            &McpRegistry::default(),
+            &dir,
+            &McpHealth::default(),
+            None,
+            &crate::secrets::FakeSecretStore::new(),
+        )
+        .await;
         let empty = exec.list_tools().await.unwrap().is_empty();
         std::fs::remove_dir_all(&dir).ok();
         assert!(empty);
