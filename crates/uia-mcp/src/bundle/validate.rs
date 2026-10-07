@@ -260,4 +260,16 @@ mod tests {
         std::fs::remove_dir_all(&dir).ok();
         assert!(matches!(err, BundleError::Name(_)), "got {err:?}");
     }
+
+    /// `user_config` is applied AFTER validation, so a command that is only a
+    /// template can never be validated into existence: it resolves outside
+    /// the bundle. A user-set value must never get to choose the executable.
+    #[test]
+    fn a_command_that_is_only_a_user_config_reference_is_refused() {
+        let dir = bundle_with("server/probe", b"\x7fELF");
+        let m = manifest_for("binary", "${user_config.exe}");
+        let err = validate_bundle(&m, "linux", &dir).unwrap_err();
+        std::fs::remove_dir_all(&dir).ok();
+        assert!(matches!(err, BundleError::EscapesBundle(_)), "got {err:?}");
+    }
 }

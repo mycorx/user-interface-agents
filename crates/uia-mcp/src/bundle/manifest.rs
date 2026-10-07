@@ -187,6 +187,78 @@ pub fn resolve_launch(
     Ok(ResolvedLaunch { command, args, env })
 }
 
+const USER_CONFIG_OPEN: &str = "${user_config.";
+
+/// Substitute `${user_config.<key>}` in an already-validated launch.
+///
+/// Runs after `validate_bundle` on purpose: the trust checks must judge the
+/// manifest as shipped, not as a user configured it. Single pass — the
+/// replacement text is never rescanned, so a value that happens to contain
+/// `${...}` stays data.
+pub fn apply_user_config(
+    launch: ResolvedLaunch,
+    fields: &BTreeMap<String, UserConfigField>,
+    values: &BTreeMap<String, String>,
+) -> Result<ResolvedLaunch, BundleError> {
+    let sub = |text: &str| substitute_user_config(text, fields, values);
+    Ok(ResolvedLaunch {
+        command: sub(&launch.command)?,
+        args: launch
+            .args
+            .iter()
+            .map(|a| sub(a))
+            .collect::<Result<_, _>>()?,
+        env: launch
+            .env
+            .iter()
+            .map(|(k, v)| Ok((k.clone(), sub(v)?)))
+            .collect::<Result<_, BundleError>>()?,
+    })
+}
+
+fn substitute_user_config(
+    text: &str,
+    fields: &BTreeMap<String, UserConfigField>,
+    values: &BTreeMap<String, String>,
+) -> Result<String, BundleError> {
+    let mut out = String::with_capacity(text.len());
+    let mut rest = text;
+    while let Some(start) = rest.find(USER_CONFIG_OPEN) {
+        out.push_str(&rest[..start]);
+        let after = &rest[start + USER_CONFIG_OPEN.len()..];
+        let Some(end) = after.find('}') else {
+            // Unterminated: not a reference, leave the text alone.
+            out.push_str(&rest[start..]);
+            return Ok(out);
+        };
+        out.push_str(&resolve_user_config(&after[..end], fields, values)?);
+        rest = &after[end + 1..];
+    }
+    out.push_str(rest);
+    Ok(out)
+}
+
+fn resolve_user_config(
+    key: &str,
+    fields: &BTreeMap<String, UserConfigField>,
+    values: &BTreeMap<String, String>,
+) -> Result<String, BundleError> {
+    let field = fields
+        .get(key)
+        .ok_or_else(|| BundleError::UndeclaredUserConfig(key.to_string()))?;
+    if let Some(v) = values.get(key).filter(|v| !v.is_empty()) {
+        return Ok(v.clone());
+    }
+    if let Some(d) = field.default_text() {
+        return Ok(d);
+    }
+    if field.required {
+        Err(BundleError::MissingUserConfig(key.to_string()))
+    } else {
+        Ok(String::new())
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -418,5 +490,131 @@ mod tests {
             serde_json::from_str(r#"{"type":"directory","multiple":true,"default":["/a","/b"]}"#)
                 .unwrap();
         assert_eq!(f.default_text().as_deref(), Some("/a"));
+    }
+
+    fn launch_with_env(value: &str) -> ResolvedLaunch {
+        ResolvedLaunch {
+            command: "/b/server".into(),
+            args: vec!["--mode=${user_config.mode}".into()],
+            env: vec![("TOASTS".into(), value.into())],
+        }
+    }
+
+    fn fields() -> BTreeMap<String, UserConfigField> {
+        parse_manifest(USER_CONFIG_MANIFEST).unwrap().user_config
+    }
+
+    fn vals(pairs: &[(&str, &str)]) -> BTreeMap<String, String> {
+        pairs
+            .iter()
+            .map(|(k, v)| (k.to_string(), v.to_string()))
+            .collect()
+    }
+
+    #[test]
+    fn a_stored_value_wins_over_the_manifest_default() {
+        let out = apply_user_config(
+            launch_with_env("${user_config.enable_system_toasts}"),
+            &fields_with_mode(),
+            &vals(&[
+                ("enable_system_toasts", "false"),
+                ("mode", "x"),
+                ("api_token", "t"),
+            ]),
+        )
+        .unwrap();
+        assert_eq!(out.env, vec![("TOASTS".to_string(), "false".to_string())]);
+        assert_eq!(out.args, vec!["--mode=x".to_string()]);
+    }
+
+    #[test]
+    fn the_manifest_default_applies_when_nothing_is_stored() {
+        let out = apply_user_config(
+            launch_with_env("${user_config.enable_system_toasts}"),
+            &fields_with_mode(),
+            &vals(&[("mode", "x"), ("api_token", "t")]),
+        )
+        .unwrap();
+        assert_eq!(out.env[0].1, "true");
+    }
+
+    #[test]
+    fn an_optional_field_with_no_value_and_no_default_is_empty() {
+        let out = apply_user_config(
+            launch_with_env("${user_config.mode}"),
+            &fields_with_mode(),
+            &BTreeMap::new(),
+        )
+        .unwrap();
+        assert_eq!(out.env[0].1, "");
+    }
+
+    #[test]
+    fn a_required_field_with_no_value_and_no_default_is_an_error() {
+        let err = apply_user_config(
+            launch_with_env("${user_config.api_token}"),
+            &fields_with_mode(),
+            &BTreeMap::new(),
+        )
+        .unwrap_err();
+        assert!(matches!(err, BundleError::MissingUserConfig(k) if k == "api_token"));
+    }
+
+    #[test]
+    fn a_reference_to_an_undeclared_key_is_an_error_not_a_literal() {
+        let err = apply_user_config(
+            launch_with_env("${user_config.typo}"),
+            &fields_with_mode(),
+            &BTreeMap::new(),
+        )
+        .unwrap_err();
+        assert!(matches!(err, BundleError::UndeclaredUserConfig(k) if k == "typo"));
+    }
+
+    /// A user-typed value must stay data: no second round of substitution.
+    #[test]
+    fn a_value_that_looks_like_a_template_is_not_expanded_again() {
+        let out = apply_user_config(
+            launch_with_env("${user_config.mode}"),
+            &fields_with_mode(),
+            &vals(&[("mode", "${__dirname}/${user_config.api_token}")]),
+        )
+        .unwrap();
+        assert_eq!(out.env[0].1, "${__dirname}/${user_config.api_token}");
+    }
+
+    #[test]
+    fn awkward_characters_reach_the_env_byte_for_byte() {
+        let nasty = "a b \"q\" $HOME 'z' é 日本";
+        let out = apply_user_config(
+            launch_with_env("${user_config.mode}"),
+            &fields_with_mode(),
+            &vals(&[("mode", nasty)]),
+        )
+        .unwrap();
+        assert_eq!(out.env[0].1, nasty);
+    }
+
+    #[test]
+    fn text_around_a_reference_and_several_references_all_substitute() {
+        let out = apply_user_config(
+            launch_with_env("x-${user_config.mode}-${user_config.mode}-y"),
+            &fields_with_mode(),
+            &vals(&[("mode", "m")]),
+        )
+        .unwrap();
+        assert_eq!(out.env[0].1, "x-m-m-y");
+    }
+
+    fn fields_with_mode() -> BTreeMap<String, UserConfigField> {
+        let mut f = fields();
+        f.insert(
+            "mode".into(),
+            UserConfigField {
+                kind: "string".into(),
+                ..Default::default()
+            },
+        );
+        f
     }
 }

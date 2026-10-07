@@ -20,8 +20,8 @@ pub mod validate;
 
 pub use install::{InstalledBundle, install_bundle};
 pub use manifest::{
-    McpbManifest, McpbMcpConfig, McpbServer, ResolvedLaunch, UserConfigField, current_platform,
-    parse_manifest, resolve_launch,
+    McpbManifest, McpbMcpConfig, McpbServer, ResolvedLaunch, UserConfigField, apply_user_config,
+    current_platform, parse_manifest, resolve_launch,
 };
 pub use validate::{SCRIPT_EXTENSIONS, validate_bundle};
 
@@ -57,6 +57,13 @@ pub enum BundleError {
     EscapesBundle(String),
     #[error("the bundle's launch command {0:?} is not a file inside the bundle")]
     MissingCommand(String),
+    #[error(
+        "the setting {0:?} is required but has no value and no default; set it in \
+         Settings \u{2192} MCP"
+    )]
+    MissingUserConfig(String),
+    #[error("the manifest references ${{user_config.{0}}}, which it never declares")]
+    UndeclaredUserConfig(String),
     #[error("invalid local server name: {0}")]
     Name(String),
     #[error("a local server named {0:?} is already installed")]
