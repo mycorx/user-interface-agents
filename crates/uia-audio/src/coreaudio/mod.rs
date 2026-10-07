@@ -27,11 +27,11 @@ pub use render::CoreAudioSink;
 use crate::backoff::reopen_delay_ms;
 use device::{DeviceInfo, Direction, Listeners};
 use std::sync::mpsc::{Receiver, RecvTimeoutError, Sender};
-use std::sync::{Arc, Mutex};
+use std::sync::{Arc, Mutex, PoisonError};
 use std::thread::JoinHandle;
 use std::time::Duration;
 use uia_core::audio::{AudioError, AudioFormat, Encoding};
-use unit::{CLIENT_RATE_HZ, Shared, VoiceUnit};
+use unit::{CLIENT_RATE_HZ, FramesTx, Shared, VoiceUnit};
 
 /// Backstop re-check for notifications CoreAudio did not deliver.
 const WATCH_INTERVAL: Duration = Duration::from_secs(2);
@@ -96,11 +96,12 @@ struct Opened {
 
 impl std::fmt::Display for Opened {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        write!(
-            f,
-            "input {:?} / output {:?}, processing at {} Hz",
-            self.input, self.output, self.processing_rate_hz
-        )?;
+        write!(f, "input {:?} / output {:?}, ", self.input, self.output)?;
+        if self.processing_rate_hz == 0 {
+            write!(f, "processing rate unknown")?;
+        } else {
+            write!(f, "processing at {} Hz", self.processing_rate_hz)?;
+        }
         if self.processing_rate_hz != 0 && self.processing_rate_hz < CLIENT_RATE_HZ {
             write!(
                 f,
@@ -142,7 +143,7 @@ pub fn open_voice_processing(
     // Bounded and small, as for `CpalSource`: live audio wants the newest
     // frame dropped, not a backlog.
     let (frames_tx, frames_rx) = tokio::sync::mpsc::channel(64);
-    let shared = Arc::new(Shared::new(frames_tx));
+    let shared = Arc::new(Shared::new());
     let (wake_tx, wake_rx) = std::sync::mpsc::channel();
     let (ready_tx, ready_rx) = std::sync::mpsc::channel();
     // Leaked deliberately, one per backend: see `Listeners::register`.
@@ -155,7 +156,16 @@ pub fn open_voice_processing(
 
     let worker = std::thread::Builder::new()
         .name("uia-coreaudio-vpio".to_string())
-        .spawn(move || supervise(ready_tx, wake_rx, listener_tx, worker_shared, wanted))
+        .spawn(move || {
+            supervise(
+                ready_tx,
+                wake_rx,
+                listener_tx,
+                worker_shared,
+                frames_tx,
+                wanted,
+            )
+        })
         .map_err(|e| {
             AudioError::DeviceUnavailable(format!(
                 "coreaudio: could not spawn the supervisor thread: {e}"
@@ -191,11 +201,17 @@ pub fn open_voice_processing(
 }
 
 /// Own the unit for the backend's lifetime: open, watch, rebuild, back off.
+///
+/// `frames_tx` lives on this thread's stack (each unit's callbacks hold only
+/// a clone), so however this function ends — return or panic — the capture
+/// channel closes and the source sees end-of-stream instead of hanging on a
+/// dead microphone.
 fn supervise(
     ready_tx: std::sync::mpsc::Sender<Result<Opened, AudioError>>,
     wake: Receiver<Wake>,
     listener_tx: &'static Sender<Wake>,
     shared: Arc<Shared>,
+    frames_tx: FramesTx,
     wanted: Wanted,
 ) {
     let mut ready_tx = Some(ready_tx);
@@ -204,7 +220,7 @@ fn supervise(
 
     loop {
         let opened = wanted.resolve().and_then(|(input, output)| {
-            VoiceUnit::open(input.id, output.id, &shared).map(|u| (u, input, output))
+            VoiceUnit::open(input.id, output.id, &shared, &frames_tx).map(|u| (u, input, output))
         });
         let (voice, input, output) = match opened {
             Ok(opened) => opened,
@@ -218,6 +234,15 @@ fn supervise(
                         "uia-audio: coreaudio cannot reopen voice processing ({e}); still trying"
                     );
                     loss_logged = true;
+                    // Nothing drains the queue while no unit runs; without
+                    // this the assistant would resume mid-backlog after the
+                    // outage. A quick successful rebuild never gets here, so
+                    // a default-device switch keeps speaking seamlessly.
+                    shared
+                        .queue
+                        .lock()
+                        .unwrap_or_else(PoisonError::into_inner)
+                        .clear();
                 }
                 if !wait_or_stop(
                     &wake,
@@ -320,13 +345,80 @@ mod tests {
         );
     }
 
+    /// `wait_or_stop`'s contract: a `Changed` wake ends the wait early and
+    /// keeps going. During backoff the listeners are already dropped, so such
+    /// a wake can only be a stale one queued before the unit went down — the
+    /// supervisor does not react to device changes mid-backoff.
     #[test]
-    fn a_change_during_backoff_cuts_it_short_but_keeps_going() {
+    fn a_changed_wake_ends_the_wait_early_but_keeps_going() {
         let (tx, rx) = std::sync::mpsc::channel();
         tx.send(Wake::Changed).unwrap();
         let started = Instant::now();
         assert!(wait_or_stop(&rx, Duration::from_secs(5)));
         assert!(started.elapsed() < Duration::from_millis(200));
+    }
+
+    #[test]
+    fn an_unknown_processing_rate_is_not_reported_as_zero_hz() {
+        let opened = Opened {
+            input: "Mic".to_string(),
+            output: "Speakers".to_string(),
+            processing_rate_hz: 0,
+        };
+        let text = opened.to_string();
+        assert!(text.contains("processing rate unknown"), "got: {text}");
+        assert!(!text.contains("0 Hz"), "got: {text}");
+        assert!(!text.contains("band-limited"), "got: {text}");
+    }
+
+    #[test]
+    fn a_known_rate_below_48k_notes_band_limiting() {
+        let opened = Opened {
+            input: "Webcam".to_string(),
+            output: "Speakers".to_string(),
+            processing_rate_hz: 16_000,
+        };
+        assert_eq!(
+            opened.to_string(),
+            "input \"Webcam\" / output \"Speakers\", processing at 16000 Hz \
+             (the assistant's voice is band-limited on this device pairing)"
+        );
+    }
+
+    /// The source must see end-of-stream when the supervisor thread ends,
+    /// even while something (here, as in `Backend`) still holds `Shared`.
+    /// Runs the real `supervise` with a device name nothing can match, so it
+    /// ends deterministically with or without audio hardware.
+    #[test]
+    fn the_capture_channel_closes_when_the_supervisor_ends() {
+        let (frames_tx, mut frames_rx) = tokio::sync::mpsc::channel(4);
+        let shared = Arc::new(Shared::new());
+        let (_wake_tx, wake_rx) = std::sync::mpsc::channel();
+        let (ready_tx, ready_rx) = std::sync::mpsc::channel();
+        let listener_tx: &'static Sender<Wake> = Box::leak(Box::new(std::sync::mpsc::channel().0));
+        let wanted = Wanted {
+            input: Some("definitely-not-a-real-device-9f3a1c".to_string()),
+            output: None,
+        };
+        let worker_shared = Arc::clone(&shared);
+        std::thread::spawn(move || {
+            supervise(
+                ready_tx,
+                wake_rx,
+                listener_tx,
+                worker_shared,
+                frames_tx,
+                wanted,
+            )
+        })
+        .join()
+        .unwrap();
+        assert!(matches!(ready_rx.recv(), Ok(Err(_))));
+        assert!(
+            frames_rx.blocking_recv().is_none(),
+            "the source would wait forever on a dead microphone"
+        );
+        drop(shared);
     }
 
     #[test]

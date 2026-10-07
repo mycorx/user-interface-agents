@@ -51,21 +51,26 @@ const MAX_FRAMES: u32 = 4096;
 const OUTPUT_ELEMENT: AudioUnitElement = 0;
 const INPUT_ELEMENT: AudioUnitElement = 1;
 
+/// The capture channel's sending half. The supervisor owns the original and
+/// each unit's callbacks hold a clone, so the channel closes — and the
+/// source's `next_frame` returns `None` — whenever the supervisor thread
+/// ends, normally or by panic.
+pub(crate) type FramesTx = tokio::sync::mpsc::Sender<Vec<i16>>;
+
 /// State shared by the callbacks, the supervisor, and the source/sink.
-/// Outlives any one `VoiceUnit`, which is what lets queued audio and the
-/// capture channel survive a device reopen.
+/// Outlives any one `VoiceUnit`, which is what lets queued audio survive a
+/// device reopen. Deliberately holds no capture sender: the source and sink
+/// keep this alive, and that must not keep the microphone channel open.
 pub(crate) struct Shared {
     pub(crate) queue: Mutex<VecDeque<i16>>,
-    pub(crate) frames_tx: tokio::sync::mpsc::Sender<Vec<i16>>,
     pub(crate) render_calls: AtomicU64,
     pub(crate) render_frames: AtomicU64,
 }
 
 impl Shared {
-    pub(crate) fn new(frames_tx: tokio::sync::mpsc::Sender<Vec<i16>>) -> Self {
+    pub(crate) fn new() -> Self {
         Self {
             queue: Mutex::new(VecDeque::new()),
-            frames_tx,
             render_calls: AtomicU64::new(0),
             render_frames: AtomicU64::new(0),
         }
@@ -76,6 +81,8 @@ impl Shared {
 struct CallbackCtx {
     unit: AudioUnit,
     shared: Arc<Shared>,
+    /// A clone of the supervisor's sender, dropped with the unit.
+    frames_tx: FramesTx,
     /// Touched only by the input callback; `UnsafeCell` so the render
     /// callback's shared borrow of the same context never aliases a `&mut`.
     scratch: UnsafeCell<Vec<f32>>,
@@ -85,8 +92,10 @@ pub(crate) struct VoiceUnit {
     unit: AudioUnit,
     ctx: *mut CallbackCtx,
     initialized: bool,
-    /// The rate VPIO actually processes at: the lower of the two devices'.
-    /// Logged, because below 48 kHz the assistant's voice is band-limited.
+    /// Element 1's input-scope (hardware-side) sample rate, 0 if unreadable.
+    /// The spike saw VPIO run both sides at the slower device's rate, so this
+    /// is expected to reflect that device. Logged, because below 48 kHz the
+    /// assistant's voice is band-limited.
     pub(crate) processing_rate_hz: u32,
 }
 
@@ -217,7 +226,7 @@ unsafe extern "C-unwind" fn input_callback(
     if status != 0 {
         return status;
     }
-    let _ = ctx.shared.frames_tx.try_send(f32_to_i16(&scratch[..len]));
+    let _ = ctx.frames_tx.try_send(f32_to_i16(&scratch[..len]));
     0
 }
 
@@ -279,6 +288,7 @@ impl VoiceUnit {
         input: AudioDeviceID,
         output: AudioDeviceID,
         shared: &Arc<Shared>,
+        frames_tx: &FramesTx,
     ) -> Result<Self, AudioError> {
         let desc = AudioComponentDescription {
             componentType: kAudioUnitType_Output,
@@ -303,6 +313,7 @@ impl VoiceUnit {
         let ctx = Box::into_raw(Box::new(CallbackCtx {
             unit,
             shared: Arc::clone(shared),
+            frames_tx: frames_tx.clone(),
             scratch: UnsafeCell::new(vec![0.0; MAX_FRAMES as usize]),
         }));
         // Built before configuring, so every failure below is cleaned up by Drop.
