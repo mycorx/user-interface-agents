@@ -481,6 +481,8 @@ fn main() {
             remove_mcp_local_server,
             set_mcp_local_server_enabled,
             describe_mcp_local_server,
+            get_mcp_local_server_config,
+            set_mcp_local_server_config,
             list_mcp_server_health,
             list_mcp_remote_servers,
             preview_mcp_remote_server,
@@ -1326,24 +1328,22 @@ fn install_mcp_local_server(
     }
 }
 
-/// Drops the record AND the extracted files. The registry owns only the
-/// record (see `McpRegistry::remove_local_server`), so the directory is this
-/// command's responsibility — it is the half that knows where they live.
+/// Drops the record, the extracted files AND the server's saved-settings
+/// keyring entries. The registry owns only the record (see
+/// `McpRegistry::remove_local_server`), so the directory and the keyring are
+/// `mcp_registry::remove_local_server_and_clear_config`'s responsibility.
 #[tauri::command]
 fn remove_mcp_local_server(
     registry_state: tauri::State<McpRegistryPath>,
     local_servers_state: tauri::State<McpLocalServersDir>,
     name: String,
 ) -> Result<(), String> {
-    let mut registry = mcp_registry::load(&registry_state.0);
-    registry
-        .remove_local_server(&name)
-        .map_err(|e| e.to_string())?;
-    mcp_registry::save(&registry_state.0, &registry).map_err(|e| e.to_string())?;
-    // After the record is gone, so a failure here cannot resurrect a local server
-    // the user has already removed from the UI's point of view.
-    std::fs::remove_dir_all(local_servers_state.0.join(&name)).ok();
-    Ok(())
+    mcp_registry::remove_local_server_and_clear_config(
+        &registry_state.0,
+        &local_servers_state.0,
+        &uia_app::secrets::OsKeyring,
+        &name,
+    )
 }
 
 /// Restart-to-apply, like every other MCP change: `build_executor` read the
@@ -1372,6 +1372,41 @@ fn describe_mcp_local_server(
 ) -> Result<mcp_registry::LocalServerDetails, String> {
     let registry = mcp_registry::load(&registry_state.0);
     mcp_registry::describe_local_server(&registry, &local_servers_state.0, &name)
+}
+
+/// Adapter over `mcp_registry::describe_local_config`. Sensitive values are
+/// never in the return value — only whether one is stored.
+#[tauri::command]
+fn get_mcp_local_server_config(
+    registry_state: tauri::State<McpRegistryPath>,
+    local_servers_state: tauri::State<McpLocalServersDir>,
+    name: String,
+) -> Result<Vec<mcp_registry::ConfigFieldView>, String> {
+    let registry = mcp_registry::load(&registry_state.0);
+    mcp_registry::describe_local_config(
+        &registry,
+        &local_servers_state.0,
+        &uia_app::secrets::OsKeyring,
+        &name,
+    )
+}
+
+/// Restart-to-apply, like every other MCP change. A key left out of `values`
+/// is unchanged; `null` (or an empty string) clears it.
+#[tauri::command]
+fn set_mcp_local_server_config(
+    registry_state: tauri::State<McpRegistryPath>,
+    local_servers_state: tauri::State<McpLocalServersDir>,
+    name: String,
+    values: std::collections::BTreeMap<String, Option<String>>,
+) -> Result<(), String> {
+    mcp_registry::save_local_config(
+        &registry_state.0,
+        &local_servers_state.0,
+        &uia_app::secrets::OsKeyring,
+        &name,
+        values,
+    )
 }
 
 /// What each server is contributing to the running session.
