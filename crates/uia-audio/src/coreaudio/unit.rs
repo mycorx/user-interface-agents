@@ -19,9 +19,9 @@ use objc2_audio_toolbox::{
     AudioUnitSetProperty, AudioUnitUninitialize, kAUVoiceIOProperty_OtherAudioDuckingConfiguration,
     kAudioOutputUnitProperty_CurrentDevice, kAudioOutputUnitProperty_EnableIO,
     kAudioOutputUnitProperty_SetInputCallback, kAudioUnitManufacturer_Apple,
-    kAudioUnitProperty_MaximumFramesPerSlice, kAudioUnitProperty_SetRenderCallback,
-    kAudioUnitProperty_StreamFormat, kAudioUnitScope_Global, kAudioUnitScope_Input,
-    kAudioUnitScope_Output, kAudioUnitSubType_VoiceProcessingIO, kAudioUnitType_Output,
+    kAudioUnitProperty_SetRenderCallback, kAudioUnitProperty_StreamFormat, kAudioUnitScope_Global,
+    kAudioUnitScope_Input, kAudioUnitScope_Output, kAudioUnitSubType_VoiceProcessingIO,
+    kAudioUnitType_Output,
 };
 use objc2_core_audio::AudioDeviceID;
 use objc2_core_audio_types::{
@@ -42,7 +42,11 @@ use uia_core::audio::{AudioError, f32_to_i16};
 /// hardware runs at, so `format()` never changes, even across a reopen.
 pub(crate) const CLIENT_RATE_HZ: u32 = 48_000;
 
-/// Upper bound on frames per callback; also the input scratch size.
+/// The input callback's scratch capacity in frames, and nothing more: requests
+/// beyond it are refused by `input_len`. Must NOT be applied as
+/// `kAudioUnitProperty_MaximumFramesPerSlice`: VPIO adopts that value as its
+/// actual callback period (measured: unset/512 → 10.7 ms, 1024 → 21.3 ms,
+/// 4096 → 85.3 ms at 48 kHz), which would blow the 50 ms barge-in budget.
 const MAX_FRAMES: u32 = 4096;
 const OUTPUT_ELEMENT: AudioUnitElement = 0;
 const INPUT_ELEMENT: AudioUnitElement = 1;
@@ -363,14 +367,6 @@ impl VoiceUnit {
             OUTPUT_ELEMENT,
             &format,
             "setting the playback format",
-        )?;
-        set(
-            unit,
-            kAudioUnitProperty_MaximumFramesPerSlice,
-            kAudioUnitScope_Global,
-            0,
-            &MAX_FRAMES,
-            "setting the maximum frames per callback",
         )?;
         let render = AURenderCallbackStruct {
             inputProc: Some(render_callback),
