@@ -1,4 +1,4 @@
-# SP1 manual acceptance (Windows)
+# SP1 manual acceptance (Windows and macOS)
 
 Everything here needs a real machine with a microphone, speakers, a GUI, and a
 Windows/macOS host that can compile `tauri`. **None of it can be run in the
@@ -35,6 +35,39 @@ optional; skipping any step fails the first `cargo build`, not `pnpm install`.
    node --version
    ```
 
+## Prerequisites (macOS)
+
+Same reason as on Windows: the first `pnpm run tauri dev` compiles the Rust
+backend, so the toolchain must be in place before `pnpm install`.
+
+1. Install the Xcode **Command Line Tools** — this provides the linker and
+   SDK `cargo` needs on macOS. Full Xcode is not required:
+   ```sh
+   xcode-select --install
+   ```
+2. Install Rust via [rustup](https://rustup.rs). The default toolchain for
+   the host (`aarch64-apple-darwin` on Apple silicon) is the right one.
+3. Install [Node.js](https://nodejs.org) (LTS) if not already present.
+   WKWebView ships with macOS, so there is no WebView step.
+4. Make `pnpm` available. Node ships `corepack`, which runs the exact pnpm
+   version pinned in `package.json`:
+   ```sh
+   corepack enable    # or prefix each pnpm command with `corepack`
+   ```
+5. Verify the toolchain before touching this repo:
+   ```sh
+   rustc --version
+   cargo --version
+   node --version
+   pnpm --version
+   ```
+
+The first run asks for **microphone access** for whichever app launched it
+(Terminal, iTerm, VS Code, …). Allow it. If it was denied earlier, re-enable
+it in System Settings → Privacy & Security → Microphone and restart that app.
+Without it macOS hands the app silence rather than an error, which looks like
+the assistant simply not hearing you.
+
 This is a one-time setup per machine. Once done, `pnpm run tauri dev` triggers
 a `cargo build` on first run (slow — several minutes) and incremental builds
 after that.
@@ -46,7 +79,15 @@ own — `package.json` and the `crates/uia-app` Rust sources it depends on
 only exist inside the clone. Clone the repo itself first:
 
 ```powershell
+# Windows (PowerShell)
 cd C:\Users\<you>\Downloads    # or wherever you keep checkouts
+git clone https://github.com/mycorx/user-interface-agents.git
+cd user-interface-agents
+```
+
+```sh
+# macOS (zsh/bash)
+cd ~/Downloads                 # or wherever you keep checkouts
 git clone https://github.com/mycorx/user-interface-agents.git
 cd user-interface-agents
 ```
@@ -54,11 +95,23 @@ cd user-interface-agents
 Then, from inside that clone:
 
 ```powershell
+# Windows (PowerShell)
 copy uia.example.toml uia.toml   # then edit
 $env:OPENAI_API_KEY = "sk-..."         # or set openai.key_file in uia.toml
 pnpm install
 pnpm run tauri dev
 ```
+
+```sh
+# macOS (zsh/bash)
+cp uia.example.toml uia.toml     # then edit
+export OPENAI_API_KEY="sk-..."   # or set openai.key_file in uia.toml
+pnpm install
+pnpm run tauri dev
+```
+
+The key only lives for that terminal session either way; set it in the same
+window you run `pnpm run tauri dev` from.
 
 `pnpm run tauri dev` starts the Vite dev server on `http://localhost:1420`
 itself (via `beforeDevCommand` in `tauri.conf.json`) before launching the
@@ -94,6 +147,10 @@ credentials via AWS SSO profile `sso-nonprod`) reproduced the same walk with
 no new defects: the hotkey toggle, audio quality/AEC, barge-in, and MCP tool
 calling all behaved identically to the OpenAI pass. The only expected
 difference between engines is latency (see "Known gaps to expect").
+Both passes were on **Windows**. On macOS, the shared sections (Shell,
+Session, Personas, Failure behaviour) apply unchanged; for audio, run "Audio
+quality on macOS" instead of the Windows audio section. No macOS pass has been
+recorded yet; ticked boxes below reflect the Windows runs.
 
 ### Shell (S13's surface, unverified until now)
 
@@ -197,7 +254,7 @@ native file dialog, and whether a switch *sounds* like a switch.
       expect"): `Session::switch_engine()` itself is still only reachable
       through the API, and that half remains untested through the UI.
 
-### Audio quality (S15/S17, and the one thing only a room can test)
+### Audio quality on Windows (S15/S17, and the one thing only a room can test)
 
 **Before this section, check Settings → System → Sound.** On Windows the app
 now opens the devices Windows has configured for the **Communications** role,
