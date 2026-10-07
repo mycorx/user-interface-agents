@@ -279,7 +279,9 @@
     // A key left out of `values` is unchanged; `null` clears it.
     const values: Record<string, string | null> = {};
     for (const f of fields) {
-      const text = configDraft[name][f.key] ?? '';
+      // `bind:value` on a number input stores a JS number, but the command
+      // takes strings, so coerce here.
+      const text = String(configDraft[name][f.key] ?? '');
       if (f.sensitive && text === '') continue; // keep the stored secret
       values[f.key] = text === '' ? null : text;
     }
