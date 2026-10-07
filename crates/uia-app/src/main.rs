@@ -268,10 +268,10 @@ fn main() {
     // failing the whole session in `build_session`. A failed enumeration
     // yields an empty list, which disables the filter rather than discarding
     // every audio setting the user has.
-    let available_devices: Vec<String> = uia_audio::input::list_input_devices()
+    let available_devices: Vec<String> = input_device_names()
         .unwrap_or_default()
         .into_iter()
-        .chain(uia_audio::output::list_output_devices().unwrap_or_default())
+        .chain(output_device_names().unwrap_or_default())
         .collect();
     config.audio = settings::resolve_audio_settings(
         &config.audio,
@@ -1217,18 +1217,49 @@ fn set_audio_settings(
     .map_err(|e| e.to_string())
 }
 
-/// Names for the Audio tab's input-device dropdown - see
-/// `uia_audio::input::list_input_devices`'s doc comment for why these
-/// names are guaranteed to match what `audio.input_device` accepts.
+/// Every input device name the UI and the startup filter see, from one place
+/// per OS. On macOS this is CoreAudio's own list rather than cpal's: the app
+/// runs a Voice Processing IO unit, and while it runs cpal lists every
+/// speaker as an input too (the unit's echo-reference taps) plus the unit's
+/// private aggregate. Each name appears once on every OS.
+fn input_device_names() -> Result<Vec<String>, uia_core::audio::AudioError> {
+    #[cfg(target_os = "macos")]
+    {
+        uia_audio::coreaudio::list_input_device_names()
+    }
+    #[cfg(not(target_os = "macos"))]
+    {
+        uia_audio::input::list_input_devices()
+    }
+}
+
+/// Output counterpart of [`input_device_names`].
+fn output_device_names() -> Result<Vec<String>, uia_core::audio::AudioError> {
+    #[cfg(target_os = "macos")]
+    {
+        uia_audio::coreaudio::list_output_device_names()
+    }
+    #[cfg(not(target_os = "macos"))]
+    {
+        uia_audio::output::list_output_devices()
+    }
+}
+
+/// Names for the Audio tab's input-device dropdown, via
+/// [`input_device_names`]. On macOS they come from CoreAudio's
+/// `kAudioDevicePropertyDeviceNameCFString`, the same name property cpal
+/// reports and `uia_audio::coreaudio` resolves `audio.input_device` against.
+/// Elsewhere they are cpal's list - see `uia_audio::input::list_input_devices`'s
+/// doc comment. Either way a name picked here resolves when opening.
 #[tauri::command]
 fn list_input_devices() -> Result<Vec<String>, String> {
-    uia_audio::input::list_input_devices().map_err(|e| e.to_string())
+    input_device_names().map_err(|e| e.to_string())
 }
 
 /// Names for the Audio tab's output-device dropdown.
 #[tauri::command]
 fn list_output_devices() -> Result<Vec<String>, String> {
-    uia_audio::output::list_output_devices().map_err(|e| e.to_string())
+    output_device_names().map_err(|e| e.to_string())
 }
 
 /// The `.mcpb` local servers this install has approved. The stored record only —

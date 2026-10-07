@@ -540,55 +540,77 @@ fn record_health(health: &McpHealth, entries: impl IntoIterator<Item = (String, 
 /// tuple trips clippy's `type_complexity`.
 type AudioPair = (Box<dyn AudioSource>, Box<dyn AudioSink>);
 
-/// Whether the Windows composition path should open the Communications
-/// category (real OS-level AEC) or plain devices with none.
+/// Whether to open the OS's own echo-cancelling devices (WASAPI's
+/// Communications category on Windows, Voice Processing IO on macOS) or plain
+/// devices with none.
 ///
-/// Kept as a free function outside `#[cfg(windows)]` deliberately: it is the
-/// only part of [`wasapi_or_fallback_cpal`]'s decision that doesn't touch
-/// real hardware, so it is what stays offline-testable in this sandbox —
-/// mirroring how S13 tested IPC-adjacent logic without a GUI.
-///
-/// `#[cfg_attr(not(windows), allow(dead_code))]`: the only non-test caller is
-/// `#[cfg(windows)]`, so a non-Windows `lib` compile (this sandbox, most CI)
-/// sees it used only from `#[cfg(test)]`, which is a separate compilation
-/// unit from clippy's `dead_code` lint's point of view.
-#[cfg_attr(not(windows), allow(dead_code))]
-fn should_use_wasapi_communications(config: &Config) -> bool {
+/// Kept outside the platform `cfg`s deliberately: it is the only part of
+/// [`os_aec_or_fallback_cpal`]'s decision that doesn't touch real hardware,
+/// so it stays testable on every platform, Linux CI included.
+#[cfg_attr(not(any(windows, target_os = "macos")), allow(dead_code))]
+fn should_use_os_echo_cancellation(config: &Config) -> bool {
     config.audio.aec_enabled
 }
 
-/// Open the Windows-native echo-cancelling devices, falling back to plain
-/// cpal ones if that fails for any reason — or if `config.audio.aec_enabled`
-/// is `false`, in which case plain devices are opened directly and the
-/// Communications category is never attempted.
-///
-/// Windows applies its own AEC/AGC/NS beneath the app to any stream opened
-/// under `AudioCategory_Communications`, so on this path there is nothing for
-/// [`wrap_with_aec_if_rates_match`] to do — running AEC3 over already-cancelled
-/// audio would filter it twice. The two are mutually exclusive, and
-/// `build_session` enforces that by construction rather than by convention.
-///
-/// The fallback is deliberately to *plain* devices with no cancellation, never
-/// to the `aec` path even where it is compiled in: one fallback tier is
-/// testable, two is a coin toss about which engine is actually running.
-///
-/// Gated on `windows` alone, deliberately — **not** on
-/// `feature = "wasapi-aec"`, which is a feature of `uia-audio`, not of this
-/// crate, and so would be permanently false here (a silently dead branch).
-/// `Cargo.toml`'s `[target.'cfg(windows)'.dependencies]` stanza activates that
-/// feature unconditionally for Windows builds, which makes `cfg(windows)` and
-/// "`uia_audio::wasapi` exists" the same condition. Remove that stanza and
-/// this stops compiling — loudly, which is the intent.
+/// What the logs call the OS echo-cancellation path on this platform.
 #[cfg(windows)]
-fn wasapi_or_fallback_cpal(config: &Config) -> Result<AudioPair, AppError> {
-    use uia_audio::wasapi::{WasapiSink, WasapiSource};
+const OS_AEC_NAME: &str = "Windows communications audio devices";
+#[cfg(target_os = "macos")]
+const OS_AEC_NAME: &str = "macOS voice-processing audio devices";
 
+/// Open the OS echo-cancelling pair. Either half failing takes both down: a
+/// cancelling capture paired with a non-cancelling render is the misaligned
+/// case that makes echo worse, not better.
+#[cfg(windows)]
+fn open_os_aec(
+    input: Option<&str>,
+    output: Option<&str>,
+) -> Result<AudioPair, uia_core::audio::AudioError> {
+    use uia_audio::wasapi::{WasapiSink, WasapiSource};
+    let source = WasapiSource::input_communications(input)?;
+    let sink = WasapiSink::output_communications(output)?;
+    Ok((Box::new(source), Box::new(sink)))
+}
+
+/// One Voice Processing IO unit serves both directions, so this is one call.
+#[cfg(target_os = "macos")]
+fn open_os_aec(
+    input: Option<&str>,
+    output: Option<&str>,
+) -> Result<AudioPair, uia_core::audio::AudioError> {
+    let (source, sink) = uia_audio::coreaudio::open_voice_processing(input, output)?;
+    Ok((Box::new(source), Box::new(sink)))
+}
+
+/// Open the OS-native echo-cancelling devices, falling back to plain cpal
+/// ones if that fails for any reason — or if `config.audio.aec_enabled` is
+/// `false`, in which case plain devices are opened directly and the OS path
+/// is never attempted.
+///
+/// The OS applies its own AEC/AGC/NS beneath the app on this path, so there
+/// is nothing for [`wrap_with_aec_if_rates_match`] to do — running AEC3 over
+/// already-cancelled audio would filter it twice. The two are mutually
+/// exclusive, and `build_session` enforces that by construction.
+///
+/// The fallback is deliberately to *plain* devices, never to the `aec` path
+/// even where it is compiled in: one fallback tier is testable, two is a coin
+/// toss about which engine is actually running. `config.audio.*_device`, if
+/// set, is honoured on the fallback too — a pinned name is a statement about
+/// which physical device to use, not about the echo-cancellation path.
+///
+/// Gated on the OS alone, deliberately — **not** on `uia-audio`'s
+/// `wasapi-aec`/`coreaudio-aec` features, which this crate cannot see.
+/// `Cargo.toml`'s per-OS target stanzas activate them unconditionally, which
+/// makes "this OS" and "the backend module exists" the same condition.
+/// Remove a stanza and this stops compiling — loudly, which is the intent.
+#[cfg(any(windows, target_os = "macos"))]
+fn os_aec_or_fallback_cpal(config: &Config) -> Result<AudioPair, AppError> {
     let input_device = config.audio.input_device.as_deref();
     let output_device = config.audio.output_device.as_deref();
 
-    if !should_use_wasapi_communications(config) {
+    if !should_use_os_echo_cancellation(config) {
         eprintln!(
-            "uia: WASAPI echo cancellation disabled via config (audio.aec_enabled = false); \
+            "uia: OS echo cancellation disabled via config (audio.aec_enabled = false); \
              opening plain audio devices"
         );
         return Ok((
@@ -597,28 +619,13 @@ fn wasapi_or_fallback_cpal(config: &Config) -> Result<AudioPair, AppError> {
         ));
     }
 
-    match (
-        WasapiSource::input_communications(input_device),
-        WasapiSink::output_communications(output_device),
-    ) {
-        (Ok(source), Ok(sink)) => Ok((Box::new(source), Box::new(sink))),
-        // Either half failing takes both down: a cancelling capture stream
-        // paired with a non-cancelling render stream is the misaligned case
-        // that makes echo worse, not better. `config.audio.*_device`, if
-        // set, is honored here too — a pinned device name is a statement
-        // about which physical device to use, not specifically about the
-        // WASAPI Communications path, so the fallback must not silently
-        // drop it and hand back whatever cpal calls default instead.
-        (source, sink) => {
-            let reason = source
-                .err()
-                .map(|e| e.to_string())
-                .or_else(|| sink.err().map(|e| e.to_string()))
-                .unwrap_or_else(|| "unknown".to_string());
+    match open_os_aec(input_device, output_device) {
+        Ok(pair) => Ok(pair),
+        Err(reason) => {
             eprintln!(
-                "uia: could not open the Windows communications audio devices ({reason}); \
-                 falling back to the default devices WITHOUT echo cancellation — the assistant \
-                 may hear itself through speakers"
+                "uia: could not open the {OS_AEC_NAME} ({reason}); falling back to plain \
+                 devices WITHOUT echo cancellation — the assistant may hear itself through \
+                 speakers"
             );
             Ok((
                 Box::new(uia_audio::input::CpalSource::input(input_device)?),
@@ -639,7 +646,7 @@ fn wasapi_or_fallback_cpal(config: &Config) -> Result<AudioPair, AppError> {
 /// speed relative to the near-end signal — worse than no cancellation at all,
 /// since a misaligned reference can suppress the wrong parts of the real
 /// voice. Skipping is silent-safe; mismatched-and-wrapped is not.
-#[cfg(feature = "aec")]
+#[cfg(all(feature = "aec", not(any(windows, target_os = "macos"))))]
 fn wrap_with_aec_if_rates_match(
     source: Box<dyn AudioSource>,
     sink: Box<dyn AudioSink>,
@@ -731,13 +738,13 @@ pub async fn build_session(
     // The two echo-cancellation paths are mutually exclusive, and the `not(...)`
     // here is what makes that a compile-time guarantee rather than a rule
     // someone has to remember: without it the `aec` call site would still be
-    // compiled in on Windows for anyone who also passed `--features aec`, and
-    // the assistant's audio would be filtered twice — once by Windows beneath
-    // the app, once by AEC3 on top of it.
-    #[cfg(windows)]
-    let (source, sink) = wasapi_or_fallback_cpal(config)?;
+    // compiled in on Windows or macOS for anyone who also passed
+    // `--features aec`, and the assistant's audio would be filtered twice —
+    // once by the OS beneath the app, once by AEC3 on top of it.
+    #[cfg(any(windows, target_os = "macos"))]
+    let (source, sink) = os_aec_or_fallback_cpal(config)?;
 
-    #[cfg(not(windows))]
+    #[cfg(not(any(windows, target_os = "macos")))]
     let (source, sink): AudioPair = {
         let source: Box<dyn AudioSource> = Box::new(uia_audio::input::CpalSource::input(
             config.audio.input_device.as_deref(),
@@ -1647,13 +1654,13 @@ mod tests {
     }
 
     #[test]
-    fn aec_enabled_defaults_to_using_wasapi_communications() {
-        assert!(should_use_wasapi_communications(&config("")));
+    fn aec_enabled_defaults_to_using_os_echo_cancellation() {
+        assert!(should_use_os_echo_cancellation(&config("")));
     }
 
     #[test]
-    fn aec_disabled_in_config_reaches_the_wasapi_composition_decision() {
-        assert!(!should_use_wasapi_communications(&config(
+    fn aec_disabled_in_config_reaches_the_os_composition_decision() {
+        assert!(!should_use_os_echo_cancellation(&config(
             "[audio]\naec_enabled = false\n"
         )));
     }

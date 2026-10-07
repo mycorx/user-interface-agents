@@ -7394,6 +7394,10 @@ version = "0.1.0"
 dependencies = [
  "async-trait",
  "cpal",
+ "objc2-audio-toolbox",
+ "objc2-core-audio",
+ "objc2-core-audio-types",
+ "objc2-core-foundation",
  "opus-rs",
  "thiserror 2.0.20",
  "tokio",

@@ -14,6 +14,7 @@ jobs:
       - run: ./scripts/check-webrtc-lockfile-pins.sh
       - run: ./scripts/check-ipc-event-names.sh
       - run: ./scripts/check-copyright-headers.sh
+      - run: ./scripts/check-os-aec-defaults.sh
       - run: ./scripts/tests/release-version/run-release-version-tests.sh
       - run: ./scripts/tests/gen-notice/run-gen-notice-tests.sh
       - run: cargo fmt --check

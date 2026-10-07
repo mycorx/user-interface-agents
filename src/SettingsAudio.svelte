@@ -112,8 +112,9 @@
 </script>
 
 <p class="intro">
-  Windows can silently hold the wrong device under its own "Communications" role even when Sound
-  settings shows the right one as default - pin the exact device here to bypass that entirely.
+  "Default" follows the device your operating system currently uses. Pin an exact device here if
+  the default is wrong - Windows can silently hold the wrong device under its "Communications"
+  role even when Sound settings shows the right one.
 </p>
 
 <section class="field">
@@ -142,8 +143,9 @@
     Echo cancellation (AEC)
   </label>
   <p class="hint">
-    Applies Windows' own noise/echo cancellation to the input and output devices above. Turn off
-    only to diagnose audio issues - without it the assistant will hear itself through speakers.
+    Uses your operating system's own noise and echo cancellation (Windows and macOS) on the devices
+    above. Turn off only to diagnose audio issues - without it the assistant will hear itself
+    through speakers.
   </p>
 </section>
 

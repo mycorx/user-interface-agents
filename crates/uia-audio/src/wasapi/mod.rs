@@ -28,6 +28,7 @@ mod render;
 pub use capture::WasapiSource;
 pub use render::WasapiSink;
 
+use crate::backoff::reopen_delay_ms;
 use com::EventHandle;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
@@ -69,27 +70,6 @@ impl LiveFormat {
         let packed = self.0.load(Ordering::Relaxed);
         ((packed >> 16) as u32, packed as u16)
     }
-}
-
-/// Delays between attempts to reopen a device that has gone away, in
-/// milliseconds; the last repeats for as long as it takes.
-///
-/// The tail is deliberately patient rather than a giving-up point. The case
-/// this exists for is a KVM switch or a dock: the microphone is handed to
-/// another machine and comes back minutes or hours later, and the right
-/// behaviour is to still be there when it does. Retrying forever at five
-/// second intervals costs one device enumeration per tick; giving up costs
-/// the user an app that looks fine and cannot hear them.
-const REOPEN_DELAYS_MS: [u32; 5] = [200, 500, 1_000, 2_000, 5_000];
-
-/// The delay for a given attempt, saturating at the last entry.
-///
-/// Its own function so the clamp is testable without a device: an
-/// out-of-bounds index here would panic on the audio thread and take capture
-/// down permanently, which is precisely the failure the reopen loop exists to
-/// prevent. `attempt` counts up without limit for a device that never returns.
-fn reopen_delay_ms(attempt: u32) -> u32 {
-    REOPEN_DELAYS_MS[(attempt as usize).min(REOPEN_DELAYS_MS.len() - 1)]
 }
 
 /// Park between reopen attempts, waking early if shutdown is signalled.
@@ -190,34 +170,6 @@ mod tests {
             live.store(rate, channels);
             assert_eq!(live.load(), (rate, channels));
         }
-    }
-
-    /// The reopen loop counts attempts up without bound while a device stays
-    /// away, so the delay lookup must saturate rather than index past its
-    /// table. A panic here happens on the audio thread and kills capture for
-    /// the life of the process — the exact failure the loop exists to fix.
-    #[test]
-    fn the_reopen_delay_saturates_instead_of_indexing_past_the_table() {
-        assert_eq!(reopen_delay_ms(0), REOPEN_DELAYS_MS[0]);
-        let last = REOPEN_DELAYS_MS[REOPEN_DELAYS_MS.len() - 1];
-        for attempt in [
-            REOPEN_DELAYS_MS.len() as u32 - 1,
-            REOPEN_DELAYS_MS.len() as u32,
-            1_000,
-            u32::MAX,
-        ] {
-            assert_eq!(reopen_delay_ms(attempt), last, "attempt {attempt}");
-        }
-    }
-
-    /// The delays must grow, or a device that is genuinely gone is enumerated
-    /// at the fastest rate forever.
-    #[test]
-    fn the_reopen_delays_back_off() {
-        assert!(
-            REOPEN_DELAYS_MS.windows(2).all(|w| w[0] < w[1]),
-            "delays must increase: {REOPEN_DELAYS_MS:?}"
-        );
     }
 
     /// Shutdown must not have to wait out a backoff it arrived during. With

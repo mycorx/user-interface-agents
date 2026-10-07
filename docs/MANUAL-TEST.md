@@ -1,4 +1,4 @@
-# SP1 manual acceptance (Windows)
+# SP1 manual acceptance (Windows and macOS)
 
 Everything here needs a real machine with a microphone, speakers, a GUI, and a
 Windows/macOS host that can compile `tauri`. **None of it can be run in the
@@ -35,6 +35,39 @@ optional; skipping any step fails the first `cargo build`, not `pnpm install`.
    node --version
    ```
 
+## Prerequisites (macOS)
+
+Same reason as on Windows: the first `pnpm run tauri dev` compiles the Rust
+backend, so the toolchain must be in place before `pnpm install`.
+
+1. Install the Xcode **Command Line Tools** — this provides the linker and
+   SDK `cargo` needs on macOS. Full Xcode is not required:
+   ```sh
+   xcode-select --install
+   ```
+2. Install Rust via [rustup](https://rustup.rs). The default toolchain for
+   the host (`aarch64-apple-darwin` on Apple silicon) is the right one.
+3. Install [Node.js](https://nodejs.org) (LTS) if not already present.
+   WKWebView ships with macOS, so there is no WebView step.
+4. Make `pnpm` available. Node ships `corepack`, which runs the exact pnpm
+   version pinned in `package.json`:
+   ```sh
+   corepack enable    # or prefix each pnpm command with `corepack`
+   ```
+5. Verify the toolchain before touching this repo:
+   ```sh
+   rustc --version
+   cargo --version
+   node --version
+   pnpm --version
+   ```
+
+The first run asks for **microphone access** for whichever app launched it
+(Terminal, iTerm, VS Code, …). Allow it. If it was denied earlier, re-enable
+it in System Settings → Privacy & Security → Microphone and restart that app.
+Without it macOS hands the app silence rather than an error, which looks like
+the assistant simply not hearing you.
+
 This is a one-time setup per machine. Once done, `pnpm run tauri dev` triggers
 a `cargo build` on first run (slow — several minutes) and incremental builds
 after that.
@@ -46,7 +79,15 @@ own — `package.json` and the `crates/uia-app` Rust sources it depends on
 only exist inside the clone. Clone the repo itself first:
 
 ```powershell
+# Windows (PowerShell)
 cd C:\Users\<you>\Downloads    # or wherever you keep checkouts
+git clone https://github.com/mycorx/user-interface-agents.git
+cd user-interface-agents
+```
+
+```sh
+# macOS (zsh/bash)
+cd ~/Downloads                 # or wherever you keep checkouts
 git clone https://github.com/mycorx/user-interface-agents.git
 cd user-interface-agents
 ```
@@ -54,11 +95,23 @@ cd user-interface-agents
 Then, from inside that clone:
 
 ```powershell
+# Windows (PowerShell)
 copy uia.example.toml uia.toml   # then edit
 $env:OPENAI_API_KEY = "sk-..."         # or set openai.key_file in uia.toml
 pnpm install
 pnpm run tauri dev
 ```
+
+```sh
+# macOS (zsh/bash)
+cp uia.example.toml uia.toml     # then edit
+export OPENAI_API_KEY="sk-..."   # or set openai.key_file in uia.toml
+pnpm install
+pnpm run tauri dev
+```
+
+The key only lives for that terminal session either way; set it in the same
+window you run `pnpm run tauri dev` from.
 
 `pnpm run tauri dev` starts the Vite dev server on `http://localhost:1420`
 itself (via `beforeDevCommand` in `tauri.conf.json`) before launching the
@@ -94,6 +147,11 @@ credentials via AWS SSO profile `sso-nonprod`) reproduced the same walk with
 no new defects: the hotkey toggle, audio quality/AEC, barge-in, and MCP tool
 calling all behaved identically to the OpenAI pass. The only expected
 difference between engines is latency (see "Known gaps to expect").
+Both passes were on **Windows**. On macOS, the shared sections (Shell,
+Session, Personas, Failure behaviour) apply unchanged; for audio, run "Audio
+quality on macOS" instead of the Windows audio section. Outside that macOS
+section, ticked boxes reflect the Windows runs; the macOS section records its
+own (partial) pass.
 
 ### Shell (S13's surface, unverified until now)
 
@@ -197,7 +255,7 @@ native file dialog, and whether a switch *sounds* like a switch.
       expect"): `Session::switch_engine()` itself is still only reachable
       through the API, and that half remains untested through the UI.
 
-### Audio quality (S15/S17, and the one thing only a room can test)
+### Audio quality on Windows (S15/S17, and the one thing only a room can test)
 
 **Before this section, check Settings → System → Sound.** On Windows the app
 now opens the devices Windows has configured for the **Communications** role,
@@ -230,6 +288,55 @@ the machine — expected behaviour, but confusing if you are not looking for it.
       (own-voice audible in a loopback test, or the barge-in RMS check firing
       on playback) is sufficient evidence cancellation is genuinely absent.
 
+### Audio quality on macOS (Voice Processing IO)
+
+The app opens one Voice Processing IO unit for both directions. With no
+device configured it follows the system default input and output, including
+when you switch them while it runs; a configured name stays pinned.
+
+**Pass 2026-10-07** (Apple silicon, C920 mic + Creative Pebble X
+speakers): the startup line, no self-hearing on speakers, the
+`aec_enabled = false` A/B, barge-in, following a default-output switch, and
+minimal ducking are confirmed, as are clean Settings device lists and
+unplug/replug recovery in the running app (Jabra in / Pebble out pinned, the
+USB switch carrying the Pebble unplugged and replugged: the conversation
+resumed without a restart). **Full macOS pass.** With a close-talking headset boom mic
+(Jabra Evolve2 30 SE) the on/off A/B shows little difference because the mic
+barely hears the speakers — use a webcam or built-in mic for the echo checks.
+
+- [x] At startup, stderr shows `uia-audio: coreaudio voice processing opened
+      input "…" / output "…", processing at N Hz (OS echo cancellation
+      active)`, naming the devices you expect. If it instead shows `could not
+      open the macOS voice-processing audio devices ... WITHOUT echo
+      cancellation`, the checks below fail by design. A device running below
+      24 kHz that supports more (e.g. a 16 kHz webcam mic) is raised first —
+      stderr shows `coreaudio raised "…" from N Hz to M Hz for voice
+      processing (restored on release)` — and put back when the app lets go
+      of it. A "band-limited" note means processing is below 24 kHz
+      because a device cannot go higher, and the assistant will sound duller
+      on that pairing — expected.
+- [x] With speakers (not headphones) at a normal volume, the assistant does
+      not hear itself: it must not interrupt or answer its own voice.
+- [x] Talking over the assistant interrupts it promptly (the spike measured
+      no loss of your voice during playback, so barge-in should feel the same
+      as with headphones).
+- [x] Unplug the configured or default microphone mid-session, plug it back:
+      stderr shows `rebuilding voice processing` then `reopened`, and the
+      conversation continues without restarting the app. Same for speakers.
+      One unit serves both directions, so while either device is gone the
+      other is silent too — both come back together when it returns.
+- [x] While voice processing runs, Settings → Audio lists each microphone
+      and speaker once: no speakers in the Input list, and no
+      `VPAUAggregateAudioDevice-…` entry in either list.
+- [x] With no output device configured, switch the system output (e.g. to
+      headphones) while the app runs: the assistant's voice moves with it.
+- [x] Music playing in another app keeps its volume while the assistant
+      listens. Ducking is deliberately set to the minimum, so **no** volume
+      change is the pass; an obvious dip is the failure.
+- [x] `aec_enabled = false` under `[audio]`: stderr shows `OS echo
+      cancellation disabled via config`, and with speakers the assistant now
+      does hear itself — confirming the toggle is not a no-op.
+
 ## Known gaps to expect
 
 - **`crates/uia-app/icons/` is a placeholder icon set**, not a real logo —
@@ -248,7 +355,8 @@ the machine — expected behaviour, but confusing if you are not looking for it.
   vendor tree. **Superseded on Windows by S17**, which uses the OS's own
   AEC/AGC/NS via WASAPI's Communications category instead — no C++ toolchain,
   on by default, nothing to pass. `--features aec` remains the path for
-  Linux/macOS and is untouched; do not pass it on Windows.
+  Linux; on Windows and macOS the OS's own cancellation is used and AEC3 is
+  compiled out of that path.
 
 - **The engine selector is restart-to-switch, not live** (landed S18).
   Clicking Nova/OpenAI in the HUD persists the choice to
