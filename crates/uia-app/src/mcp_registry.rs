@@ -400,6 +400,9 @@ fn check_value(key: &str, f: &uia_mcp::bundle::UserConfigField, v: &str) -> Resu
                 .trim()
                 .parse()
                 .map_err(|_| format!("{key}: {v:?} is not a number"))?;
+            if !n.is_finite() {
+                return Err(format!("{key}: {v:?} is not a finite number"));
+            }
             if f.min.is_some_and(|m| n < m) || f.max.is_some_and(|m| n > m) {
                 return Err(format!("{key}: {n} is outside the allowed range"));
             }
@@ -456,16 +459,48 @@ pub fn save_local_config(
         }
     }
 
+    // Snapshot every sensitive key this save touches, so a failure part-way
+    // can put the keyring back exactly as it was.
+    let mut snapshot: Vec<(String, Option<String>)> = Vec::new();
+    let mut keyring_ops: Vec<(String, Option<String>)> = Vec::new();
     for (key, change) in &changes {
         if !fields[key].sensitive {
             continue;
         }
         let account = mcp_config_account(name, key).map_err(|e| e.to_string())?;
-        match change.as_deref().filter(|v| !v.is_empty()) {
-            Some(v) => secrets.set(&account, v).map_err(|e| e.to_string())?,
-            None => {
-                let _ = secrets.delete(&account);
+        snapshot.push((account.clone(), secrets.get(&account)));
+        keyring_ops.push((account, change.clone().filter(|v| !v.is_empty())));
+    }
+
+    let rollback = |why: String| -> String {
+        let mut failed = Vec::new();
+        for (account, prior) in &snapshot {
+            let restored = match prior {
+                Some(v) => secrets.set(account, v),
+                None => secrets.delete(account),
+            };
+            if let Err(e) = restored {
+                failed.push(format!("{account}: {e}"));
             }
+        }
+        if failed.is_empty() {
+            why
+        } else {
+            format!(
+                "{why} (and restoring the previous keyring values failed: {})",
+                failed.join("; ")
+            )
+        }
+    };
+
+    for ((account, new), (_, prior)) in keyring_ops.iter().zip(&snapshot) {
+        let applied = match new {
+            Some(v) => secrets.set(account, v),
+            None if prior.is_some() => secrets.delete(account),
+            None => Ok(()),
+        };
+        if let Err(e) = applied {
+            return Err(rollback(e.to_string()));
         }
     }
     for (key, change) in &changes {
@@ -481,7 +516,7 @@ pub fn save_local_config(
             }
         }
     }
-    save(registry_path, &registry).map_err(|e| e.to_string())
+    save(registry_path, &registry).map_err(|e| rollback(e.to_string()))
 }
 
 /// Record first, credentials second, files last — the order
@@ -2680,6 +2715,245 @@ mod config_tests {
         assert!(load(&fx.registry).local_servers.is_empty());
         assert_eq!(secrets.get("mcp-config.mymy.token"), None);
         assert!(!fx.servers.join("mymy").exists());
+        std::fs::remove_dir_all(&fx.dir).ok();
+    }
+
+    const MANIFEST2: &str = r#"{
+        "manifest_version": "0.3", "name": "mymy", "version": "1.0.0",
+        "server": { "type": "binary", "entry_point": "server/x",
+            "mcp_config": { "command": "${__dirname}/server/x" } },
+        "user_config": {
+            "a": { "type": "string", "sensitive": true },
+            "b": { "type": "string", "sensitive": true },
+            "note": { "type": "string" },
+            "region": { "type": "string", "required": true, "default": "eu" }
+        }
+    }"#;
+
+    fn fixture2(label: &str) -> Fx {
+        let fx = fixture(label);
+        std::fs::write(fx.servers.join("mymy").join("manifest.json"), MANIFEST2).unwrap();
+        fx
+    }
+
+    /// Delegates to a `FakeSecretStore` but fails the Nth `set` (1-based) and,
+    /// optionally, every `delete` of one account.
+    struct FailingStore {
+        inner: FakeSecretStore,
+        sets: std::sync::atomic::AtomicUsize,
+        fail_set_on_nth: usize,
+        fail_delete_of: Option<String>,
+    }
+
+    impl FailingStore {
+        fn new(fail_set_on_nth: usize, fail_delete_of: Option<&str>) -> Self {
+            Self {
+                inner: FakeSecretStore::new(),
+                sets: std::sync::atomic::AtomicUsize::new(0),
+                fail_set_on_nth,
+                fail_delete_of: fail_delete_of.map(str::to_string),
+            }
+        }
+    }
+
+    impl SecretStore for FailingStore {
+        fn get(&self, account: &str) -> Option<String> {
+            self.inner.get(account)
+        }
+        fn set(&self, account: &str, value: &str) -> Result<(), crate::secrets::SecretStoreError> {
+            let n = self.sets.fetch_add(1, std::sync::atomic::Ordering::SeqCst) + 1;
+            if n == self.fail_set_on_nth {
+                return Err(crate::secrets::SecretStoreError::Backend("boom".into()));
+            }
+            self.inner.set(account, value)
+        }
+        fn delete(&self, account: &str) -> Result<(), crate::secrets::SecretStoreError> {
+            if self.fail_delete_of.as_deref() == Some(account) {
+                return Err(crate::secrets::SecretStoreError::Backend(
+                    "no delete".into(),
+                ));
+            }
+            self.inner.delete(account)
+        }
+    }
+
+    #[test]
+    fn a_failing_second_secret_write_restores_the_first_to_unset_and_leaves_the_registry_alone() {
+        let fx = fixture2("rb-unset");
+        let secrets = FailingStore::new(2, None);
+        let before = std::fs::read_to_string(&fx.registry).unwrap();
+        let err = save_local_config(
+            &fx.registry,
+            &fx.servers,
+            &secrets,
+            "mymy",
+            changes(&[("a", Some("A2")), ("b", Some("B2")), ("note", Some("n"))]),
+        )
+        .unwrap_err();
+        assert!(err.contains("boom"), "{err}");
+        assert_eq!(secrets.get("mcp-config.mymy.a"), None);
+        assert_eq!(secrets.get("mcp-config.mymy.b"), None);
+        assert_eq!(std::fs::read_to_string(&fx.registry).unwrap(), before);
+        std::fs::remove_dir_all(&fx.dir).ok();
+    }
+
+    #[test]
+    fn a_failing_second_secret_write_restores_the_first_to_its_prior_value() {
+        let fx = fixture2("rb-prior");
+        // fail on the 3rd set: the first save's `a` is set #1, this save's `a` #2, `b` #3.
+        let secrets = FailingStore::new(3, None);
+        save_local_config(
+            &fx.registry,
+            &fx.servers,
+            &secrets,
+            "mymy",
+            changes(&[("a", Some("A1"))]),
+        )
+        .unwrap();
+        let before = std::fs::read_to_string(&fx.registry).unwrap();
+        let err = save_local_config(
+            &fx.registry,
+            &fx.servers,
+            &secrets,
+            "mymy",
+            changes(&[("a", Some("A2")), ("b", Some("B2")), ("note", Some("n"))]),
+        )
+        .unwrap_err();
+        assert!(err.contains("boom"), "{err}");
+        assert_eq!(secrets.get("mcp-config.mymy.a").as_deref(), Some("A1"));
+        assert_eq!(secrets.get("mcp-config.mymy.b"), None);
+        assert_eq!(std::fs::read_to_string(&fx.registry).unwrap(), before);
+        std::fs::remove_dir_all(&fx.dir).ok();
+    }
+
+    #[test]
+    fn a_failing_delete_is_surfaced_and_earlier_changes_are_restored() {
+        let fx = fixture2("rb-delete");
+        let secrets = FailingStore::new(usize::MAX, Some("mcp-config.mymy.b"));
+        secrets.inner.set("mcp-config.mymy.a", "A1").unwrap();
+        secrets.inner.set("mcp-config.mymy.b", "B1").unwrap();
+        let err = save_local_config(
+            &fx.registry,
+            &fx.servers,
+            &secrets,
+            "mymy",
+            changes(&[("a", Some("A2")), ("b", None)]),
+        )
+        .unwrap_err();
+        assert!(err.contains("no delete"), "{err}");
+        assert_eq!(secrets.get("mcp-config.mymy.a").as_deref(), Some("A1"));
+        assert_eq!(secrets.get("mcp-config.mymy.b").as_deref(), Some("B1"));
+        std::fs::remove_dir_all(&fx.dir).ok();
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn a_failing_registry_write_restores_the_keyring() {
+        use std::os::unix::fs::PermissionsExt;
+        let fx = fixture2("rb-registry");
+        let secrets = FakeSecretStore::new();
+        secrets.set("mcp-config.mymy.a", "A1").unwrap();
+        let before = std::fs::read_to_string(&fx.registry).unwrap();
+        std::fs::set_permissions(&fx.registry, std::fs::Permissions::from_mode(0o444)).unwrap();
+        if std::fs::OpenOptions::new()
+            .append(true)
+            .open(&fx.registry)
+            .is_ok()
+        {
+            // Privileged enough (root) to ignore the mode: the write cannot be
+            // made to fail this way, so there is nothing to prove.
+            std::fs::remove_dir_all(&fx.dir).ok();
+            return;
+        }
+        let err = save_local_config(
+            &fx.registry,
+            &fx.servers,
+            &secrets,
+            "mymy",
+            changes(&[("a", Some("A2")), ("b", Some("B2")), ("note", Some("n"))]),
+        )
+        .unwrap_err();
+        std::fs::set_permissions(&fx.registry, std::fs::Permissions::from_mode(0o644)).unwrap();
+        assert!(!err.is_empty());
+        assert_eq!(secrets.get("mcp-config.mymy.a").as_deref(), Some("A1"));
+        assert_eq!(secrets.get("mcp-config.mymy.b"), None);
+        assert_eq!(std::fs::read_to_string(&fx.registry).unwrap(), before);
+        std::fs::remove_dir_all(&fx.dir).ok();
+    }
+
+    #[test]
+    fn clearing_a_non_required_secret_deletes_it_and_clearing_a_plain_value_removes_it() {
+        let fx = fixture2("clear");
+        let secrets = FakeSecretStore::new();
+        save_local_config(
+            &fx.registry,
+            &fx.servers,
+            &secrets,
+            "mymy",
+            changes(&[("a", Some("A1")), ("note", Some("n"))]),
+        )
+        .unwrap();
+        assert_eq!(secrets.get("mcp-config.mymy.a").as_deref(), Some("A1"));
+        assert_eq!(
+            load(&fx.registry).local_servers[0]
+                .user_config
+                .get("note")
+                .map(String::as_str),
+            Some("n")
+        );
+        save_local_config(
+            &fx.registry,
+            &fx.servers,
+            &secrets,
+            "mymy",
+            changes(&[("a", None), ("note", Some(""))]),
+        )
+        .unwrap();
+        assert_eq!(secrets.get("mcp-config.mymy.a"), None);
+        assert!(load(&fx.registry).local_servers[0].user_config.is_empty());
+        std::fs::remove_dir_all(&fx.dir).ok();
+    }
+
+    #[test]
+    fn non_finite_numbers_are_rejected_and_the_range_bounds_are_inclusive() {
+        let fx = fixture("numbers");
+        let secrets = FakeSecretStore::new();
+        for bad in ["NaN", "inf", "-inf", "infinity"] {
+            let err = save_local_config(
+                &fx.registry,
+                &fx.servers,
+                &secrets,
+                "mymy",
+                changes(&[("token", Some("t")), ("retries", Some(bad))]),
+            )
+            .unwrap_err();
+            assert!(err.contains("retries"), "{bad}: {err}");
+        }
+        for ok in ["0", "5"] {
+            save_local_config(
+                &fx.registry,
+                &fx.servers,
+                &secrets,
+                "mymy",
+                changes(&[("token", Some("t")), ("retries", Some(ok))]),
+            )
+            .unwrap();
+        }
+        std::fs::remove_dir_all(&fx.dir).ok();
+    }
+
+    #[test]
+    fn a_required_field_with_a_default_needs_no_value() {
+        let fx = fixture2("default");
+        let secrets = FakeSecretStore::new();
+        save_local_config(
+            &fx.registry,
+            &fx.servers,
+            &secrets,
+            "mymy",
+            changes(&[("note", Some("n"))]),
+        )
+        .unwrap();
         std::fs::remove_dir_all(&fx.dir).ok();
     }
 }
