@@ -229,6 +229,12 @@ fn terminal_type(stream: AudioObjectID) -> u32 {
 /// input terminal such as 0x201. Only a device that has outputs can carry a
 /// tap, so on an input-only device nothing is one — which is what keeps a
 /// real mic that reports 0 listed.
+///
+/// Known limit: an unreadable terminal type counts as 0 (see
+/// `terminal_type`), so a combined in+out device (one device ID) whose real
+/// mic reports 0 is hidden from the macOS input dropdown while VPIO runs.
+/// The default input and a `uia.toml` pin still reach it: opening resolves
+/// against the unfiltered list.
 fn is_echo_reference_tap(terminal_type: u32, device_has_outputs: bool) -> bool {
     const OUTPUT_TERMINALS: [u32; 5] = [
         kAudioStreamTerminalTypeUnknown,
@@ -245,7 +251,8 @@ fn is_echo_reference_tap(terminal_type: u32, device_has_outputs: bool) -> bool {
 }
 
 /// Whether `id` has at least one input stream that is not an echo-reference
-/// tap, i.e. is a microphone a user could pick.
+/// tap, i.e. is a microphone a user could pick. See `is_echo_reference_tap`
+/// for the one kind of real mic this hides.
 fn has_real_input(id: AudioDeviceID) -> bool {
     let has_outputs = channel_count(id, Direction::Output) > 0;
     input_stream_ids(id)

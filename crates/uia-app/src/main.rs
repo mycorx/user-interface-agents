@@ -1245,9 +1245,12 @@ fn output_device_names() -> Result<Vec<String>, uia_core::audio::AudioError> {
     }
 }
 
-/// Names for the Audio tab's input-device dropdown - see
-/// `uia_audio::input::list_input_devices`'s doc comment for why these
-/// names are guaranteed to match what `audio.input_device` accepts.
+/// Names for the Audio tab's input-device dropdown, via
+/// [`input_device_names`]. On macOS they come from CoreAudio's
+/// `kAudioDevicePropertyDeviceNameCFString`, the same name property cpal
+/// reports and `uia_audio::coreaudio` resolves `audio.input_device` against.
+/// Elsewhere they are cpal's list - see `uia_audio::input::list_input_devices`'s
+/// doc comment. Either way a name picked here resolves when opening.
 #[tauri::command]
 fn list_input_devices() -> Result<Vec<String>, String> {
     input_device_names().map_err(|e| e.to_string())

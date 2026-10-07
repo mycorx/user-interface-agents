@@ -124,13 +124,18 @@ fn observe(bound: u32, dir: Direction, pinned: bool) -> Observed {
     }
 }
 
-/// After a unit is disposed, wait until `aggregate_present` reports the
-/// teardown has settled, polling every `poll` for at most `limit`, so names
-/// are never resolved while the old unit's echo-reference taps are still in
-/// the device list.
+/// Before resolving names to open a unit, wait until `aggregate_present`
+/// reports that no voice-processing unit's private aggregate is listed,
+/// polling at most every `poll` for at most `limit`, so names are never
+/// resolved while a disposed unit's echo-reference taps are still in the
+/// device list. That unit may be this backend's own (a rebuild or backoff
+/// attempt) or a previous backend's in the same process (the app restarts
+/// the assistant by dropping one backend and opening another).
 ///
 /// `Some(true)`: settled. `Some(false)`: still present at `limit`; the caller
-/// resolves anyway. `None`: a stop arrived — return promptly.
+/// resolves anyway. `None`: a stop arrived — return promptly. A change
+/// notification does not shorten the poll interval, so a burst of them
+/// cannot turn this into back-to-back device listings.
 fn await_teardown(
     wake: &Receiver<Wake>,
     limit: Duration,
@@ -146,8 +151,23 @@ fn await_teardown(
         if left.is_zero() {
             return Some(false);
         }
-        if !wait_or_stop(wake, poll.min(left)) {
+        if !sleep_or_stop(wake, poll.min(left)) {
             return None;
+        }
+    }
+}
+
+/// Park for the whole of `delay` unless stopped: unlike [`wait_or_stop`], a
+/// `Changed` wake is consumed and the wait goes on. False means stop.
+fn sleep_or_stop(rx: &Receiver<Wake>, delay: Duration) -> bool {
+    let deadline = std::time::Instant::now() + delay;
+    loop {
+        let left = deadline.saturating_duration_since(std::time::Instant::now());
+        if left.is_zero() {
+            return true;
+        }
+        if !wait_or_stop(rx, left) {
+            return false;
         }
     }
 }
@@ -325,30 +345,29 @@ fn supervise(
     let mut ready_tx = Some(ready_tx);
     let mut attempt = 0u32;
     let mut loss_logged = false;
-    // Whether this backend has run a unit before, so a teardown may still be
-    // settling, and whether that wait has already been reported unsettled
-    // since the last successful open.
-    let mut had_unit = false;
+    // Whether the teardown wait has already been reported unsettled since
+    // the last successful open.
     let mut settle_logged = false;
 
     loop {
-        if had_unit {
-            match await_teardown(
-                &wake,
-                TEARDOWN_SETTLE_LIMIT,
-                TEARDOWN_SETTLE_POLL,
-                device::vpio_aggregate_present,
-            ) {
-                None => return,
-                Some(true) => {}
-                Some(false) => {
-                    if !settle_logged {
-                        eprintln!(
-                            "uia-audio: coreaudio voice-processing teardown did not settle \
-                             within 1 s; resolving anyway"
-                        );
-                        settle_logged = true;
-                    }
+        // Before every resolve, the first one included: a previous backend in
+        // this process may have just dropped its unit. On a clean system this
+        // is one device-list read.
+        match await_teardown(
+            &wake,
+            TEARDOWN_SETTLE_LIMIT,
+            TEARDOWN_SETTLE_POLL,
+            device::vpio_aggregate_present,
+        ) {
+            None => return,
+            Some(true) => {}
+            Some(false) => {
+                if !settle_logged {
+                    eprintln!(
+                        "uia-audio: coreaudio voice-processing teardown did not settle \
+                         within 1 s; resolving anyway"
+                    );
+                    settle_logged = true;
                 }
             }
         }
@@ -407,7 +426,6 @@ fn supervise(
         }
         attempt = 0;
         loss_logged = false;
-        had_unit = true;
         settle_logged = false;
 
         loop {
@@ -586,6 +604,48 @@ mod tests {
         assert!(took < Duration::from_millis(500), "took {took:?}");
     }
 
+    /// A notification burst during teardown (the aggregate leaving fires
+    /// device-list changes) must not turn the poll into back-to-back
+    /// listings: at most one check per poll interval.
+    #[test]
+    fn a_burst_of_changes_does_not_speed_up_the_teardown_poll() {
+        let (tx, rx) = std::sync::mpsc::channel();
+        for _ in 0..20 {
+            tx.send(Wake::Changed).unwrap();
+        }
+        let mut polls = 0;
+        let got = await_teardown(
+            &rx,
+            Duration::from_millis(100),
+            Duration::from_millis(50),
+            || {
+                polls += 1;
+                true
+            },
+        );
+        assert_eq!(got, Some(false));
+        assert!(polls <= 4, "polled {polls} times in 100 ms");
+    }
+
+    /// Dropping the backend must not wait out the settle limit, even with
+    /// change notifications queued ahead of the stop.
+    #[test]
+    fn a_stop_behind_changes_during_the_teardown_wait_is_prompt() {
+        let (tx, rx) = std::sync::mpsc::channel();
+        tx.send(Wake::Changed).unwrap();
+        tx.send(Wake::Changed).unwrap();
+        tx.send(Wake::Stop).unwrap();
+        let started = Instant::now();
+        let got = await_teardown(
+            &rx,
+            Duration::from_secs(5),
+            Duration::from_millis(50),
+            || true,
+        );
+        assert_eq!(got, None);
+        assert!(started.elapsed() < Duration::from_millis(200));
+    }
+
     /// Dropping the backend must not wait out the settle limit.
     #[test]
     fn a_stop_during_the_teardown_wait_is_not_waited_out() {
@@ -758,7 +818,8 @@ mod tests {
     /// private aggregate. The Settings lists must not: no aggregate, no
     /// repeats, and no input that was not an input before the unit opened.
     #[test]
-    #[ignore = "requires real audio devices; run manually on a Mac"]
+    #[ignore = "requires real audio devices; run manually on a Mac with --test-threads=1 \
+                (its baseline is weakened if another VPIO test runs in parallel)"]
     fn the_device_lists_hide_voice_processing_taps_and_aggregate() {
         let baseline = list_input_device_names().unwrap();
         let (_source, _sink) = open_voice_processing(None, None).unwrap();
