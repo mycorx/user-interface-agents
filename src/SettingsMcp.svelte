@@ -265,14 +265,15 @@
   }
 
   // Decided from the LOADED field, never the live draft, so the control does
-  // not change type while the user edits. A string setting whose default or
-  // value is exactly `true`/`false` is a switch in disguise; it still stores
-  // that string.
+  // not change type while the user edits. A string setting whose DECLARED
+  // default is exactly `true`/`false` is a switch in disguise; it still stores
+  // that string. A stored value alone never makes a toggle: a switch cannot
+  // show "auto" or empty, so a free-text setting (default "auto", stored
+  // "true") would become impossible to set back.
   function isToggleField(f: ConfigField): boolean {
     if (f.kind === 'boolean') return true;
     if (f.kind !== 'string' || f.sensitive || f.multiple) return false;
-    const isBool = (v: string | null) => v === 'true' || v === 'false';
-    return isBool(f.default) || isBool(f.value);
+    return f.default === 'true' || f.default === 'false';
   }
 
   async function loadConfig(name: string) {
@@ -296,9 +297,10 @@
     for (const f of fields) {
       // Every value goes over IPC as a string (the command takes strings), so
       // coerce whatever the draft holds.
-      const text = String(configDraft[name][f.key] ?? '');
+      let text = String(configDraft[name][f.key] ?? '');
+      if (f.kind === 'number') text = text.trim();
       if (f.sensitive && text === '') continue; // keep the stored secret
-      if (f.kind === 'number' && text.trim() !== '' && !Number.isFinite(Number(text))) {
+      if (f.kind === 'number' && text !== '' && !Number.isFinite(Number(text))) {
         configNote[name] = { ok: false, text: `${f.title}: "${text}" is not a number` };
         return;
       }
@@ -794,6 +796,7 @@
                             <input
                               id={inputId}
                               type="checkbox"
+                              role="switch"
                               checked={configDraft[row.name]?.[f.key] === 'true'}
                               onchange={(e) =>
                                 (configDraft[row.name][f.key] = e.currentTarget.checked
@@ -1226,6 +1229,51 @@
     border: 1px solid rgba(255, 255, 255, 0.12);
     border-radius: 8px;
     padding: 6px 10px;
+  }
+
+  /* A native checkbox drawn as a switch: keyboard and checked semantics stay. */
+  .field input[role='switch'] {
+    appearance: none;
+    position: relative;
+    width: 32px;
+    height: 18px;
+    margin: 0;
+    border-radius: 9px;
+    background: rgba(255, 255, 255, 0.18);
+    cursor: pointer;
+    transition: background 0.15s ease;
+  }
+
+  .field input[role='switch']::before {
+    content: '';
+    position: absolute;
+    top: 2px;
+    left: 2px;
+    width: 14px;
+    height: 14px;
+    border-radius: 50%;
+    background: #fff;
+    transition: transform 0.15s ease;
+  }
+
+  .field input[role='switch']:checked {
+    background: var(--accent, #6ea8fe);
+  }
+
+  .field input[role='switch']:checked::before {
+    transform: translateX(14px);
+  }
+
+  .field input[role='switch']:focus-visible {
+    outline: 2px solid var(--accent, #6ea8fe);
+    outline-offset: 2px;
+  }
+
+  @media (prefers-reduced-motion: reduce) {
+    .field input[role='switch'],
+    .field input[role='switch']::before {
+      transition: none;
+    }
   }
 
   .header-fields {
