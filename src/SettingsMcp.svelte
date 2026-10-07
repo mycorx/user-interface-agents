@@ -239,6 +239,10 @@
   }
 
   async function toggleDetails(row: Row) {
+    // A note describes the last save of an earlier visit; drop it on both
+    // expand and collapse. Not in `loadConfig`, which runs right after a save
+    // and would erase the "Saved" it just set.
+    delete configNote[row.name];
     if (expanded === row.name) {
       expanded = null;
       return;
@@ -260,6 +264,17 @@
     await loadConfig(row.name);
   }
 
+  // Decided from the LOADED field, never the live draft, so the control does
+  // not change type while the user edits. A string setting whose default or
+  // value is exactly `true`/`false` is a switch in disguise; it still stores
+  // that string.
+  function isToggleField(f: ConfigField): boolean {
+    if (f.kind === 'boolean') return true;
+    if (f.kind !== 'string' || f.sensitive || f.multiple) return false;
+    const isBool = (v: string | null) => v === 'true' || v === 'false';
+    return isBool(f.default) || isBool(f.value);
+  }
+
   async function loadConfig(name: string) {
     try {
       const fields = await invoke<ConfigField[]>('get_mcp_local_server_config', { name });
@@ -279,11 +294,24 @@
     // A key left out of `values` is unchanged; `null` clears it.
     const values: Record<string, string | null> = {};
     for (const f of fields) {
-      // `bind:value` on a number input stores a JS number, but the command
-      // takes strings, so coerce here.
+      // Every value goes over IPC as a string (the command takes strings), so
+      // coerce whatever the draft holds.
       const text = String(configDraft[name][f.key] ?? '');
       if (f.sensitive && text === '') continue; // keep the stored secret
-      values[f.key] = text === '' ? null : text;
+      if (f.kind === 'number' && text.trim() !== '' && !Number.isFinite(Number(text))) {
+        configNote[name] = { ok: false, text: `${f.title}: "${text}" is not a number` };
+        return;
+      }
+      if (!f.sensitive && text === (f.default ?? null)) {
+        // Shown as a default, not chosen: store nothing (and clear any
+        // previously stored value).
+        values[f.key] = null;
+      } else if (text === '' && isToggleField(f) && f.default === null) {
+        // An unset toggle displays unchecked, so that is what it saves as.
+        values[f.key] = 'false';
+      } else {
+        values[f.key] = text === '' ? null : text;
+      }
     }
     try {
       await invoke('set_mcp_local_server_config', { name, values });
@@ -762,7 +790,7 @@
                         {@const inputId = `cfg-${row.name}-${f.key}`}
                         <div class="field">
                           <label for={inputId}>{f.title}{f.required ? ' *' : ''}</label>
-                          {#if f.kind === 'boolean'}
+                          {#if isToggleField(f)}
                             <input
                               id={inputId}
                               type="checkbox"
@@ -786,9 +814,8 @@
                             <div class="cfg-row">
                               <input
                                 id={inputId}
-                                type={f.sensitive ? 'password' : f.kind === 'number' ? 'number' : 'text'}
-                                min={f.min ?? undefined}
-                                max={f.max ?? undefined}
+                                type={f.sensitive ? 'password' : 'text'}
+                                inputmode={f.kind === 'number' ? 'decimal' : undefined}
                                 autocomplete="off"
                                 placeholder={f.sensitive && f.is_set
                                   ? '•••••••• (saved — type to replace)'
@@ -1190,7 +1217,6 @@
 
   .field input[type='text'],
   .field input[type='password'],
-  .field input[type='number'],
   .header-fields input {
     width: 100%;
     box-sizing: border-box;
