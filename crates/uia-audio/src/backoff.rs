@@ -24,6 +24,8 @@
     )),
     allow(dead_code)
 )]
+// Temporary: used by the supervisor (Task 4).
+#[cfg_attr(all(target_os = "macos", feature = "coreaudio-aec"), allow(dead_code))]
 pub(crate) const REOPEN_DELAYS_MS: [u32; 5] = [200, 500, 1_000, 2_000, 5_000];
 
 /// The delay for a given attempt, saturating at the last entry.
@@ -40,6 +42,8 @@ pub(crate) const REOPEN_DELAYS_MS: [u32; 5] = [200, 500, 1_000, 2_000, 5_000];
     )),
     allow(dead_code)
 )]
+// Temporary: used by the supervisor (Task 4).
+#[cfg_attr(all(target_os = "macos", feature = "coreaudio-aec"), allow(dead_code))]
 pub(crate) fn reopen_delay_ms(attempt: u32) -> u32 {
     REOPEN_DELAYS_MS[(attempt as usize).min(REOPEN_DELAYS_MS.len() - 1)]
 }

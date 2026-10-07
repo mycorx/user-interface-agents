@@ -1,0 +1,466 @@
+// Copyright (c) 2026 MycorX (Daniel, Sole Trader). All rights reserved.
+// PolyForm Internal Use 1.0.0 OR PolyForm Noncommercial 1.0.0 — see LICENSE.md.
+
+//! Which CoreAudio devices exist, which one a configured name means, whether
+//! a bound device is still there, and listening for that to change.
+
+use super::Wake;
+use objc2_core_audio::{
+    AudioDeviceID, AudioObjectAddPropertyListener, AudioObjectGetPropertyData,
+    AudioObjectGetPropertyDataSize, AudioObjectID, AudioObjectPropertyAddress,
+    AudioObjectPropertyScope, AudioObjectPropertySelector, AudioObjectRemovePropertyListener,
+    kAudioDevicePropertyDeviceIsAlive, kAudioDevicePropertyDeviceNameCFString,
+    kAudioDevicePropertyStreamConfiguration, kAudioHardwarePropertyDefaultInputDevice,
+    kAudioHardwarePropertyDefaultOutputDevice, kAudioHardwarePropertyDevices,
+    kAudioObjectPropertyElementMain, kAudioObjectPropertyScopeGlobal,
+    kAudioObjectPropertyScopeInput, kAudioObjectPropertyScopeOutput, kAudioObjectSystemObject,
+};
+use objc2_core_audio_types::{AudioBuffer, AudioBufferList};
+use objc2_core_foundation::{CFRetained, CFString};
+use std::ffi::c_void;
+use std::mem::size_of;
+use std::ptr::{NonNull, null};
+use std::sync::mpsc::Sender;
+use uia_core::audio::AudioError;
+
+const SYSTEM: AudioObjectID = kAudioObjectSystemObject as AudioObjectID;
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[allow(dead_code)] // used by the supervisor (Task 4)
+pub(crate) enum Direction {
+    Input,
+    Output,
+}
+
+impl Direction {
+    pub(crate) fn label(self) -> &'static str {
+        match self {
+            Direction::Input => "input",
+            Direction::Output => "output",
+        }
+    }
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub(crate) struct DeviceInfo {
+    pub(crate) id: AudioDeviceID,
+    pub(crate) name: String,
+}
+
+/// Which of `devices` a configured `wanted` name means, or the system default
+/// when nothing is configured.
+///
+/// Pure, so the rules — pinned names ignore the default, unpinned choices
+/// follow it, a miss is an error rather than a guess — are tested without
+/// hardware. `devices` must already be filtered to `dir`, which is what makes
+/// a name shared by a mic and a speaker resolve to the right one of each.
+pub(crate) fn choose(
+    devices: &[DeviceInfo],
+    default_id: Option<AudioDeviceID>,
+    wanted: Option<&str>,
+    dir: Direction,
+) -> Result<DeviceInfo, AudioError> {
+    match wanted {
+        Some(wanted) => devices
+            .iter()
+            .find(|d| crate::device_name_matches(&d.name, wanted))
+            .cloned()
+            .ok_or_else(|| {
+                let available: Vec<&str> = devices.iter().map(|d| d.name.as_str()).collect();
+                AudioError::DeviceUnavailable(format!(
+                    "coreaudio: no audio device matching {wanted:?} among {} devices: {available:?}",
+                    dir.label()
+                ))
+            }),
+        None => default_id
+            .and_then(|id| devices.iter().find(|d| d.id == id))
+            .cloned()
+            .ok_or_else(|| {
+                AudioError::DeviceUnavailable(format!(
+                    "coreaudio: no default {} device",
+                    dir.label()
+                ))
+            }),
+    }
+}
+
+impl Direction {
+    fn scope(self) -> AudioObjectPropertyScope {
+        match self {
+            Direction::Input => kAudioObjectPropertyScopeInput,
+            Direction::Output => kAudioObjectPropertyScopeOutput,
+        }
+    }
+
+    fn default_selector(self) -> AudioObjectPropertySelector {
+        match self {
+            Direction::Input => kAudioHardwarePropertyDefaultInputDevice,
+            Direction::Output => kAudioHardwarePropertyDefaultOutputDevice,
+        }
+    }
+}
+
+fn address(
+    selector: AudioObjectPropertySelector,
+    scope: AudioObjectPropertyScope,
+) -> AudioObjectPropertyAddress {
+    AudioObjectPropertyAddress {
+        mSelector: selector,
+        mScope: scope,
+        mElement: kAudioObjectPropertyElementMain,
+    }
+}
+
+/// Read a fixed-size property. `Err` carries the OSStatus.
+fn get<T: Copy>(
+    object: AudioObjectID,
+    addr: AudioObjectPropertyAddress,
+    mut value: T,
+) -> Result<T, i32> {
+    let mut size = size_of::<T>() as u32;
+    // SAFETY: `value` is a valid, writable `T` of exactly `size` bytes, and
+    // `addr` lives for the call.
+    let status = unsafe {
+        AudioObjectGetPropertyData(
+            object,
+            NonNull::from(&addr),
+            0,
+            null(),
+            NonNull::from(&mut size),
+            NonNull::from(&mut value).cast(),
+        )
+    };
+    if status == 0 { Ok(value) } else { Err(status) }
+}
+
+fn device_ids() -> Result<Vec<AudioDeviceID>, AudioError> {
+    let addr = address(
+        kAudioHardwarePropertyDevices,
+        kAudioObjectPropertyScopeGlobal,
+    );
+    let mut size = 0u32;
+    // SAFETY: `addr` and `size` are valid for the call.
+    let status = unsafe {
+        AudioObjectGetPropertyDataSize(
+            SYSTEM,
+            NonNull::from(&addr),
+            0,
+            null(),
+            NonNull::from(&mut size),
+        )
+    };
+    if status != 0 {
+        return Err(AudioError::DeviceUnavailable(format!(
+            "coreaudio: could not list devices (OSStatus {status})"
+        )));
+    }
+    let mut ids = vec![0 as AudioDeviceID; size as usize / size_of::<AudioDeviceID>()];
+    if ids.is_empty() {
+        return Ok(ids);
+    }
+    // SAFETY: `ids` has room for exactly `size` bytes.
+    let status = unsafe {
+        AudioObjectGetPropertyData(
+            SYSTEM,
+            NonNull::from(&addr),
+            0,
+            null(),
+            NonNull::from(&mut size),
+            NonNull::from(&mut ids[..]).cast(),
+        )
+    };
+    if status != 0 {
+        return Err(AudioError::DeviceUnavailable(format!(
+            "coreaudio: could not list devices (OSStatus {status})"
+        )));
+    }
+    // The list can shrink between the two calls.
+    ids.truncate(size as usize / size_of::<AudioDeviceID>());
+    Ok(ids)
+}
+
+/// Total channels a device has in `dir`; 0 means it is not a device of that
+/// direction at all.
+fn channel_count(id: AudioDeviceID, dir: Direction) -> u32 {
+    let addr = address(kAudioDevicePropertyStreamConfiguration, dir.scope());
+    let mut size = 0u32;
+    // SAFETY: `addr` and `size` are valid for the call.
+    let status = unsafe {
+        AudioObjectGetPropertyDataSize(
+            id,
+            NonNull::from(&addr),
+            0,
+            null(),
+            NonNull::from(&mut size),
+        )
+    };
+    if status != 0 || (size as usize) < size_of::<AudioBufferList>() {
+        return 0;
+    }
+    // u64 storage so the list is 8-byte aligned, as its pointer field needs.
+    let mut storage = vec![0u64; (size as usize).div_ceil(8)];
+    // SAFETY: `storage` holds at least `size` bytes.
+    let status = unsafe {
+        AudioObjectGetPropertyData(
+            id,
+            NonNull::from(&addr),
+            0,
+            null(),
+            NonNull::from(&mut size),
+            NonNull::from(&mut storage[..]).cast(),
+        )
+    };
+    if status != 0 {
+        return 0;
+    }
+    let list = storage.as_ptr().cast::<AudioBufferList>();
+    // SAFETY: CoreAudio wrote a valid AudioBufferList of `mNumberBuffers`
+    // buffers into `storage`, which outlives this slice.
+    let buffers: &[AudioBuffer] = unsafe {
+        std::slice::from_raw_parts((*list).mBuffers.as_ptr(), (*list).mNumberBuffers as usize)
+    };
+    buffers.iter().map(|b| b.mNumberChannels).sum()
+}
+
+/// The same name cpal reports, so a name chosen in Settings resolves here.
+fn device_name(id: AudioDeviceID) -> String {
+    let addr = address(
+        kAudioDevicePropertyDeviceNameCFString,
+        kAudioObjectPropertyScopeGlobal,
+    );
+    let mut name: *mut CFString = std::ptr::null_mut();
+    let mut size = size_of::<*mut CFString>() as u32;
+    // SAFETY: the property is documented to write one CFString pointer.
+    let status = unsafe {
+        AudioObjectGetPropertyData(
+            id,
+            NonNull::from(&addr),
+            0,
+            null(),
+            NonNull::from(&mut size),
+            NonNull::from(&mut name).cast(),
+        )
+    };
+    match NonNull::new(name) {
+        // SAFETY: returned under the create rule, so we own this reference.
+        Some(name) if status == 0 => unsafe { CFRetained::from_raw(name) }.to_string(),
+        _ => format!("<unnamed device {id}>"),
+    }
+}
+
+fn list(dir: Direction) -> Result<Vec<DeviceInfo>, AudioError> {
+    Ok(device_ids()?
+        .into_iter()
+        .filter(|&id| channel_count(id, dir) > 0)
+        .map(|id| DeviceInfo {
+            id,
+            name: device_name(id),
+        })
+        .collect())
+}
+
+fn default_device(dir: Direction) -> Option<AudioDeviceID> {
+    get(
+        SYSTEM,
+        address(dir.default_selector(), kAudioObjectPropertyScopeGlobal),
+        0,
+    )
+    .ok()
+    .filter(|&id| id != 0)
+}
+
+/// The device `wanted` names in `dir` right now, or the current default.
+#[allow(dead_code)] // used by the supervisor (Task 4)
+pub(crate) fn resolve(dir: Direction, wanted: Option<&str>) -> Result<DeviceInfo, AudioError> {
+    choose(&list(dir)?, default_device(dir), wanted, dir)
+}
+
+/// False once a device has been unplugged (or its ID never existed).
+#[allow(dead_code)] // used by the supervisor (Task 4)
+pub(crate) fn is_alive(id: AudioDeviceID) -> bool {
+    get::<u32>(
+        id,
+        address(
+            kAudioDevicePropertyDeviceIsAlive,
+            kAudioObjectPropertyScopeGlobal,
+        ),
+        0,
+    )
+    .is_ok_and(|alive| alive != 0)
+}
+
+/// CoreAudio property listeners that wake the supervisor.
+///
+/// The listener only sends `Wake::Changed`; every decision and every rebuild
+/// happens on the supervisor thread, never on CoreAudio's notification thread.
+#[allow(dead_code)] // used by the supervisor (Task 4)
+pub(crate) struct Listeners {
+    registered: Vec<(AudioObjectID, AudioObjectPropertyAddress)>,
+    client: *mut c_void,
+}
+
+/// SAFETY contract for `client`: a `&'static Sender<Wake>`, see `register`.
+unsafe extern "C-unwind" fn on_change(
+    _object: AudioObjectID,
+    _count: u32,
+    _addresses: NonNull<AudioObjectPropertyAddress>,
+    client: *mut c_void,
+) -> i32 {
+    // SAFETY: `client` is the leaked `&'static Sender<Wake>` from `register`,
+    // so it is valid for as long as any notification can still arrive.
+    let tx = unsafe { &*client.cast::<Sender<Wake>>() };
+    let _ = tx.send(Wake::Changed);
+    0
+}
+
+impl Listeners {
+    /// Listen for the device list, both system defaults, and each bound
+    /// device dying.
+    ///
+    /// `client` is `'static` on purpose: CoreAudio gives no guarantee that a
+    /// notification already in flight has finished when
+    /// `AudioObjectRemovePropertyListener` returns, so the sender it
+    /// dereferences must never be freed. `open_voice_processing` leaks one
+    /// per backend for exactly this.
+    #[allow(dead_code)] // used by the supervisor (Task 4)
+    pub(crate) fn register(client: &'static Sender<Wake>, bound: &[AudioDeviceID]) -> Self {
+        let mut this = Self {
+            registered: Vec::new(),
+            client: std::ptr::from_ref(client).cast_mut().cast(),
+        };
+        this.add(SYSTEM, kAudioHardwarePropertyDevices);
+        this.add(SYSTEM, kAudioHardwarePropertyDefaultInputDevice);
+        this.add(SYSTEM, kAudioHardwarePropertyDefaultOutputDevice);
+        for &id in bound {
+            this.add(id, kAudioDevicePropertyDeviceIsAlive);
+        }
+        this
+    }
+
+    fn add(&mut self, object: AudioObjectID, selector: AudioObjectPropertySelector) {
+        let addr = address(selector, kAudioObjectPropertyScopeGlobal);
+        // SAFETY: `on_change` matches the listener signature; `self.client`
+        // satisfies its contract.
+        let status = unsafe {
+            AudioObjectAddPropertyListener(
+                object,
+                NonNull::from(&addr),
+                Some(on_change),
+                self.client,
+            )
+        };
+        if status == 0 {
+            self.registered.push((object, addr));
+        } else {
+            // Not fatal: the supervisor also re-checks on a timer.
+            eprintln!(
+                "uia-audio: coreaudio could not listen for property {selector:#x} on object {object} \
+                 (OSStatus {status}); relying on the periodic check"
+            );
+        }
+    }
+}
+
+impl Drop for Listeners {
+    fn drop(&mut self) {
+        for (object, addr) in &self.registered {
+            // SAFETY: removing exactly what `add` registered.
+            unsafe {
+                AudioObjectRemovePropertyListener(
+                    *object,
+                    NonNull::from(addr),
+                    Some(on_change),
+                    self.client,
+                );
+            }
+        }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn dev(id: AudioDeviceID, name: &str) -> DeviceInfo {
+        DeviceInfo {
+            id,
+            name: name.to_string(),
+        }
+    }
+
+    fn outputs() -> Vec<DeviceInfo> {
+        vec![
+            dev(112, "Odyssey G75F"),
+            dev(107, "Creative Pebble X"),
+            dev(81, "MacBook Pro Speakers"),
+        ]
+    }
+
+    #[test]
+    fn no_name_means_the_system_default() {
+        let got = choose(&outputs(), Some(81), None, Direction::Output).unwrap();
+        assert_eq!(got.id, 81);
+    }
+
+    /// The whole point of following the default: when it moves, so does an
+    /// unpinned choice.
+    #[test]
+    fn an_unpinned_choice_follows_the_default_when_it_moves() {
+        let before = choose(&outputs(), Some(81), None, Direction::Output).unwrap();
+        let after = choose(&outputs(), Some(107), None, Direction::Output).unwrap();
+        assert_ne!(before.id, after.id);
+        assert_eq!(after.id, 107);
+    }
+
+    /// And a pinned name must not.
+    #[test]
+    fn a_pinned_name_ignores_the_default() {
+        for default in [Some(81), Some(107), Some(112), None] {
+            let got = choose(&outputs(), default, Some("pebble"), Direction::Output).unwrap();
+            assert_eq!(got.id, 107, "default {default:?}");
+        }
+    }
+
+    /// Same rule as every other lookup in this crate: case-insensitive
+    /// substring, so a name pasted from Settings matches without its exact
+    /// punctuation.
+    #[test]
+    fn names_match_case_insensitively_by_substring() {
+        let got = choose(&outputs(), None, Some("macbook pro"), Direction::Output).unwrap();
+        assert_eq!(got.id, 81);
+    }
+
+    #[test]
+    fn an_unmatched_name_is_a_clear_error_naming_what_exists() {
+        let err = choose(&outputs(), Some(81), Some("AirPods"), Direction::Output).unwrap_err();
+        let text = err.to_string();
+        assert!(text.contains("no audio device matching"), "got: {text}");
+        assert!(
+            text.contains("Creative Pebble X"),
+            "must list what exists: {text}"
+        );
+    }
+
+    #[test]
+    fn no_default_and_no_name_is_an_error_not_a_guess() {
+        let err = choose(&outputs(), None, None, Direction::Output).unwrap_err();
+        assert!(
+            err.to_string().contains("no default output device"),
+            "got: {err}"
+        );
+    }
+
+    /// Review focus 3: "Creative Pebble X" is a microphone (id 103) AND a
+    /// speaker (id 107). Each direction resolves from its own list, so the
+    /// same name binds different devices per direction.
+    #[test]
+    fn same_name_devices_resolve_per_direction() {
+        let inputs = vec![
+            dev(90, "Jabra Evolve2 30 SE"),
+            dev(103, "Creative Pebble X"),
+        ];
+        let input = choose(&inputs, Some(90), Some("Pebble"), Direction::Input).unwrap();
+        let output = choose(&outputs(), Some(81), Some("Pebble"), Direction::Output).unwrap();
+        assert_eq!((input.id, output.id), (103, 107));
+    }
+}

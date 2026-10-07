@@ -32,8 +32,17 @@ aec = ["webrtc-audio-processing"]
 # Windows-only: `windows` below is gated to `cfg(windows)`, so this feature is
 # a no-op (undefined symbols) anywhere else.
 wasapi-aec = ["dep:windows"]
-# macOS-native echo cancellation via Voice Processing IO audio unit.
-coreaudio-aec = []
+# macOS's equivalent of `wasapi-aec`: the Voice Processing IO audio unit
+# applies Apple's own AEC/AGC/NS to what it records, using what it plays as
+# the reference. No bundled C++, no toolchain. Enabled by default on macOS by
+# uia-app's `[target.'cfg(target_os = "macos")'.dependencies]` stanza; a
+# no-op anywhere else because the crates below are macOS-only.
+coreaudio-aec = [
+  "dep:objc2-audio-toolbox",
+  "dep:objc2-core-audio",
+  "dep:objc2-core-audio-types",
+  "dep:objc2-core-foundation",
+]
 
 [dependencies]
 uia-core = { path = "../uia-core" }
@@ -65,6 +74,33 @@ windows = { version = "0.62", optional = true, features = [
   # resolved to the device they expected.
   "Win32_UI_Shell_PropertiesSystem",
   "Win32_Devices_FunctionDiscovery",
+] }
+
+# All four are already in Cargo.lock at these versions via cpal's own CoreAudio
+# host, so this adds features, not crates.
+[target.'cfg(target_os = "macos")'.dependencies]
+objc2-audio-toolbox = { version = "0.3.2", optional = true, default-features = false, features = [
+  "std",
+  "AUComponent",
+  "AudioComponent",
+  "AudioOutputUnit",
+  "AudioUnitProperties",
+  "objc2-core-audio-types",
+] }
+objc2-core-audio = { version = "0.3.2", optional = true, default-features = false, features = [
+  "std",
+  "AudioHardware",
+  # AudioDeviceID and kAudioDevicePropertyDeviceNameCFString live here; the
+  # latter is the name cpal shows in Settings, so matching must use it too.
+  "AudioHardwareDeprecated",
+] }
+objc2-core-audio-types = { version = "0.3.2", optional = true, default-features = false, features = [
+  "std",
+  "CoreAudioBaseTypes",
+] }
+objc2-core-foundation = { version = "0.3.2", optional = true, default-features = false, features = [
+  "std",
+  "CFString",
 ] }
 
 [dev-dependencies]
