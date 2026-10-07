@@ -14,7 +14,9 @@ A `.mcpb` is a zip containing a `manifest.json` that declares a command to
 launch. UIA extracts it, validates it, and — only if it passes — records it
 as an installed local server and runs it as a subprocess over stdio. Extraction
 restores each file's permission bits from the archive and makes the manifest's
-launch command executable, so a bundle's binary is runnable after install.
+launch command executable, so a bundle's binary is runnable after install. For
+a bundle installed before this fix, the launch command is made executable at
+launch if it has no execute bit.
 
 **Desktop only.** iOS's sandbox forbids spawning subprocesses and Android
 heavily restricts it, so a `.mcpb` local server is unavailable on mobile builds.
@@ -81,7 +83,8 @@ A manifest's `user_config` declares settings the user fills in once. UIA shows
 them under **Settings → MCP → (server) → Configuration** and substitutes
 `${user_config.<key>}` in `args` and `env` at launch, after validation — so a
 setting can never change which executable runs. `${user_config.*}` in `command`
-is not supported: it resolves outside the bundle and is refused.
+is not supported: it is refused at validation (`UserConfigInCommand`), because a
+setting must never choose what runs.
 
 Value order: the saved value, then the manifest `default`, then an error if
 the field is `required` (the server shows as Failed with the reason). Substitution
@@ -95,6 +98,9 @@ must be finite and within `min`/`max` if declared; a `multiple` field uses its
 first value only. Saving is all-or-nothing — validation and required checks run
 first, then keyring writes are rolled back if a later write or the registry write
 fails. Changes apply on the next restart.
+
+A sensitive value placed in `args` is visible to anyone who can list processes,
+so prefer `env` for secrets.
 
 ### What the rule actually enforces: self-contained, not compiled
 
