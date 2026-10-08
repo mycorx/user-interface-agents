@@ -175,6 +175,14 @@ struct McpLocalServersDir(PathBuf);
 struct McpHealthState(uia_app::session::McpHealth);
 
 fn main() {
+    // The release smoke test (scripts/smoke/) runs the installed binary as
+    // `uia --smoke` and needs only the exit code. First of all, before config,
+    // the WSL guard or Tauri: reaching this line at all is the proof that the
+    // binary started and linked.
+    if uia_app::smoke::is_smoke_invocation(std::env::args()) {
+        std::process::exit(0);
+    }
+
     // Before anything else, including config: the Linux .deb will be
     // launched from a WSL shell by someone who has one open, and every failure
     // that follows (GTK with no display, cpal with no capture device) names
