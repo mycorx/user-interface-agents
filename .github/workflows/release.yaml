@@ -272,11 +272,11 @@ jobs:
   # confirm the version, start the binary, uninstall. See scripts/smoke/.
   smoke-linux:
     needs: [plan, linux]
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-26.04
     # A bare image, not the runner: the runner has far more installed than a
     # user's machine, which would hide a missing dependency.
     container:
-      image: "@@UBUNTU_IMAGE@@"
+      image: ubuntu:26.04
       options: --user root
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
@@ -374,7 +374,10 @@ jobs:
   #      base64-encoded (`base64 -i cert.p12 | pbcopy`); the Tauri bundler
   #      imports it into a temporary keychain itself. APPLE_PASSWORD is an
   #      app-specific password for APPLE_ID, not the account password.
-  #   3. Do a dry run (workflow_dispatch) and check the `uia-macos` artifact
+  #   3. Uncomment `smoke-macos` below as well, and add both `macos` and
+  #      `smoke-macos` to `publish.needs`, so a failed macOS build or smoke test
+  #      keeps the release a draft like the other platforms.
+  #   4. Do a dry run (workflow_dispatch) and check the `uia-macos` artifact
   #      on a second Mac before tagging.
   #
   # macos:
@@ -438,9 +441,27 @@ jobs:
   #         spctl --assess --type execute --verbose "$app"
   #         xcrun stapler validate "$app"
   #
+  #     # Always uploaded (not only on dry runs) because `smoke-macos` installs it.
   #     - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
-  #       if: ${{ inputs.dry_run }}
   #       with:
   #         name: uia-macos
   #         path: target/universal-apple-darwin/release/bundle/dmg/*.dmg
   #         if-no-files-found: error
+  #
+  # Installs the .dmg's app the way a user does and proves it starts
+  # (scripts/smoke/macos.sh). Uncomment together with `macos` above.
+  #
+  # smoke-macos:
+  #   needs: [plan, macos]
+  #   runs-on: macos-latest
+  #   steps:
+  #     - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+  #       with:
+  #         ref: ${{ needs.plan.outputs.target_sha }}
+  #     - uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2
+  #       with:
+  #         name: uia-macos
+  #         path: installer
+  #     - env:
+  #         VERSION: ${{ needs.plan.outputs.target_version }}
+  #       run: bash scripts/smoke/macos.sh installer/*.dmg "$VERSION"

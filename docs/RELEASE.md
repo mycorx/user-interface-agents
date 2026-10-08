@@ -147,14 +147,10 @@ rehearse a release.
    `semver:patch`, `semver:none` and `semver:major` labels so open Renovate PRs
    pick up the new ones.
 
-6. **Pin the Linux smoke image (required before the first real or dry run).**
-   Replace the `@@UBUNTU_IMAGE@@` placeholder in the Linux smoke job of
-   `.github/workflows/release.yaml` with `ubuntu:24.04@sha256:<digest>`. Until
-   you do, `smoke-linux` fails. Get the digest with:
-
-   ```bash
-   docker buildx imagetools inspect ubuntu:24.04
-   ```
+6. **Linux smoke image.** The Linux smoke test runs in a bare `ubuntu:26.04`
+   container (not the runner) so the runner's preinstalled libraries cannot hide
+   a dependency the `.deb` forgot to declare. The tag is not digest-pinned in
+   `release.yaml`; Renovate (`pinDigests`) opens a PR to pin it.
 
 Recommended hardening:
 
