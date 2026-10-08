@@ -41,6 +41,23 @@ class Component:
         return core
 
 
+def safe_path(root, rel) -> Path:
+    """root/rel, refusing symlinks and anything that resolves outside root.
+
+    The single guard for every head-checkout path the tool reads or writes: a
+    PR controls those files and must not aim a write at anything else.
+    """
+    root = Path(root)
+    path = root / rel
+    if path.is_symlink():
+        raise RegistryError(f"{rel}: refusing to follow a symlink")
+    try:
+        path.resolve().relative_to(root.resolve())
+    except ValueError:
+        raise RegistryError(f"{rel}: resolves outside {root}")
+    return path
+
+
 def load_registry(path) -> dict:
     try:
         raw = json.loads(Path(path).read_text())
@@ -67,7 +84,7 @@ def load_registry(path) -> dict:
 
 
 def read_versions(root) -> dict:
-    path = Path(root) / VERSIONS_PATH
+    path = safe_path(root, VERSIONS_PATH)
     try:
         data = json.loads(path.read_text())
     except (OSError, ValueError) as e:
@@ -82,4 +99,4 @@ def read_versions(root) -> dict:
 
 def write_versions(root, versions: dict) -> None:
     text = json.dumps(versions, indent=2, sort_keys=True) + "\n"
-    (Path(root) / VERSIONS_PATH).write_text(text)
+    safe_path(root, VERSIONS_PATH).write_text(text)

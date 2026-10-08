@@ -10,7 +10,7 @@ import json
 import re
 from pathlib import Path
 
-from .registry import Component
+from .registry import Component, safe_path
 
 
 class SyncError(Exception):
@@ -139,7 +139,7 @@ def _lock_write(text: str, package: str, version: str) -> str:
 def _package_for_lock(root: Path, comp: Component) -> str:
     for kind, path in comp.synced:
         if kind == "cargo-toml":
-            return _package_name((root / path).read_text())
+            return _package_name(safe_path(root, path).read_text())
     raise SyncError(f"{comp.name}: a cargo-lock entry needs a cargo-toml entry beside it")
 
 
@@ -149,7 +149,7 @@ def read_synced(root, comp: Component) -> list:
     out = []
     for kind, path in comp.synced:
         try:
-            text = (root / path).read_text()
+            text = safe_path(root, path).read_text()
             if kind == "tauri-conf":
                 out.append((path, _tauri_read(text)))
             elif kind == "cargo-toml":
@@ -167,8 +167,9 @@ def read_synced(root, comp: Component) -> list:
 
 def apply(root, comp: Component, version: str) -> None:
     root = Path(root)
+    pending = []
     for kind, path in comp.synced:
-        file = root / path
+        file = safe_path(root, path)
         try:
             text = file.read_text()
             if kind == "tauri-conf":
@@ -184,7 +185,10 @@ def apply(root, comp: Component, version: str) -> None:
         except SyncError as e:
             raise SyncError(f"{path}: {e}")
         if new != text:
-            file.write_text(new)
+            pending.append((file, new))
+    # Every file is computed and verified before the first write.
+    for file, new in pending:
+        file.write_text(new)
 
 
 def check(root, comp: Component, version: str) -> list:

@@ -136,6 +136,107 @@ def git(root, *args):
     subprocess.run(["git", *args], cwd=root, check=True, capture_output=True)
 
 
+class HardeningTests(unittest.TestCase):
+    def setUp(self):
+        self.base = make_repo("0.1.1")
+        self.head = make_repo("0.1.1")
+        self.tmp = Path(tempfile.mkdtemp())
+        self.files = write(self.tmp / "files", "crates/uia-app/src/lib.rs\n")
+        self.body = write(self.tmp / "body", GOOD_BODY)
+
+    def args(self, cmd, extra=()):
+        return [cmd, "--root", str(self.head), "--base-root", str(self.base),
+                "--label", "semver:uai-app:patch", "--changed-files", self.files,
+                "--author", "alice", *extra]
+
+    def _symlink(self, rel):
+        outside = self.tmp / "outside"
+        outside.write_text((self.head / rel).read_text())
+        (self.head / rel).unlink()
+        (self.head / rel).symlink_to(outside)
+        return outside
+
+    def test_bump_refuses_a_symlinked_manifest_and_writes_nothing_outside(self):
+        outside = self._symlink("crates/uia-app/Cargo.toml")
+        before = outside.read_text()
+        code, _, err = run(*self.args("bump"))
+        self.assertEqual(code, 2)
+        self.assertIn("symlink", err)
+        self.assertEqual(outside.read_text(), before)
+        self.assertEqual(json.loads((self.head / "version.json").read_text()), {"uai-app": "0.1.1"})
+
+    def test_check_pr_refuses_a_symlinked_manifest(self):
+        self._symlink("Cargo.lock")
+        code, _, err = run(*self.args("check-pr", extra=["--body-file", self.body]))
+        self.assertEqual(code, 2)
+        self.assertIn("symlink", err)
+
+    def test_bump_refuses_a_symlinked_version_json(self):
+        self._symlink("version.json")
+        self.assertEqual(run(*self.args("bump"))[0], 2)
+
+    def test_a_symlinked_directory_that_leaves_the_root_is_refused(self):
+        outdir = self.tmp / "outdir"
+        outdir.mkdir()
+        (outdir / "Cargo.toml").write_text((self.head / "crates/uia-app/Cargo.toml").read_text())
+        (outdir / "tauri.conf.json").write_text((self.head / "crates/uia-app/tauri.conf.json").read_text())
+        import shutil
+        shutil.rmtree(self.head / "crates/uia-app")
+        (self.head / "crates/uia-app").symlink_to(outdir)
+        code, _, err = run(*self.args("bump"))
+        self.assertEqual(code, 2)
+        self.assertIn("outside", err)
+
+    def test_a_failing_manifest_leaves_version_json_unbumped(self):
+        (self.head / "crates/uia-app/tauri.conf.json").write_text("{}")
+        code, _, err = run(*self.args("bump"))
+        self.assertEqual(code, 2)
+        self.assertEqual(json.loads((self.head / "version.json").read_text()), {"uai-app": "0.1.1"})
+
+    def test_missing_changed_files_file_is_exit_2(self):
+        argv = self.args("check-pr")
+        argv[argv.index(self.files)] = str(self.tmp / "nope")
+        code, _, err = run(*argv)
+        self.assertEqual(code, 2)
+        self.assertIn("error:", err)
+
+    def test_missing_body_file_is_exit_2(self):
+        code, _, err = run(*self.args("check-pr", extra=["--body-file", str(self.tmp / "nope")]))
+        self.assertEqual(code, 2)
+        self.assertIn("error:", err)
+
+    def _event(self, payload):
+        event = write(self.tmp / "event.json", json.dumps(payload))
+        return ["check-pr", "--root", str(self.head), "--base-root", str(self.base),
+                "--event", event, "--changed-files", self.files]
+
+    def test_null_labels_is_not_a_traceback(self):
+        code, _, _ = run(*self._event({"pull_request": {
+            "number": 1, "user": {"login": "a"}, "body": GOOD_BODY, "labels": None}}))
+        self.assertIn(code, (1, 2))
+
+    def test_event_that_is_a_list_is_exit_2(self):
+        code, _, err = run(*self._event([]))
+        self.assertEqual(code, 2)
+        self.assertIn("no pull_request", err)
+
+    def test_event_without_pull_request_names_it(self):
+        code, _, err = run(*self._event({"issue": {}}))
+        self.assertEqual(code, 2)
+        self.assertIn("event has no pull_request", err)
+
+    def test_event_with_malformed_user_is_exit_2(self):
+        code, _, err = run(*self._event({"pull_request": {"number": 1, "user": None, "labels": []}}))
+        self.assertEqual(code, 2)
+        self.assertIn("error:", err)
+
+    def test_unknown_version_entry_has_a_real_message(self):
+        (self.head / "version.json").write_text("{}")
+        code, _, err = run("current", "--root", str(self.head), "--component", "uai-app")
+        self.assertEqual(code, 2)
+        self.assertIn("version.json has no entry for uai-app", err)
+
+
 class GitCommandTests(unittest.TestCase):
     def setUp(self):
         self.root = make_repo("0.1.2")

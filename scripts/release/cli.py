@@ -52,6 +52,12 @@ def _summary(markdown: str) -> None:
             f.write(markdown + "\n")
 
 
+def _version_of(versions, name):
+    if name not in versions:
+        raise CommandError(f"version.json has no entry for {name}")
+    return versions[name]
+
+
 def _component(registry, name):
     if name not in registry:
         raise CommandError(f"unknown component {name!r}; registered: {', '.join(registry)}")
@@ -64,11 +70,17 @@ def _pr_inputs(a):
     body = Path(a.body_file).read_text() if a.body_file else ""
     number = None
     if a.event:
-        pr = json.loads(Path(a.event).read_text())["pull_request"]
-        labels = [l["name"] for l in pr.get("labels", [])]
-        author = pr["user"]["login"]
-        body = pr.get("body") or ""
-        number = pr["number"]
+        try:
+            payload = json.loads(Path(a.event).read_text())
+            if not isinstance(payload, dict) or not isinstance(payload.get("pull_request"), dict):
+                raise CommandError("event has no pull_request")
+            pr = payload["pull_request"]
+            labels = [l["name"] for l in pr.get("labels") or []]
+            author = pr["user"]["login"]
+            body = pr.get("body") or ""
+            number = pr["number"]
+        except (KeyError, TypeError, AttributeError) as e:
+            raise CommandError(f"event pull_request is malformed ({type(e).__name__}: {e})")
     if a.changed_files:
         files = _lines(a.changed_files)
     elif number is not None:
@@ -129,8 +141,10 @@ def cmd_bump(a) -> int:
         if head_versions.get(name) != want or sync.check(a.root, comp, want):
             print(f"{name}: {head_versions.get(name)} -> {want}")
             head_versions[name] = want
-            write_versions(a.root, head_versions)
+            # Manifests first (computed whole before writing): if they fail,
+            # version.json is left untouched rather than ahead of them.
             sync.apply(a.root, comp, want)
+            write_versions(a.root, head_versions)
             changed = True
     if not changed:
         print("version.json and the manifests are already correct")
@@ -144,9 +158,10 @@ def cmd_sync(a) -> int:
     errors = []
     for name in names:
         comp = _component(registry, name)
-        want = a.expect_version or versions[name]
-        if a.expect_version and versions[name] != want:
-            errors.append(f"version.json says {versions[name]} for {name}, expected {want}")
+        have = _version_of(versions, name)
+        want = a.expect_version or have
+        if a.expect_version and have != want:
+            errors.append(f"version.json says {have} for {name}, expected {want}")
         if a.check:
             errors += sync.check(a.root, comp, want)
         else:
@@ -163,7 +178,7 @@ def cmd_sync(a) -> int:
 def cmd_current(a) -> int:
     registry = load_registry(Path(a.root) / REGISTRY_PATH)
     _component(registry, a.component)
-    print(read_versions(a.root)[a.component])
+    print(_version_of(read_versions(a.root), a.component))
     return 0
 
 
@@ -318,6 +333,6 @@ def main(argv) -> int:
     args = _parser().parse_args(argv)
     try:
         return args.fn(args)
-    except (CommandError, RegistryError, sync.SyncError, plan_mod.TagError, ValueError, KeyError) as e:
+    except (CommandError, RegistryError, sync.SyncError, plan_mod.TagError, ValueError, KeyError, OSError) as e:
         print(f"error: {e}", file=sys.stderr)
         return 2
