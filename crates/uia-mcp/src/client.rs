@@ -12,6 +12,7 @@ use std::time::Duration;
 use uia_core::tools::{ToolDescriptor, ToolError, ToolExecutor, ToolResult};
 
 use crate::authed_client::AuthedHttpClient;
+use crate::stderr_tail::{StderrTail, spawn_drain};
 use crate::token::{NoToken, TokenProvider};
 
 #[derive(Clone)]
@@ -252,12 +253,35 @@ impl McpExecutor {
                 for (key, value) in &env {
                     cmd.env(key, value);
                 }
-                let transport =
-                    TokioChildProcess::new(cmd).map_err(|e| ToolError::Transport(e.to_string()))?;
-                let service =
-                    ().serve(transport)
-                        .await
-                        .map_err(|e| ToolError::Transport(e.to_string()))?;
+                // Pipe the child's stderr instead of inheriting it: a server that
+                // dies at startup says why on stderr, and an inherited stream is
+                // invisible to Settings. The drain below keeps echoing each line
+                // to our own stderr, so terminal behavior is unchanged.
+                let (transport, stderr) = TokioChildProcess::builder(cmd)
+                    .stderr(std::process::Stdio::piped())
+                    .spawn()
+                    .map_err(|e| ToolError::Transport(e.to_string()))?;
+                let tail = StderrTail::new(env.iter().map(|(_, v)| v.clone()).collect());
+                let drain =
+                    stderr.map(|stderr| spawn_drain(stderr, tail.clone(), server_name.clone()));
+                let service = match ().serve(transport).await {
+                    Ok(service) => service,
+                    Err(e) => {
+                        // The child has usually exited by now, so its stream
+                        // ends and the drain finishes; bound the wait anyway
+                        // in case it is still alive.
+                        if let Some(drain) = drain {
+                            let _ = tokio::time::timeout(Duration::from_millis(500), drain).await;
+                        }
+                        let printed = tail.render();
+                        let message = if printed.is_empty() {
+                            e.to_string()
+                        } else {
+                            format!("{e}; the server printed: {printed}")
+                        };
+                        return Err(ToolError::Transport(message));
+                    }
+                };
                 Ok(Self {
                     server_name,
                     service,
@@ -777,6 +801,82 @@ mod tests {
             redirected_seen.lock().unwrap().is_none(),
             "the custom header leaked to the redirect target"
         );
+    }
+
+    /// Connects `/bin/sh -c script` (which never speaks MCP, so the handshake
+    /// fails) and returns the transport error text.
+    #[cfg(unix)]
+    async fn failed_startup_message(script: &str, env: Vec<(String, String)>) -> String {
+        let result = tokio::time::timeout(
+            Duration::from_secs(10),
+            McpExecutor::connect(
+                "probe",
+                McpServerConfig::Stdio {
+                    command: "/bin/sh".into(),
+                    args: vec!["-c".into(), script.into()],
+                    env,
+                },
+            ),
+        )
+        .await
+        .expect("connect must not hang on a chatty server");
+        match result {
+            Err(ToolError::Transport(msg)) => msg,
+            Err(other) => panic!("expected a Transport error, got {other:?}"),
+            Ok(_) => panic!("a script that never speaks MCP must not connect"),
+        }
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn a_failed_startup_shows_what_the_server_printed() {
+        let msg =
+            failed_startup_message("echo 'cannot read credentials.json' >&2; exit 3", vec![]).await;
+        assert!(msg.contains("cannot read credentials.json"), "{msg}");
+        assert!(msg.contains("the server printed"), "{msg}");
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn a_launch_env_secret_is_redacted_from_the_startup_output() {
+        let msg = failed_startup_message(
+            "echo \"token is $TOKEN\" >&2; exit 1",
+            vec![("TOKEN".into(), "supersecret-value-123".into())],
+        )
+        .await;
+        assert!(msg.contains("token is"), "{msg}");
+        assert!(msg.contains("<redacted>"), "{msg}");
+        assert!(!msg.contains("supersecret-value-123"), "{msg}");
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn a_very_chatty_server_never_blocks_on_a_full_stderr_pipe() {
+        let msg = failed_startup_message(
+            "i=0; while [ $i -lt 20000 ]; do echo line-$i >&2; i=$((i+1)); done; exit 1",
+            vec![],
+        )
+        .await;
+        assert!(msg.contains("line-19999"), "{msg}");
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn a_command_that_cannot_be_spawned_has_no_server_output_to_show() {
+        let result = McpExecutor::connect(
+            "probe",
+            McpServerConfig::Stdio {
+                command: "/nonexistent/uia-no-such-server".into(),
+                args: vec![],
+                env: vec![],
+            },
+        )
+        .await;
+        match result {
+            Err(ToolError::Transport(msg)) => assert!(!msg.contains("the server printed"), "{msg}"),
+            Err(other) => panic!("expected a Transport error, got {other:?}"),
+            Ok(_) => panic!("a missing command must not connect"),
+        }
     }
 
     #[tokio::test]
