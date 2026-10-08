@@ -97,7 +97,9 @@ re-computes. Fork PRs cannot receive a bot push; for them the check fails with
 the exact fix command (`./scripts/release bump`) for the author or a
 maintainer to run.
 
-**`release-check`** — required status, every PR. Fails unless:
+**`release-check`** — required status, every PR. Triggers on the same events
+as `release-bump` plus `edited`, so fixing the description re-runs it. Fails
+unless:
 1. every `semver:*` label names a registered component, and there is at most
    one per component. A PR touching two components needs one label for each;
 2. a component's label is not `none` (and is present) when the PR changes any
@@ -105,9 +107,50 @@ maintainer to run.
    `semver:<any>:none`;
 3. `version.json` equals `bump(version.json on base, label)` (always the base's
    current version, so a stale PR is red until re-bumped);
-4. `sync --check` passes (no drift between `version.json` and the manifests).
+4. `sync --check` passes (no drift between `version.json` and the manifests);
+5. the PR description passes `check-pr-body` (see "PR template" below).
 
 `none` PRs: version unchanged, check 3 requires exactly that.
+
+### PR template and description check
+
+`.github/pull_request_template.md` has three sections:
+
+- **Summary** — what changed and why.
+- **Release note** — one user-facing sentence, or `N/A` on `none`-labelled PRs.
+- **Testing** — how it was verified.
+
+GitHub only pre-fills a template, so the requirement is enforced by
+`scripts/release check-pr-body` (inside `release-check`). After stripping HTML
+comments (so untouched placeholders count as empty), it fails when a heading
+is missing, a section is empty or still the placeholder, or **Release note** is
+`N/A` on a PR whose label is not `none`. The Release note sections are also
+what the release notes are built from (§6).
+
+### Renovate
+
+The repo uses Renovate with automerge. Its PRs touch lockfiles or workflow
+pins, so they hit the same rules as any PR and need handling:
+
+- **Labels:** `renovate.json` sets `addLabels` per package rule. Updates to
+  shipped dependencies (Cargo, npm) get `semver:uai-app:patch`; `github-actions`
+  and other `.github/**`-only updates get `semver:uai-app:none` (those paths are
+  in `ignore_paths`).
+- **Bot commits:** Renovate treats a branch with foreign commits as externally
+  modified and stops rebasing it. The release App's commit author is added to
+  Renovate's `gitIgnoredAuthors`, so the bump commit does not freeze the
+  branch. When Renovate rebases, it drops the bump commit; `release-bump`
+  re-runs on the push and re-adds it, so it converges. Automerge waits for the
+  required checks on the final head.
+- **Volume:** every shipped-dependency PR is a version and a tag. To keep that
+  bounded, group non-major updates (`groupName`) and put them on a `schedule`
+  (e.g. weekly). Tags are cheap and promotion is manual, so this is a tidiness
+  measure, not a correctness one.
+- **Description check:** PRs authored by Renovate are exempt from
+  `check-pr-body`; their title stands in for the Release note.
+- **Setup order:** change `renovate.json` (labels, `gitIgnoredAuthors`,
+  grouping) **before** `release-check` becomes a required status, or automerge
+  stalls on every open Renovate PR.
 
 ### 5. Workflow: `tag` (on push to `main`)
 
@@ -136,10 +179,13 @@ is a version.
    baseline's commit and reachable from `main`; otherwise fail loudly.
 4. Outputs: target tag, its SHA, baseline tag, and the list of candidate tags
    (shown in the run summary so the maintainer sees exactly what ships).
-5. Creates the draft release for the target (reusing an existing draft for it),
-   with GitHub's generated notes using `previous_tag_name = baseline`, so the
-   notes cover **every PR merged since the last published release**, including
-   the skipped intermediate tags.
+5. Creates the draft release for the target (reusing an existing draft for it).
+   The notes are built by `scripts/release notes` from the **Release note**
+   section of every PR merged between the baseline and the target, grouped by
+   bump label (`major` first, as breaking changes) with a PR link per line.
+   Working from PRs rather than tags means the skipped intermediate tags are
+   covered automatically. Renovate PRs, which have no such section, are listed
+   under "Dependencies" using their titles.
 
 Then, unchanged from today but checked out at the **target tag**:
 `linux` (.deb) and `windows` (.msi) build in parallel and attach to the
@@ -233,8 +279,7 @@ script. Evaluated: **release-please** (conventional-commit driven, centred on
 a release PR; would replace the label scheme and per-merge versions) and
 **release-drafter** (label-driven with `tag-prefix` and a `resolved_version`
 output, but it drafts releases itself, has no manifest bumping and no
-per-component path logic; its notes feature is already covered by GitHub's
-`generate_release_notes` with `previous_tag_name`). Reused instead where an
+per-component path logic; its notes would be built from PR titles, where we want the PR template's Release note sections). Reused instead where an
 action is the commodity part: `actions/create-github-app-token` (bot token),
 `tauri-apps/tauri-action` and `actions/github-script` (already in use).
 
@@ -249,7 +294,8 @@ action is the commodity part: `actions/create-github-app-token` (bot token),
 
 ## Out of scope
 
-Auto-promotion on a schedule, prerelease/RC flows, yanking a published
+Enforcing the template on issues, a conventional-commit title check,
+auto-promotion on a schedule, prerelease/RC flows, yanking a published
 release, signed installers, the auto-updater, `uai-mobile` build jobs (only the
 registry and label scheme are made ready for it).
 
