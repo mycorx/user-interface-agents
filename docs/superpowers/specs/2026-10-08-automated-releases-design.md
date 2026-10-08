@@ -132,36 +132,46 @@ what the release notes are built from (§6).
 The repo uses Renovate with automerge (`.github/renovate.json5`: squash,
 `platformAutomerge: false`, `prConcurrentLimit: 5`, weekly groups for Rust
 crates and GitHub Actions, daily `lockFileMaintenance`). Its PRs hit the same
-rules as any PR. Changes this needs, all in `renovate.json5`:
+rules as any PR.
 
-- **Label names.** `semver:patch|none|major` become `semver:uai-app:patch|none|major`.
-- **One label per PR.** Renovate's `addLabels` accumulates across every
-  matching rule, so rules must not overlap. Today the minor/patch rule also
-  matches the `github-actions` manager and would add `patch` next to a `none`.
-  Make the rules disjoint by manager:
-  - `cargo`, `npm` minor/patch → `semver:uai-app:patch`;
-  - `github-actions` (any type) → `semver:uai-app:none` (`.github/**` is in
-    `ignore_paths`);
-  - `pin`, `digest`, `pinDigest`, `lockFileMaintenance` → `semver:uai-app:none`;
-  - major updates → see open question 1.
-- **Group npm** minor/patch (e.g. `groupName: "frontend dependencies"`,
-  weekly like the crates and Actions groups). Otherwise up to five automerging
-  PRs each bump `version.json` and merge strictly one at a time, each a version
-  and a tag.
+**Policy: only a *major* dependency update cuts a version, and only a `patch`.
+Everything else Renovate does is `none`.** Minor and patch updates, pins,
+digests, GitHub Actions and lockfile maintenance never create a version or a
+tag; they ride along in the next release, because a release builds the
+promoted tag's commit and that includes everything merged before it. Because
+the automerged PRs leave `version.json` alone, they need no bump commit, never
+conflict on it, and cost no extra runs.
+
+Changes in `renovate.json5`:
+
+- **Label names:** `semver:*` becomes `semver:uai-app:*`.
+- **One label per PR.** `addLabels` accumulates across every matching rule, so
+  the rules must not overlap. Today the minor/patch rule also matches the
+  `github-actions` manager. Make them disjoint:
+  - major updates (any manager) → `semver:uai-app:patch` (not automerged, as
+    today);
+  - every other update type, including `github-actions` → `semver:uai-app:none`.
 - **`gitIgnoredAuthors`** lists the release App's commit author. Renovate
   treats a branch with foreign commits as externally modified and stops
-  rebasing it; this stops the bump commit counting. When Renovate rebases it
-  drops the bump commit, `release-bump` re-adds it on the push, and automerge
-  waits for the required checks on the final head.
+  rebasing it; this stops the bump commit counting. It only matters for major
+  PRs (the only ones that get a bump commit): when Renovate rebases it drops
+  the bump commit, `release-bump` re-adds it on the push.
+- Grouping npm minor/patch like the crates and Actions is no longer needed for
+  versioning and is left as a separate tidy-up.
+
+**Known gap:** security fixes usually arrive as minor/patch updates, so by
+this policy they would not cut a release on their own. The suggestion is to
+label `vulnerabilityAlerts` PRs `semver:uai-app:patch` (Renovate should accept
+`addLabels` there; to be verified when writing the config) so a security fix is
+always promotable. Not decided; see open question 1.
 
 In `release-check`:
 
 - **Renovate PRs are exempt from rule 2** (label vs `code_paths`). They are
   labelled by package rule, not by a human who can judge. Exactly-one-label,
   rule 3 (version math) and `sync --check` still apply. This is what lets
-  `lockFileMaintenance` (which rewrites `Cargo.lock` / `pnpm-lock.yaml`, both
-  in `code_paths`) stay `none`: a daily lockfile refresh should not cut a
-  version. Transitive updates it contains ship with the next labelled change.
+  `lockFileMaintenance` and minor/patch updates (which rewrite `Cargo.lock` /
+  `pnpm-lock.yaml`, both in `code_paths`) stay `none`, per the policy above.
 - **Renovate PRs are exempt from `check-pr-body`;** their title stands in for
   the Release note, listed under "Dependencies".
 
@@ -317,11 +327,9 @@ registry and label scheme are made ready for it).
 
 ## Open questions
 
-1. **Major dependency updates:** `renovate.json5` labels them `semver:major`.
-   Should a major *dependency* bump be a `major` app version (as written today),
-   or `minor`? A major crate or npm bump is usually invisible to users, so I
-   would use `minor`; `major` then means "breaking for users" and stays a human
-   decision. They are not automerged either way.
+1. **Security fixes:** should Renovate's vulnerability-alert PRs be labelled
+   `semver:uai-app:patch` so they are never stranded behind the "dependencies
+   are `none`" policy?
 
 Resolved earlier:
 - globs confirmed;
