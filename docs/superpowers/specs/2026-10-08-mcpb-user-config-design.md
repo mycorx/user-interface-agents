@@ -131,7 +131,10 @@ when it is `boolean`, or when it is a non-sensitive, non-`multiple` `string`
 whose declared default is exactly `true` or `false` (decided from the loaded
 field, never the live draft; the stored value stays that string). A stored
 value alone does not make a toggle, and a string setting with no default stays a
-text box. Other `string` fields and
+text box. If the stored value is neither empty nor `true`/`false`, the field
+shows as a text box with the real value instead (a switch would hide it), and
+is a toggle again on the next load once the value is `true`/`false`. Other
+`string` fields and
 `number` render text inputs (`sensitive` renders a password input with a "set"
 indicator); `number` is plain text with a decimal keypad hint, no `min`/`max`
 attributes, and a save with a non-numeric entry is refused with an inline

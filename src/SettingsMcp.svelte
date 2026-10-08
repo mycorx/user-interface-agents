@@ -270,7 +270,16 @@
   // that string. A stored value alone never makes a toggle: a switch cannot
   // show "auto" or empty, so a free-text setting (default "auto", stored
   // "true") would become impossible to set back.
+  //
+  // The reverse also holds: a stored value that is neither empty nor
+  // `true`/`false` (hand-edited `uia-mcp.json`, an older build) cannot be shown
+  // by a switch — it would read as "off" while the server is handed the odd
+  // text, and the next save would overwrite it unseen. Such a field falls back
+  // to a text box showing the real value, and becomes a switch again on the
+  // load after it is set back to `true`/`false`. `loadConfig` re-reads every
+  // time a row is expanded, so this is re-evaluated then, not only at restart.
   function isToggleField(f: ConfigField): boolean {
+    if (f.value != null && f.value !== '' && f.value !== 'true' && f.value !== 'false') return false;
     if (f.kind === 'boolean') return true;
     if (f.kind !== 'string' || f.sensitive || f.multiple) return false;
     return f.default === 'true' || f.default === 'false';

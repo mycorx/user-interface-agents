@@ -122,7 +122,10 @@ change them: a value equal to the default is not saved, and saving it clears an
 earlier stored value. A `boolean` setting, or a string setting whose declared
 default is exactly `true` or `false`, is shown as a toggle (it still stores
 that text); a stored value alone does not make a toggle, a string setting with
-no default stays a text box, and sensitive and `multiple` fields never are.
+no default stays a text box, and sensitive and `multiple` fields never are. If
+a stored value is neither empty nor `true`/`false` (for example after hand-editing
+`uia-mcp.json`), the setting shows as a text box with that value until it is set
+back, so the form never hides what the server is actually given.
 Number settings are typed as text and refused at save if not a number;
 `min`/`max` are enforced when saving.
 
