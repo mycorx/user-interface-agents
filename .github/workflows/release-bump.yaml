@@ -1,0 +1,66 @@
+name: release-bump
+
+# Writes the version bump into the PR so nobody has to. The label says how big
+# the change is; this commits the resulting `version.json` and manifest edits
+# to the PR branch.
+#
+# It needs a GitHub App token, not GITHUB_TOKEN: a push made with the default
+# token does not trigger workflows, so the bump commit would never get its
+# required checks and the PR could not merge.
+on:
+  pull_request:
+    types: [opened, synchronize, reopened, labeled, unlabeled]
+
+permissions:
+  contents: read
+  pull-requests: read
+
+# One bump at a time per PR, queued rather than cancelled: cancelling a run
+# half way through a push could leave the branch behind the label.
+concurrency:
+  group: release-bump-${{ github.event.pull_request.number }}
+  cancel-in-progress: false
+
+jobs:
+  bump:
+    # A fork's branch cannot be pushed to, and its run has no secrets. For
+    # those PRs release-check prints the command a maintainer runs by hand.
+    if: github.event.pull_request.head.repo.full_name == github.repository
+    runs-on: ubuntu-latest
+    steps:
+      - id: app
+        uses: actions/create-github-app-token@bcd2ba49218906704ab6c1aa796996da409d3eb1 # v3.2.0
+        with:
+          app-id: ${{ secrets.RELEASE_APP_ID }}
+          private-key: ${{ secrets.RELEASE_APP_PRIVATE_KEY }}
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          ref: ${{ github.event.pull_request.base.ref }}
+          path: base
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          # The branch, not the SHA: push needs a ref, and the latest tip is
+          # what must be bumped. The token also lets `git push` through.
+          ref: ${{ github.event.pull_request.head.ref }}
+          path: head
+          token: ${{ steps.app.outputs.token }}
+      - name: Bump
+        env:
+          GH_TOKEN: ${{ steps.app.outputs.token }}
+        run: >
+          python3 base/scripts/release bump
+          --root head --base-root base
+          --event "$GITHUB_EVENT_PATH"
+      - name: Commit and push if anything changed
+        working-directory: head
+        run: |
+          if git diff --quiet; then
+            echo "nothing to commit"
+            exit 0
+          fi
+          # Renovate must not mistake this commit for a human edit; the same
+          # email is listed in renovate.json5's gitIgnoredAuthors.
+          git config user.name "uia-release-bot"
+          git config user.email "uia-release-bot@users.noreply.github.com"
+          git commit -a -m "chore(release): sync version.json and manifests"
+          git push
