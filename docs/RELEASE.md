@@ -12,9 +12,9 @@ tag is easy to push by accident and a published release is not easy to retract.
 | Linux | `ubuntu-latest` (GitHub-hosted) | `.deb` |
 | macOS | — (local build only, for now) | none |
 
-Windows needs a GitHub-hosted runner: an MSI is built by WiX, which only runs
-on Windows. While this repository is private those minutes bill at 2×; that
-stops mattering when it goes public.
+Windows needs a Windows runner: an MSI is built by WiX, which only runs on
+Windows. The repository is public, so standard GitHub-hosted runner minutes
+cost nothing, on any platform.
 
 macOS is not built by this workflow yet. For now it is a local build:
 `scripts/build-macos-package.sh` produces an unsigned `.app` and `.dmg` (see the
