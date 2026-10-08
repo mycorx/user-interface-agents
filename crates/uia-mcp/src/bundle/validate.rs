@@ -59,7 +59,11 @@ pub fn validate_bundle(
     }
 
     let declared = &manifest.compatibility.platforms;
-    if !declared.is_empty() && !declared.iter().any(|p| p.eq_ignore_ascii_case(platform)) {
+    if !declared.is_empty()
+        && !declared
+            .iter()
+            .any(|p| p.trim().eq_ignore_ascii_case(platform))
+    {
         return Err(BundleError::UnsupportedPlatform {
             declared: declared.clone(),
             current: platform.to_string(),
@@ -327,8 +331,9 @@ mod tests {
         let exact = validate_bundle(&declaring(&["darwin"]), "darwin", &dir);
         let cased = validate_bundle(&declaring(&["Darwin"]), "darwin", &dir);
         let several = validate_bundle(&declaring(&["win32", "darwin"]), "darwin", &dir);
+        let padded = validate_bundle(&declaring(&[" darwin\t"]), "darwin", &dir);
         std::fs::remove_dir_all(&dir).ok();
-        assert!(exact.is_ok() && cased.is_ok() && several.is_ok());
+        assert!(exact.is_ok() && cased.is_ok() && several.is_ok() && padded.is_ok());
     }
 
     #[test]

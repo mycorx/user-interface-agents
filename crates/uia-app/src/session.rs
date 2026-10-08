@@ -507,7 +507,13 @@ pub async fn build_executor(
                 servers.push((name, Arc::new(exec)));
             }
             Err(e) => {
-                eprintln!("mcp: server {name:?} did not connect, skipping it: {e}");
+                // The server's own output was already echoed line by line as it
+                // arrived; only Status needs the `; the server printed:` copy.
+                let text = e.to_string();
+                let on_terminal = text
+                    .split_once("; the server printed: ")
+                    .map_or(text.as_str(), |(head, _)| head);
+                eprintln!("mcp: server {name:?} did not connect, skipping it: {on_terminal}");
                 record_health(
                     health,
                     [(
@@ -1066,6 +1072,7 @@ mod tests {
     #[test]
     fn a_path_variable_in_a_manifest_default_is_expanded_at_launch() {
         let Some(home) = crate::mcp_registry::mcp_path_vars().get("HOME").cloned() else {
+            eprintln!("skipped: no home directory in this environment");
             return;
         };
         let (reg, dir) = path_var_fixture("pathvar-default");
@@ -1140,7 +1147,12 @@ mod tests {
             plan.targets.is_empty(),
             "launched a foreign-platform bundle"
         );
-        let (name, why) = &plan.skipped[0];
+        let [(name, why)] = plan.skipped.as_slice() else {
+            panic!(
+                "expected exactly one skipped server, got {:?}",
+                plan.skipped
+            );
+        };
         assert_eq!(name, "mymy");
         assert!(why.contains(other), "{why}");
     }
@@ -1155,7 +1167,12 @@ mod tests {
             plan.targets.is_empty(),
             "launched with a missing required setting"
         );
-        let (name, why) = &plan.skipped[0];
+        let [(name, why)] = plan.skipped.as_slice() else {
+            panic!(
+                "expected exactly one skipped server, got {:?}",
+                plan.skipped
+            );
+        };
         assert_eq!(name, "mymy");
         assert!(why.contains("token") && why.contains("Settings"), "{why}");
     }
@@ -1217,12 +1234,14 @@ mod tests {
                     version: None,
                     enabled: true,
                     user_config: std::collections::BTreeMap::new(),
+                    ..Default::default()
                 },
                 LocalServerEntry {
                     name: "files".into(),
                     version: None,
                     enabled: false,
                     user_config: std::collections::BTreeMap::new(),
+                    ..Default::default()
                 },
             ],
             remote_servers: vec![],
@@ -1268,12 +1287,14 @@ mod tests {
                     version: None,
                     enabled: true,
                     user_config: std::collections::BTreeMap::new(),
+                    ..Default::default()
                 },
                 LocalServerEntry {
                     name: "clock".into(),
                     version: None,
                     enabled: true,
                     user_config: std::collections::BTreeMap::new(),
+                    ..Default::default()
                 },
             ],
             remote_servers: vec![],
@@ -1328,6 +1349,7 @@ mod tests {
                 version: None,
                 enabled: true,
                 user_config: std::collections::BTreeMap::new(),
+                ..Default::default()
             }],
             remote_servers: vec![],
         };
@@ -1362,6 +1384,7 @@ mod tests {
                 version: None,
                 enabled: true,
                 user_config: std::collections::BTreeMap::new(),
+                ..Default::default()
             }],
             remote_servers: vec![],
         };
@@ -1431,18 +1454,21 @@ mod tests {
                     version: None,
                     enabled: true,
                     user_config: std::collections::BTreeMap::new(),
+                    ..Default::default()
                 },
                 LocalServerEntry {
                     name: "vanished".into(),
                     version: None,
                     enabled: true,
                     user_config: std::collections::BTreeMap::new(),
+                    ..Default::default()
                 },
                 LocalServerEntry {
                     name: "files".into(),
                     version: None,
                     enabled: true,
                     user_config: std::collections::BTreeMap::new(),
+                    ..Default::default()
                 },
             ],
             remote_servers: vec![],
@@ -1506,12 +1532,14 @@ mod tests {
                     version: None,
                     enabled: true,
                     user_config: std::collections::BTreeMap::new(),
+                    ..Default::default()
                 },
                 LocalServerEntry {
                     name: "files".into(),
                     version: None,
                     enabled: true,
                     user_config: std::collections::BTreeMap::new(),
+                    ..Default::default()
                 },
             ],
             remote_servers: vec![],
@@ -1559,6 +1587,7 @@ mod tests {
                 version: None,
                 enabled: true,
                 user_config: std::collections::BTreeMap::new(),
+                ..Default::default()
             }],
             remote_servers: vec![],
         };
@@ -1594,6 +1623,7 @@ mod tests {
                 version: None,
                 enabled: false,
                 user_config: std::collections::BTreeMap::new(),
+                ..Default::default()
             }],
             remote_servers: vec![],
         };

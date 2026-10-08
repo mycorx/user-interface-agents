@@ -379,6 +379,7 @@ fn substitute_user_config(
         let after = &rest[start + USER_CONFIG_OPEN.len()..];
         let Some(end) = after.find('}') else {
             // Unterminated: never launch with literal `${user_config.*}` text.
+            // Reported as an undeclared key, since the key has no end.
             return Err(BundleError::UndeclaredUserConfig(after.to_string()));
         };
         out.push_str(&resolve_user_config(&after[..end], fields, values, vars)?);

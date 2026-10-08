@@ -69,6 +69,11 @@ pub struct LocalServerEntry {
     /// the OS keyring, never here.
     #[serde(default)]
     pub user_config: BTreeMap<String, String>,
+    /// Names (never values) of the sensitive settings that have a keyring
+    /// entry, so removing the server can delete them even when its manifest
+    /// is already gone.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub sensitive_keys: Vec<String>,
 }
 
 /// How a remote server authenticates. `Static` is a pasted header (the
@@ -430,18 +435,16 @@ fn check_value(key: &str, f: &uia_mcp::bundle::UserConfigField, v: &str) -> Resu
             let n: f64 = v
                 .trim()
                 .parse()
-                .map_err(|_| format!("{key}: {v:?} is not a number"))?;
+                .map_err(|_| format!("{key}: the value is not a number"))?;
             if !n.is_finite() {
-                return Err(format!("{key}: {v:?} is not a finite number"));
+                return Err(format!("{key}: the value is not a finite number"));
             }
             if f.min.is_some_and(|m| n < m) || f.max.is_some_and(|m| n > m) {
-                return Err(format!("{key}: {n} is outside the allowed range"));
+                return Err(format!("{key}: the value is outside the allowed range"));
             }
             Ok(())
         }
-        "boolean" if v != "true" && v != "false" => {
-            Err(format!("{key}: expected true or false, got {v:?}"))
-        }
+        "boolean" if v != "true" && v != "false" => Err(format!("{key}: expected true or false")),
         _ => Ok(()),
     }
 }
@@ -539,6 +542,11 @@ pub fn save_local_config(
     }
     for (key, change) in &changes {
         if fields[key].sensitive {
+            let set = change.as_deref().is_some_and(|v| !v.is_empty());
+            entry.sensitive_keys.retain(|k| k != key);
+            if set {
+                entry.sensitive_keys.push(key.clone());
+            }
             continue;
         }
         match change.as_deref().filter(|v| !v.is_empty()) {
@@ -556,22 +564,32 @@ pub fn save_local_config(
 /// Record first, credentials second, files last — the order
 /// `remove_remote_and_clear_credentials` uses, so a failure part-way cannot
 /// resurrect a server the user removed. The manifest is read up front: it is
-/// the only record of which keys have keyring entries.
+/// the other record of which keys have keyring entries.
 pub fn remove_local_server_and_clear_config(
     registry_path: &Path,
     local_servers_dir: &Path,
     secrets: &dyn SecretStore,
     name: &str,
 ) -> Result<(), String> {
-    let sensitive_keys: Vec<String> = read_fields(local_servers_dir, name)
-        .map(|f| {
-            f.into_iter()
-                .filter(|(_, v)| v.sensitive)
-                .map(|(k, _)| k)
-                .collect()
-        })
-        .unwrap_or_default();
     let mut registry = load(registry_path);
+    // The keys the record noted, plus whatever the manifest declares sensitive
+    // (an entry saved before the record existed has none noted).
+    let mut sensitive_keys: Vec<String> = registry
+        .local_servers
+        .iter()
+        .find(|s| s.name == name)
+        .map(|s| s.sensitive_keys.clone())
+        .unwrap_or_default();
+    if let Ok(fields) = read_fields(local_servers_dir, name) {
+        sensitive_keys.extend(
+            fields
+                .into_iter()
+                .filter(|(_, v)| v.sensitive)
+                .map(|(k, _)| k),
+        );
+    }
+    sensitive_keys.sort();
+    sensitive_keys.dedup();
     registry
         .remove_local_server(name)
         .map_err(|e| e.to_string())?;
@@ -690,6 +708,7 @@ impl McpRegistry {
             version,
             enabled: false,
             user_config: BTreeMap::new(),
+            ..Default::default()
         });
         Ok(())
     }
@@ -1353,6 +1372,7 @@ mod tests {
                 version: Some("1.0.0".into()),
                 enabled: true,
                 user_config: BTreeMap::new(),
+                ..Default::default()
             }],
             remote_servers: vec![],
         }
@@ -1618,6 +1638,7 @@ mod tests {
                 version: Some("1.4.0".into()),
                 enabled: true,
                 user_config: BTreeMap::new(),
+                ..Default::default()
             }],
             remote_servers: vec![remote("docs")],
         };
@@ -1640,12 +1661,14 @@ mod tests {
                     version: None,
                     enabled: false,
                     user_config: BTreeMap::new(),
+                    ..Default::default()
                 },
                 LocalServerEntry {
                     name: "files".into(),
                     version: None,
                     enabled: false,
                     user_config: BTreeMap::new(),
+                    ..Default::default()
                 },
             ],
             remote_servers: vec![],
@@ -1808,6 +1831,7 @@ mod tests {
                 version: None,
                 enabled: false,
                 user_config: BTreeMap::new(),
+                ..Default::default()
             }],
             remote_servers: vec![],
         };
@@ -2602,6 +2626,7 @@ mod config_tests {
             describe_local_config(&load(&fx.registry), &fx.servers, &secrets, "mymy").unwrap();
         std::fs::remove_dir_all(&fx.dir).ok();
         let Some(home) = mcp_path_vars().get("HOME").cloned() else {
+            eprintln!("skipped: no home directory in this environment");
             return;
         };
         assert_eq!(view[0].default, Some(format!("{home}/x")));
@@ -2694,6 +2719,7 @@ mod config_tests {
             )
             .unwrap_err();
             assert!(err.contains(key), "{key}={bad}: {err}");
+            assert!(!err.contains(bad), "the error echoed the value: {err}");
         }
         std::fs::remove_dir_all(&fx.dir).ok();
     }
@@ -2788,6 +2814,56 @@ mod config_tests {
         assert!(load(&fx.registry).local_servers.is_empty());
         assert_eq!(secrets.get("mcp-config.mymy.token"), None);
         assert!(!fx.servers.join("mymy").exists());
+        std::fs::remove_dir_all(&fx.dir).ok();
+    }
+
+    #[test]
+    fn removing_a_server_with_no_manifest_still_clears_its_secrets() {
+        let fx = fixture("remove-no-manifest");
+        let secrets = FakeSecretStore::new();
+        save_local_config(
+            &fx.registry,
+            &fx.servers,
+            &secrets,
+            "mymy",
+            changes(&[("token", Some("t"))]),
+        )
+        .unwrap();
+        assert_eq!(
+            load(&fx.registry).local_servers[0].sensitive_keys,
+            ["token"]
+        );
+        std::fs::remove_file(fx.servers.join("mymy").join("manifest.json")).unwrap();
+        remove_local_server_and_clear_config(&fx.registry, &fx.servers, &secrets, "mymy").unwrap();
+        assert_eq!(secrets.get("mcp-config.mymy.token"), None);
+        std::fs::remove_dir_all(&fx.dir).ok();
+    }
+
+    #[test]
+    fn a_saved_secret_is_recorded_by_name_only() {
+        let fx = fixture("sensitive-keys");
+        let secrets = FakeSecretStore::new();
+        save_local_config(
+            &fx.registry,
+            &fx.servers,
+            &secrets,
+            "mymy",
+            changes(&[("token", Some("s3cret-value"))]),
+        )
+        .unwrap();
+        let raw = std::fs::read_to_string(&fx.registry).unwrap();
+        assert!(
+            raw.contains("token") && !raw.contains("s3cret-value"),
+            "{raw}"
+        );
+        save_local_config(
+            &fx.registry,
+            &fx.servers,
+            &secrets,
+            "mymy",
+            changes(&[("token", None)]),
+        )
+        .ok();
         std::fs::remove_dir_all(&fx.dir).ok();
     }
 

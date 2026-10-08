@@ -10,9 +10,8 @@
 //! itself printed.
 
 use std::collections::VecDeque;
-use std::io::Write;
 use std::sync::{Arc, Mutex};
-use tokio::io::{AsyncBufReadExt, AsyncRead, BufReader};
+use tokio::io::{AsyncBufReadExt, AsyncRead, AsyncWrite, AsyncWriteExt, BufReader};
 
 /// Most lines kept; older ones are dropped.
 const MAX_LINES: usize = 12;
@@ -149,10 +148,10 @@ pub(crate) fn spawn_drain(
     tail: StderrTail,
     server_name: String,
 ) -> tokio::task::JoinHandle<()> {
-    tokio::spawn(drain(stderr, tail, server_name, std::io::stderr()))
+    tokio::spawn(drain(stderr, tail, server_name, tokio::io::stderr()))
 }
 
-async fn drain<R: AsyncRead + Unpin, W: Write>(
+async fn drain<R: AsyncRead + Unpin, W: AsyncWrite + Unpin>(
     stderr: R,
     tail: StderrTail,
     server_name: String,
@@ -186,24 +185,32 @@ async fn drain<R: AsyncRead + Unpin, W: Write>(
         };
         reader.consume(consumed);
         if found_newline {
-            emit(&tail, &server_name, &line, &mut out);
+            emit(&tail, &server_name, &line, &mut out).await;
             line.clear();
             overlong = false;
         }
     }
     // A final line with no trailing newline.
     if !line.is_empty() || overlong {
-        emit(&tail, &server_name, &line, &mut out);
+        emit(&tail, &server_name, &line, &mut out).await;
     }
 }
 
-fn emit(tail: &StderrTail, server_name: &str, bytes: &[u8], out: &mut impl Write) {
+async fn emit(
+    tail: &StderrTail,
+    server_name: &str,
+    bytes: &[u8],
+    out: &mut (impl AsyncWrite + Unpin),
+) {
     let text = String::from_utf8_lossy(bytes);
     tail.push_line(&text);
     let echoed = tail.redact(text.trim_end_matches('\r'));
-    // `eprintln!` panics when stderr is closed or full; losing an echoed line
-    // is harmless, losing the drain would freeze the child.
-    let _ = writeln!(out, "mcp[{server_name}] {echoed}");
+    // `eprintln!` panics when stderr is closed, and a blocking write would
+    // hold an async worker; losing an echoed line is harmless, losing the
+    // drain would freeze the child. One write so lines never interleave.
+    let _ = out
+        .write_all(format!("mcp[{server_name}] {echoed}\n").as_bytes())
+        .await;
 }
 
 #[cfg(test)]
@@ -287,12 +294,25 @@ mod tests {
 
     /// A writer whose every write fails, like a closed parent stderr.
     struct BrokenWriter;
-    impl Write for BrokenWriter {
-        fn write(&mut self, _: &[u8]) -> std::io::Result<usize> {
-            Err(std::io::Error::from(std::io::ErrorKind::BrokenPipe))
+    impl AsyncWrite for BrokenWriter {
+        fn poll_write(
+            self: std::pin::Pin<&mut Self>,
+            _: &mut std::task::Context<'_>,
+            _: &[u8],
+        ) -> std::task::Poll<std::io::Result<usize>> {
+            std::task::Poll::Ready(Err(std::io::Error::from(std::io::ErrorKind::BrokenPipe)))
         }
-        fn flush(&mut self) -> std::io::Result<()> {
-            Err(std::io::Error::from(std::io::ErrorKind::BrokenPipe))
+        fn poll_flush(
+            self: std::pin::Pin<&mut Self>,
+            _: &mut std::task::Context<'_>,
+        ) -> std::task::Poll<std::io::Result<()>> {
+            std::task::Poll::Ready(Err(std::io::Error::from(std::io::ErrorKind::BrokenPipe)))
+        }
+        fn poll_shutdown(
+            self: std::pin::Pin<&mut Self>,
+            _: &mut std::task::Context<'_>,
+        ) -> std::task::Poll<std::io::Result<()>> {
+            std::task::Poll::Ready(Ok(()))
         }
     }
 

@@ -285,13 +285,23 @@
     return f.default === 'true' || f.default === 'false';
   }
 
-  async function loadConfig(name: string) {
+  // Plain decimal only: `Number()` would also accept `0x10`, `0b1` and
+  // `Infinity`, which the backend then refuses.
+  const DECIMAL = /^[+-]?(\d+\.?\d*|\.\d+)([eE][+-]?\d+)?$/;
+
+  // `keepDraft` refreshes what the fields say (is a secret set?) without
+  // discarding what the user has typed into the others and not yet saved.
+  async function loadConfig(name: string, keepDraft = false) {
     try {
       const fields = await invoke<ConfigField[]>('get_mcp_local_server_config', { name });
       configFields[name] = fields;
       // A sensitive input starts empty: leaving it empty means "keep".
-      configDraft[name] = Object.fromEntries(
+      const fresh = Object.fromEntries(
         fields.map((f) => [f.key, f.sensitive ? '' : (f.value ?? f.default ?? '')]),
+      );
+      const kept = keepDraft ? (configDraft[name] ?? {}) : {};
+      configDraft[name] = Object.fromEntries(
+        fields.map((f) => [f.key, f.key in kept ? kept[f.key] : fresh[f.key]]),
       );
     } catch (e) {
       configFields[name] = String(e);
@@ -309,7 +319,7 @@
       let text = String(configDraft[name][f.key] ?? '');
       if (f.kind === 'number') text = text.trim();
       if (f.sensitive && text === '') continue; // keep the stored secret
-      if (f.kind === 'number' && text !== '' && !Number.isFinite(Number(text))) {
+      if (f.kind === 'number' && text !== '' && !DECIMAL.test(text)) {
         configNote[name] = { ok: false, text: `${f.title}: "${text}" is not a number` };
         return;
       }
@@ -342,12 +352,16 @@
     } catch (e) {
       configNote[name] = { ok: false, text: String(e) };
     }
-    await loadConfig(name);
+    await loadConfig(name, true);
   }
 
   async function pickPath(name: string, key: string, directory: boolean) {
-    const chosen = await open({ directory, multiple: false });
-    if (typeof chosen === 'string') configDraft[name][key] = chosen;
+    try {
+      const chosen = await open({ directory, multiple: false });
+      if (typeof chosen === 'string') configDraft[name][key] = chosen;
+    } catch (e) {
+      configNote[name] = { ok: false, text: `Could not open the file picker: ${e}` };
+    }
   }
 
   refreshLocalServers();
@@ -814,13 +828,26 @@
                             />
                           {:else if f.kind === 'directory' || f.kind === 'file'}
                             <div class="cfg-row">
-                              <input id={inputId} type="text" bind:value={configDraft[row.name][f.key]} />
+                              <input
+                                id={inputId}
+                                type={f.sensitive ? 'password' : 'text'}
+                                autocomplete="off"
+                                placeholder={f.sensitive && f.is_set
+                                  ? '•••••••• (saved — type or browse to replace)'
+                                  : ''}
+                                bind:value={configDraft[row.name][f.key]}
+                              />
                               <button
                                 type="button"
                                 onclick={() => pickPath(row.name, f.key, f.kind === 'directory')}
                               >
                                 Browse&hellip;
                               </button>
+                              {#if f.sensitive && f.is_set}
+                                <button type="button" onclick={() => clearSecret(row.name, f.key)}>
+                                  Remove
+                                </button>
+                              {/if}
                             </div>
                           {:else}
                             <div class="cfg-row">

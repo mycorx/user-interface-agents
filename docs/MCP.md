@@ -25,10 +25,10 @@ heavily restricts it, so a `.mcpb` local server is unavailable on mobile builds.
 ### Manifest fields UIA acts on
 
 `user_config`, `server`, `compatibility.platforms` and `name`/`version` are
-acted on. Everything else
-in the MCPB schema (`description`, `author`, `tools`, `dxt_version`, ...) is
-parsed but ignored — an unknown key must never make an otherwise-valid bundle
-uninstallable, and none of those fields affect what gets executed.
+acted on. Everything else in the MCPB schema (`description`, `author`,
+`tools`, `dxt_version`, ...) is parsed but ignored — an unknown key must never
+make an otherwise-valid bundle uninstallable, and none of those fields affect
+what gets executed.
 
 ```json
 {
@@ -60,7 +60,6 @@ uninstallable, and none of those fields affect what gets executed.
   `darwin`, `linux`), not Rust's, and merges field-by-field over the base
   config — an override naming only a Windows `.exe` still keeps the base
   `args`.
-
 - `compatibility.platforms` lists the operating systems the bundle was built
   for, by Node's names (`win32`, `darwin`, `linux`), compared
   case-insensitively. `validate_bundle` enforces it at install and again at
@@ -108,8 +107,10 @@ the field is `required` (the server shows as Failed with the reason). Substituti
 is a single pass — a value that itself contains `${...}` is never expanded again.
 Plain values are stored in `uia-mcp.json`; `sensitive` ones only in the OS keyring
 (macOS Keychain, Windows Credential Manager, Secret Service on Linux) under
-`mcp-config.<server>.<key>`, and are deleted when the server is removed. Sensitive
-values are never returned to the UI; Settings only learns whether one is set.
+`mcp-config.<server>.<key>`, and are deleted when the server is removed (the key
+names, never the values, are also noted in `uia-mcp.json`, so removal still finds
+them if the bundle's manifest is already gone). Sensitive values are never
+returned to the UI; Settings only learns whether one is set.
 Supported types: `string`, `number`, `boolean`, `directory`, `file`; numbers
 must be finite and within `min`/`max` if declared; a `multiple` field uses its
 first value only. Saving is all-or-nothing — validation and required checks run
