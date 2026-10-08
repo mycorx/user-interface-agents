@@ -58,6 +58,14 @@ pub fn validate_bundle(
         return Err(BundleError::NotBinary(manifest.server.server_type.clone()));
     }
 
+    let declared = &manifest.compatibility.platforms;
+    if !declared.is_empty() && !declared.iter().any(|p| p.eq_ignore_ascii_case(platform)) {
+        return Err(BundleError::UnsupportedPlatform {
+            declared: declared.clone(),
+            current: platform.to_string(),
+        });
+    }
+
     let dirname = bundle_dir.to_string_lossy().replace('\\', "/");
     let launch = resolve_launch(manifest, platform, &dirname)?;
 
@@ -289,6 +297,59 @@ mod tests {
         std::fs::remove_dir_all(&dir).ok();
         assert!(
             matches!(err, BundleError::UserConfigInCommand(_)),
+            "got {err:?}"
+        );
+    }
+
+    fn declaring(platforms: &[&str]) -> crate::bundle::McpbManifest {
+        let mut m = manifest_for("binary", "${__dirname}/server/probe");
+        m.compatibility.platforms = platforms.iter().map(|p| p.to_string()).collect();
+        m
+    }
+
+    #[test]
+    fn a_bundle_for_another_platform_is_refused_naming_both() {
+        let dir = bundle_with("server/probe", ELF);
+        let err = validate_bundle(&declaring(&["darwin"]), "linux", &dir).unwrap_err();
+        std::fs::remove_dir_all(&dir).ok();
+        assert!(
+            matches!(&err, BundleError::UnsupportedPlatform { declared, current }
+                if declared == &["darwin"] && current == "linux"),
+            "got {err:?}"
+        );
+        let msg = err.to_string();
+        assert!(msg.contains("darwin") && msg.contains("linux"), "{msg}");
+    }
+
+    #[test]
+    fn a_bundle_for_this_platform_passes_case_insensitively() {
+        let dir = bundle_with("server/probe", ELF);
+        let exact = validate_bundle(&declaring(&["darwin"]), "darwin", &dir);
+        let cased = validate_bundle(&declaring(&["Darwin"]), "darwin", &dir);
+        let several = validate_bundle(&declaring(&["win32", "darwin"]), "darwin", &dir);
+        std::fs::remove_dir_all(&dir).ok();
+        assert!(exact.is_ok() && cased.is_ok() && several.is_ok());
+    }
+
+    #[test]
+    fn a_bundle_declaring_no_platform_runs_everywhere() {
+        let dir = bundle_with("server/probe", ELF);
+        let m = manifest_for("binary", "${__dirname}/server/probe");
+        let results: Vec<_> = ["win32", "darwin", "linux"]
+            .iter()
+            .map(|p| validate_bundle(&m, p, &dir).is_ok())
+            .collect();
+        std::fs::remove_dir_all(&dir).ok();
+        assert_eq!(results, [true, true, true]);
+    }
+
+    #[test]
+    fn a_windows_bundle_is_refused_on_macos() {
+        let dir = bundle_with("server/probe", ELF);
+        let err = validate_bundle(&declaring(&["win32"]), "darwin", &dir).unwrap_err();
+        std::fs::remove_dir_all(&dir).ok();
+        assert!(
+            matches!(err, BundleError::UnsupportedPlatform { .. }),
             "got {err:?}"
         );
     }

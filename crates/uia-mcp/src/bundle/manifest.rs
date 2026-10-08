@@ -26,6 +26,39 @@ pub struct McpbManifest {
     /// Settings the user fills in once; referenced as `${user_config.<key>}`.
     #[serde(default, deserialize_with = "lenient_user_config")]
     pub user_config: BTreeMap<String, UserConfigField>,
+    /// Which operating systems the bundle was built for.
+    #[serde(default, deserialize_with = "lenient_compatibility")]
+    pub compatibility: Compatibility,
+}
+
+/// The slice of the manifest's `compatibility` block uia acts on.
+#[derive(Debug, PartialEq, Clone, Default)]
+pub struct Compatibility {
+    /// MCPB platform names (`win32`/`darwin`/`linux`). Empty means the bundle
+    /// does not restrict itself.
+    pub platforms: Vec<String>,
+}
+
+/// A `compatibility` that is not an object, or whose `platforms` is not an
+/// array, is unrestricted; non-string items are dropped. Not worth rejecting a
+/// bundle over.
+fn lenient_compatibility<'de, D: serde::Deserializer<'de>>(
+    d: D,
+) -> Result<Compatibility, D::Error> {
+    let platforms = match serde_json::Value::deserialize(d)? {
+        serde_json::Value::Object(mut o) => match o.remove("platforms") {
+            Some(serde_json::Value::Array(items)) => items
+                .into_iter()
+                .filter_map(|v| match v {
+                    serde_json::Value::String(s) => Some(s),
+                    _ => None,
+                })
+                .collect(),
+            _ => Vec::new(),
+        },
+        _ => Vec::new(),
+    };
+    Ok(Compatibility { platforms })
 }
 
 #[derive(Debug, Deserialize, PartialEq, Clone)]
@@ -992,5 +1025,45 @@ mod tests {
         .unwrap();
         assert_eq!(out.command, "${HOME}/server");
         assert_eq!(out.env[0].0, "${HOME}");
+    }
+
+    fn platforms_of(compat: &str) -> Vec<String> {
+        parse_manifest(&format!(
+            r#"{{"name":"x","server":{{"type":"binary"}}{compat}}}"#
+        ))
+        .unwrap()
+        .compatibility
+        .platforms
+    }
+
+    #[test]
+    fn declared_platforms_are_parsed() {
+        assert_eq!(
+            platforms_of(r#","compatibility":{"platforms":["darwin","win32"]}"#),
+            vec!["darwin".to_string(), "win32".to_string()]
+        );
+    }
+
+    #[test]
+    fn a_malformed_compatibility_is_unrestricted_and_still_parses() {
+        for compat in [
+            "",
+            r#","compatibility":5"#,
+            r#","compatibility":null"#,
+            r#","compatibility":"darwin""#,
+            r#","compatibility":{"platforms":"darwin"}"#,
+            r#","compatibility":{"platforms":[1,true]}"#,
+            r#","compatibility":{"platforms":[]}"#,
+        ] {
+            assert!(platforms_of(compat).is_empty(), "{compat}");
+        }
+    }
+
+    #[test]
+    fn non_string_platform_entries_are_dropped_and_strings_kept() {
+        assert_eq!(
+            platforms_of(r#","compatibility":{"platforms":[1,"linux",null]}"#),
+            vec!["linux".to_string()]
+        );
     }
 }

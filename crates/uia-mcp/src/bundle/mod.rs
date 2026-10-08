@@ -20,8 +20,8 @@ pub mod validate;
 
 pub use install::{InstalledBundle, ensure_executable, install_bundle};
 pub use manifest::{
-    McpbManifest, McpbMcpConfig, McpbServer, ResolvedLaunch, UserConfigField, apply_user_config,
-    current_platform, expand_path_vars, parse_manifest, resolve_launch,
+    Compatibility, McpbManifest, McpbMcpConfig, McpbServer, ResolvedLaunch, UserConfigField,
+    apply_user_config, current_platform, expand_path_vars, parse_manifest, resolve_launch,
 };
 pub use validate::{SCRIPT_EXTENSIONS, validate_bundle};
 
@@ -41,6 +41,15 @@ pub enum BundleError {
          exactly what requiring a bundle is meant to prevent"
     )]
     NotBinary(String),
+    #[error(
+        "this bundle is built for {}, not for this operating system ({current}); \
+         install the build made for {current}",
+        declared.join(", ")
+    )]
+    UnsupportedPlatform {
+        declared: Vec<String>,
+        current: String,
+    },
     #[error("the bundle declares no command and no entry point, so there is nothing to run")]
     NoCommand,
     #[error("the bundle's launch command {0:?} is a .{1} script, not a compiled executable")]

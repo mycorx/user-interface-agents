@@ -1116,6 +1116,36 @@ mod tests {
     }
 
     #[test]
+    fn a_server_built_for_another_platform_is_skipped_with_the_platform_named() {
+        let other = ["win32", "darwin", "linux"]
+            .into_iter()
+            .find(|p| *p != uia_mcp::bundle::current_platform())
+            .unwrap();
+        let (reg, dir) = user_config_fixture("otheros");
+        std::fs::write(
+            dir.join("mymy/manifest.json"),
+            format!(
+                r#"{{ "manifest_version":"0.3","name":"mymy","version":"1",
+                     "compatibility":{{"platforms":["{other}"]}},
+                     "server":{{"type":"binary","entry_point":"server/mymy",
+                       "mcp_config":{{"command":"${{__dirname}}/server/mymy"}}}}}}"#
+            ),
+        )
+        .unwrap();
+
+        let plan = mcp_targets(&reg, &dir, None, &crate::secrets::FakeSecretStore::new());
+        std::fs::remove_dir_all(&dir).ok();
+
+        assert!(
+            plan.targets.is_empty(),
+            "launched a foreign-platform bundle"
+        );
+        let (name, why) = &plan.skipped[0];
+        assert_eq!(name, "mymy");
+        assert!(why.contains(other), "{why}");
+    }
+
+    #[test]
     fn a_required_secret_that_is_not_in_the_keyring_fails_the_server_with_a_reason() {
         let (reg, dir) = user_config_fixture("missing");
         let plan = mcp_targets(&reg, &dir, None, &crate::secrets::FakeSecretStore::new());

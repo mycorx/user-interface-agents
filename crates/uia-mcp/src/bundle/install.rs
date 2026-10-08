@@ -415,6 +415,52 @@ mod tests {
         );
     }
 
+    /// A platform name that is not the one this test runs on.
+    fn other_platform() -> &'static str {
+        ["win32", "darwin", "linux"]
+            .into_iter()
+            .find(|p| *p != current_platform())
+            .unwrap()
+    }
+
+    #[test]
+    fn a_bundle_for_another_platform_leaves_nothing_in_the_install_directory() {
+        let other = other_platform();
+        let manifest = format!(
+            r#"{{
+            "manifest_version": "0.2",
+            "name": "elsewhere",
+            "version": "1.0.0",
+            "compatibility": {{ "platforms": ["{other}"] }},
+            "server": {{
+                "type": "binary",
+                "entry_point": "server/elsewhere",
+                "mcp_config": {{ "command": "${{__dirname}}/server/elsewhere" }}
+            }}
+        }}"#
+        );
+        let src = write_mcpb(
+            "elsewhere",
+            &manifest,
+            &[("server/elsewhere", b"\x7fELF-bytes")],
+        );
+        let dest = local_servers_dir("elsewhere");
+
+        let err = install_bundle(&src, &dest).unwrap_err();
+
+        let leftover_entries: Vec<_> = std::fs::read_dir(&dest)
+            .map(|entries| entries.filter_map(|e| e.ok()).collect())
+            .unwrap_or_default();
+        std::fs::remove_file(&src).ok();
+        std::fs::remove_dir_all(&dest).ok();
+
+        assert!(
+            matches!(&err, BundleError::UnsupportedPlatform { declared, .. } if declared == &[other]),
+            "got {err:?}"
+        );
+        assert!(leftover_entries.is_empty(), "left {leftover_entries:?}");
+    }
+
     #[test]
     fn an_archive_without_a_manifest_is_refused() {
         let path = std::env::temp_dir().join(format!(
