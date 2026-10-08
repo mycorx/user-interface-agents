@@ -129,28 +129,44 @@ what the release notes are built from (§6).
 
 ### Renovate
 
-The repo uses Renovate with automerge. Its PRs touch lockfiles or workflow
-pins, so they hit the same rules as any PR and need handling:
+The repo uses Renovate with automerge (`.github/renovate.json5`: squash,
+`platformAutomerge: false`, `prConcurrentLimit: 5`, weekly groups for Rust
+crates and GitHub Actions, daily `lockFileMaintenance`). Its PRs hit the same
+rules as any PR. Changes this needs, all in `renovate.json5`:
 
-- **Labels:** `renovate.json` sets `addLabels` per package rule. Updates to
-  shipped dependencies (Cargo, npm) get `semver:uai-app:patch`; `github-actions`
-  and other `.github/**`-only updates get `semver:uai-app:none` (those paths are
-  in `ignore_paths`).
-- **Bot commits:** Renovate treats a branch with foreign commits as externally
-  modified and stops rebasing it. The release App's commit author is added to
-  Renovate's `gitIgnoredAuthors`, so the bump commit does not freeze the
-  branch. When Renovate rebases, it drops the bump commit; `release-bump`
-  re-runs on the push and re-adds it, so it converges. Automerge waits for the
-  required checks on the final head.
-- **Volume:** every shipped-dependency PR is a version and a tag. To keep that
-  bounded, group non-major updates (`groupName`) and put them on a `schedule`
-  (e.g. weekly). Tags are cheap and promotion is manual, so this is a tidiness
-  measure, not a correctness one.
-- **Description check:** PRs authored by Renovate are exempt from
-  `check-pr-body`; their title stands in for the Release note.
-- **Setup order:** change `renovate.json` (labels, `gitIgnoredAuthors`,
-  grouping) **before** `release-check` becomes a required status, or automerge
-  stalls on every open Renovate PR.
+- **Label names.** `semver:patch|none|major` become `semver:uai-app:patch|none|major`.
+- **One label per PR.** Renovate's `addLabels` accumulates across every
+  matching rule, so rules must not overlap. Today the minor/patch rule also
+  matches the `github-actions` manager and would add `patch` next to a `none`.
+  Make the rules disjoint by manager:
+  - `cargo`, `npm` minor/patch → `semver:uai-app:patch`;
+  - `github-actions` (any type) → `semver:uai-app:none` (`.github/**` is in
+    `ignore_paths`);
+  - `pin`, `digest`, `pinDigest`, `lockFileMaintenance` → `semver:uai-app:none`;
+  - major updates → see open question 1.
+- **Group npm** minor/patch (e.g. `groupName: "frontend dependencies"`,
+  weekly like the crates and Actions groups). Otherwise up to five automerging
+  PRs each bump `version.json` and merge strictly one at a time, each a version
+  and a tag.
+- **`gitIgnoredAuthors`** lists the release App's commit author. Renovate
+  treats a branch with foreign commits as externally modified and stops
+  rebasing it; this stops the bump commit counting. When Renovate rebases it
+  drops the bump commit, `release-bump` re-adds it on the push, and automerge
+  waits for the required checks on the final head.
+
+In `release-check`:
+
+- **Renovate PRs are exempt from rule 2** (label vs `code_paths`). They are
+  labelled by package rule, not by a human who can judge. Exactly-one-label,
+  rule 3 (version math) and `sync --check` still apply. This is what lets
+  `lockFileMaintenance` (which rewrites `Cargo.lock` / `pnpm-lock.yaml`, both
+  in `code_paths`) stay `none`: a daily lockfile refresh should not cut a
+  version. Transitive updates it contains ship with the next labelled change.
+- **Renovate PRs are exempt from `check-pr-body`;** their title stands in for
+  the Release note, listed under "Dependencies".
+
+**Setup order:** change `renovate.json5` **before** `release-check` becomes a
+required status, or automerge stalls on every open Renovate PR.
 
 ### 5. Workflow: `tag` (on push to `main`)
 
@@ -301,7 +317,13 @@ registry and label scheme are made ready for it).
 
 ## Open questions
 
-All resolved:
+1. **Major dependency updates:** `renovate.json5` labels them `semver:major`.
+   Should a major *dependency* bump be a `major` app version (as written today),
+   or `minor`? A major crate or npm bump is usually invisible to users, so I
+   would use `minor`; `major` then means "breaking for users" and stays a human
+   decision. They are not automerged either way.
+
+Resolved earlier:
 - globs confirmed;
 - tags are `uai-app-X.Y.Z` only, no legacy-tag support; the first release is retagged by hand (see Migration);
 - the published release is `0.1.1`, so `version.json` starts there;
