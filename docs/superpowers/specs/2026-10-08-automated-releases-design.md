@@ -47,7 +47,6 @@ The only file edited to change a version. Adding a component is adding a key.
 {
   "uai-app": {
     "tag": "uai-app-{version}",
-    "legacy_tag": "{version}",
     "label": "uai-app",
     "synced": ["crates/uia-app/tauri.conf.json",
                "crates/uia-app/Cargo.toml",
@@ -67,10 +66,6 @@ The only file edited to change a version. Adding a component is adding a key.
   the version a clean semver after the prefix is stripped, groups tags
   alphabetically, and `git tag -l 'uai-app-*'` selects exactly one component's
   tags. This is also what release-please and changesets do.
-- **Legacy bare tags:** `legacy_tag` lets `uai-app` recognise the existing
-  `0.1.0` / `0.1.1` tags as its own history. They count for baseline lookup
-  and for "does this version already have a tag"; new tags always use the
-  prefix. No published tag is moved or renamed.
 - `code_paths` / `ignore_paths` define "code changed" (confirmed).
 
 ### 3. `scripts/release/` — one tested script, used everywhere
@@ -129,7 +124,7 @@ is a version.
 
 `plan` job (`scripts/release plan`):
 1. **Baseline** = the latest *published* (non-draft, non-prerelease) release of
-   the component, found by tag prefix (plus `legacy_tag` for `uai-app`).
+   the component, found by tag prefix.
    GitHub's single "latest release" is never used, because with several
    components it would answer for whichever shipped last. If none exists, the baseline is "nothing" and every tag
    counts.
@@ -208,13 +203,15 @@ The old tag-push trigger is removed.
 
 ## Migration
 
-- Add `version.json` = `{"uai-app": "0.1.1"}`: `0.1.1` is the published
-  release (tag `0.1.1`, `fe3ef77`). The first automated tag will be
-  `uai-app-0.1.2` or higher. The published `0.1.0` / `0.1.1` tags and releases
-  are left untouched and recognised through `legacy_tag`; the prefix
-  convention applies from here on. (Retagging them as `uai-app-0.1.1` would
-  drop the `legacy_tag` special case but means rewriting a published release;
-  not worth it.)
+- **One-time, manual, before the workflows are enabled** (nobody uses the app
+  yet, so rewriting the first release is acceptable):
+  1. delete the published release and tag `0.1.1` (and the `0.1.0` tag);
+  2. create tag `uai-app-0.1.1` on `fe3ef77` and publish a release for it.
+  Order matters: the `tag` workflow tags any `version.json` version that has no
+  tag, so if `version.json` says `0.1.1` while `uai-app-0.1.1` does not exist,
+  it would tag the current `main` HEAD as `0.1.1`.
+- Add `version.json` = `{"uai-app": "0.1.1"}`. The first automated tag will be
+  `uai-app-0.1.2` or higher. There is no legacy-tag handling in the code.
 - Remove the tag-push trigger from `release.yaml`; update `docs/RELEASE.md`
   ("Cutting one" becomes "run the `release` workflow").
 - `ci.yaml`: add `workflow_call` with a `ref` input.
@@ -228,6 +225,18 @@ The old tag-push trigger is removed.
   no-candidates failure.
 - Workflow logic lives in the script; workflows stay thin.
 - `release` dry run before the first real release.
+
+## Build vs reuse
+
+No existing action implements this flow, so the version logic is our own
+script. Evaluated: **release-please** (conventional-commit driven, centred on
+a release PR; would replace the label scheme and per-merge versions) and
+**release-drafter** (label-driven with `tag-prefix` and a `resolved_version`
+output, but it drafts releases itself, has no manifest bumping and no
+per-component path logic; its notes feature is already covered by GitHub's
+`generate_release_notes` with `previous_tag_name`). Reused instead where an
+action is the commodity part: `actions/create-github-app-token` (bot token),
+`tauri-apps/tauri-action` and `actions/github-script` (already in use).
 
 ## Trade-offs accepted
 
@@ -248,7 +257,7 @@ registry and label scheme are made ready for it).
 
 All resolved:
 - globs confirmed;
-- tags are `uai-app-X.Y.Z`, with `legacy_tag` covering the existing bare tags;
+- tags are `uai-app-X.Y.Z` only, no legacy-tag support; the first release is retagged by hand (see Migration);
 - the published release is `0.1.1`, so `version.json` starts there;
 - bot identity is a GitHub App, created manually by the org admin;
 - the smoke test uses installer metadata plus a `--smoke` early-exit flag.
