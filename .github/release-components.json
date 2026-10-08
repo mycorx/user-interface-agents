@@ -15,7 +15,10 @@
       "package.json",
       "pnpm-lock.yaml",
       "vite.config.ts",
-      "svelte.config.js"
+      "svelte.config.js",
+      "index.html",
+      "tsconfig.json",
+      "pnpm-workspace.yaml"
     ],
     "ignore_paths": ["docs/**", "**/*.md", ".github/**", "scripts/**"]
   }
