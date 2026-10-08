@@ -22,6 +22,13 @@ You are welcome to submit pull requests that:
 - Add enhancements
 - Suggest architectural improvements
 
+### Release labels and the PR template
+
+Every PR needs exactly one `semver:uai-app:<patch|minor|major|none>` label and a
+filled-in description (Summary, Release note, Testing). CI bumps the version for
+you; you never edit `version.json` or the manifests by hand. `none` is for
+changes that ship nothing (docs, CI, scripts). See [docs/RELEASE.md](docs/RELEASE.md).
+
 ## Contributor License Agreement
 
 Before your first contribution can be merged, you need to accept the

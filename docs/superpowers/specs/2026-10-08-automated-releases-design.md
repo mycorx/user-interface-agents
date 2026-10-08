@@ -48,9 +48,11 @@ The only file edited to change a version. Adding a component is adding a key.
   "uai-app": {
     "tag": "uai-app-{version}",
     "label": "uai-app",
-    "synced": ["crates/uia-app/tauri.conf.json",
-               "crates/uia-app/Cargo.toml",
-               "Cargo.lock"],
+    "synced": [
+      { "kind": "tauri-conf", "path": "crates/uia-app/tauri.conf.json" },
+      { "kind": "cargo-toml", "path": "crates/uia-app/Cargo.toml" },
+      { "kind": "cargo-lock", "path": "Cargo.lock" }
+    ],
     "code_paths": ["crates/**", "src/**", "Cargo.toml", "Cargo.lock",
                    "package.json", "pnpm-lock.yaml", "vite.config.ts",
                    "svelte.config.js"],
@@ -71,21 +73,25 @@ The only file edited to change a version. Adding a component is adding a key.
 ### 3. `scripts/release/` — one tested script, used everywhere
 
 Python, no third-party deps, fixture tests in the style of
-`scripts/tests/release-version/`. Subcommands:
+`scripts/tests/gen-notice/`. Invoked as `python3 scripts/release <command>`.
+Commands: `check-pr`, `bump`, `sync [--check]`, `current`, `tag`, `plan`,
+`notes`.
 
-- `check-labels` — validates a PR's labels against its changed files.
+- `check-pr` — validates a PR's labels, version and description against its
+  changed files.
 - `bump` — computes `next = bump(version.json on the base branch, label)` and
   writes it to `version.json`, then runs `sync`. Idempotent. Also the command
   a human runs locally.
 - `sync` / `sync --check` — writes (or verifies) `version.json`'s versions in
   each component's `synced` files: `tauri.conf.json`, `[package] version`, the
   `uia-app` entry of `Cargo.lock`.
-- `tag-for <component>` — the tag name `version.json` implies.
+- `current` — the version `version.json` holds.
+- `tag <component>` — the tag name `version.json` implies.
 - `plan <component>` — the release plan (§6).
 
 The PR check, the bump bot, the tagger and the release workflow all call this
-script, so they cannot disagree. It supersedes `check-release-version.sh`
-(kept as a thin wrapper until `RELEASE.md` is updated).
+script, so they cannot disagree. It replaces the removed
+`check-release-version.sh`.
 
 ### 4. PR workflows
 
@@ -94,8 +100,12 @@ unlabeled`). If the PR carries a valid label and `version.json` is not at the
 expected value, the bot commits the correction to the PR branch (`bump`). The
 bot's commit retriggers CI, so the checks re-run on the final head. Relabelling
 re-computes. Fork PRs cannot receive a bot push; for them the check fails with
-the exact fix command (`./scripts/release bump`) for the author or a
+the exact fix command (`python3 scripts/release bump`) for the author or a
 maintainer to run.
+
+Both `release-bump` and `release-check` read the PR from
+`--event "$GITHUB_EVENT_PATH"`, and read the registry from the base checkout
+(never the PR's), so a PR cannot edit its own rules.
 
 **`release-check`** — required status, every PR. Triggers on the same events
 as `release-bump` plus `edited`, so fixing the description re-runs it. Fails
@@ -192,6 +202,11 @@ do not trigger other workflows, which is intended.
 Input: `component` (default `uai-app`) and `dry_run` (default false) — neither
 is a version.
 
+The `plan` job's first step fails unless `github.ref == refs/heads/main`. A
+`verify-target` job then runs `sync --check --expect-version` at the target SHA,
+so the tagged commit's manifests are proven to match the tag before anything is
+built.
+
 `plan` job (`scripts/release plan`):
 1. **Baseline** = the latest *published* (non-draft, non-prerelease) release of
    the component, found by tag prefix.
@@ -221,8 +236,9 @@ draft. New:
 - `tests` — the full `ci.yaml` suite at the target tag. `ci.yaml` gains a
   `workflow_call` trigger with a `ref` input and checks that ref out (a
   dispatch run's own SHA is `main`'s head, not the tag).
-- `smoke-windows` / `smoke-linux` — on a clean runner, install the built
-  `.msi` / `.deb` and check it. The app has no CLI and, on Windows, is built
+- `smoke-windows` / `smoke-linux` — on a clean runner, install the build job's
+  uploaded artifact (`.msi` / `.deb`) and check it. The Linux job runs in a bare
+  `ubuntu:24.04` container. The app has no CLI and, on Windows, is built
   with `windows_subsystem = "windows"` (no console output), so the assertions
   use installer metadata and exit codes, not stdout:
   1. install silently (`msiexec /i /qn` / `dpkg -i`) and require success;
@@ -256,7 +272,7 @@ The old tag-push trigger is removed.
 |---|---|
 | PR with no / two semver labels | `release-check` red; cannot merge. |
 | Code change labelled `none` | Same. |
-| `version.json` stale because `main` moved | `release-check` red; the bot re-bumps on the next push to the PR (or the author runs `./scripts/release bump`). |
+| `version.json` stale because `main` moved | `release-check` red; the bot re-bumps on the next push to the PR (or the author runs `python3 scripts/release bump`). |
 | Two PRs bumped the same version | Second one conflicts on `version.json` when updated from `main`; resolution is `git merge main`, take `main`'s file, rerun `bump`. |
 | `release` with no newer tags | Fails: "nothing to release". |
 | Build, tests or smoke fail | Draft stays unpublished. Re-run `release`; it re-derives the same target and reuses the draft. |

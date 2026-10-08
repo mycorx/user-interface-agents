@@ -1,8 +1,10 @@
-# Cutting a release
+# Releasing
 
-The `release` workflow builds the installers. It does not publish them — it
-leaves a **draft** GitHub Release for a human to review and publish, because a
-tag is easy to push by accident and a published release is not easy to retract.
+Releases are automated from PR labels. Contributors only label PRs; CI bumps the
+version, tags every merge, and a maintainer promotes the newest tag with one
+manual workflow run. The `release` workflow publishes the GitHub Release itself,
+but only after the full test suite and an install-and-launch smoke test of both
+installers pass.
 
 ## What gets built
 
@@ -61,46 +63,97 @@ Arch, openSUSE) now have no Linux artifact at all. Bring the AppImage back —
 with the bundler tools mirrored or pinned — when one of them is a real
 audience.
 
-## Cutting one
+## How a change becomes a release
 
-1. Bump the version in **both** manifests. They must agree:
-   - `crates/uia-app/tauri.conf.json` → `version`
-   - `crates/uia-app/Cargo.toml` → `[package] version`
-2. Commit the bump through a PR, as usual.
-3. Tag the merge commit on `main` and push the tag:
+1. **Label the PR.** Exactly one `semver:uai-app:<bump>` label, where `<bump>` is
+   `patch`, `minor`, `major`, or `none`.
+   - Any change under the app's code paths (`crates/`, `src/`, `Cargo.*`,
+     `package.json`, `pnpm-lock.yaml`, the Vite and Svelte configs) needs a real
+     bump, not `none`.
+   - Docs, `.github/`, and `scripts/` changes ship nothing: use `none`.
+2. **Fill in the PR template.** `Summary`, `Release note` (one user-facing
+   sentence; `N/A` only for `none`) and `Testing`. The Release note is what ends
+   up in the published release notes.
+3. **CI bumps the version.** The `release-bump` bot commits the new
+   `version.json` and manifests to your branch. `release-check` (a required
+   status) fails until they match. If another PR merged first, the version is
+   stale: the bot re-bumps on your next push or relabel. On a merge conflict in
+   `version.json`, merge `main`, take `main`'s file, and run the bump again.
+4. **Merging tags it.** The `tag` workflow tags the merge commit
+   `uai-app-X.Y.Z` when the version is new. `none` PRs make no tag.
+5. **Promote when you want to ship.** Actions → **release** → Run workflow. There
+   is no version to enter: it finds the latest published release, takes the
+   newest tag after it, and ships that. Tags in between are skipped, but their
+   PRs are in the release notes. It builds, runs the full CI suite at that
+   commit, smoke-tests both installers on clean machines, then publishes.
 
-   ```bash
-   git tag 0.2.0
-   git push origin 0.2.0
-   ```
+`version.json` is the only file anyone edits to change a version; `tauri.conf.json`,
+`Cargo.toml` and `Cargo.lock` are generated from it by `scripts/release`.
 
-4. Watch the run. The `version-gate` job checks the tag against both manifests
-   before either build starts, so a mistyped tag fails in seconds rather than
-   after a Windows build.
-5. Review the draft release, write the notes, publish.
-
-Tags are clean semver — `MAJOR.MINOR.PATCH`, optionally with a prerelease
-suffix (`0.2.0-rc.1`) — with **no `v` prefix**. The tag is exactly what both
-manifests say, so there is no prefix to add or strip anywhere.
-
-A `v`-prefixed tag is rejected, and rejected *loudly*: the workflow triggers on
-`v[0-9]*` as well, purely so that `v0.2.0` fails the gate with a message
-telling you to use `0.2.0`. A tag filter that simply misses would produce no
-run, no error and no release — silence being much worse than a red X.
-
-To check a version bump before tagging anything:
+Fork PRs cannot receive the bot's commit. For those, release-check prints the
+fix and a maintainer pushes it:
 
 ```bash
-./scripts/check-release-version.sh 0.2.0
+python3 scripts/release bump --root . --base-root <checkout of main> \
+  --label semver:uai-app:patch --changed-files <file listing the PR's paths>
 ```
+
+Tags are `uai-app-MAJOR.MINOR.PATCH`. A future component gets its own prefix
+(`uai-mobile-1.2.3`); a *suffix* such as `1.2.3-uai-app` would be a semver
+prerelease and is not used.
+
+Renovate: only a **major** cargo/npm update cuts a version (`patch`); minor and
+patch updates, pins, digests, GitHub Actions and lockfile maintenance are `none`
+and ride along with the next release.
 
 ## Dry runs
 
-Run the workflow manually (**Actions → release → Run workflow**) to build every
-platform without touching a release. The installers land as Actions artifacts
-(`uia-linux`, `uia-windows`, and `uia-macos` once that job is enabled),
-which is how you get a build to a tester without
-committing to a version number.
+Run **release** with `dry_run` ticked. It plans, builds, tests and smoke-tests the
+same target, uploads the installers as Actions artifacts (`uia-linux`,
+`uia-windows`), and creates no release. Use it to hand a tester a build and to
+rehearse a release.
+
+## First-time setup (one admin, once)
+
+1. **GitHub App.** Create an org-owned App with *Contents: read & write* and
+   *Pull requests: read*, install it on this repository, and store its id and a
+   generated private key as repository secrets `RELEASE_APP_ID` and
+   `RELEASE_APP_PRIVATE_KEY`. It is needed because pushes made with
+   `GITHUB_TOKEN` do not trigger workflows, so a bump commit would never get its
+   required checks.
+2. **Labels.** Create `semver:uai-app:patch|minor|major|none`.
+   If the repository has tag rulesets (Settings → Rules), allow the Actions bot to create `uai-app-*` tags.
+3. **Retag the first release.** The `tag` workflow refuses to run for a component
+   with no `uai-app-*` tags (it would stamp the current `main` as the version in
+   `version.json`). Create `uai-app-0.1.1` on the commit of the published 0.1.1
+   release and move the release to it:
+
+   ```bash
+   sha="$(git rev-list -n 1 0.1.1)"
+   gh api repos/{owner}/{repo}/git/refs -f ref=refs/tags/uai-app-0.1.1 -f sha="$sha"
+   gh release edit 0.1.1 --tag uai-app-0.1.1 --title "uai-app 0.1.1"   # --tag renames the release's tag and keeps its assets
+   git push origin :refs/tags/0.1.1 :refs/tags/0.1.0
+   ```
+4. **Branch protection on `main`:** require the `release-check` status, require
+   branches to be up to date, require review. Do this *after* the first merge
+   that contains these workflows, or nothing can merge.
+5. **Renovate** (`.github/renovate.json5`) must already carry the `semver:uai-app:*`
+   labels and `gitIgnoredAuthors` (this repo's config does). Delete the old
+   `semver:patch`, `semver:none` and `semver:major` labels so open Renovate PRs
+   pick up the new ones.
+
+Recommended hardening:
+
+- **Protect the release machinery.** Add a CODEOWNERS entry or a ruleset
+  requiring review for changes to `.github/workflows/` and `scripts/release/`,
+  so a PR cannot weaken `release-check`.
+- **Keep the App minimal.** The release GitHub App must not be on any ruleset or
+  branch-protection bypass list, and needs only *Contents: write* and
+  *Pull requests: read*.
+- **Pin the Linux smoke image.** Before the first run, replace the
+  `@@UBUNTU_IMAGE@@` placeholder in the `release` workflow's Linux smoke job
+  (`.github/workflows/release.yaml`) with `ubuntu:24.04@sha256:<digest>`. Get the
+  digest with `docker buildx imagetools inspect ubuntu:24.04`.
 
 ## Installers are unsigned
 
