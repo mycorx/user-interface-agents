@@ -405,8 +405,19 @@ pub fn mcp_targets(
                         server.name
                     );
                 }
-                let values =
-                    crate::mcp_registry::local_config_values(server, &parsed.user_config, secrets);
+                let values = match crate::mcp_registry::local_config_values(
+                    server,
+                    &parsed.user_config,
+                    secrets,
+                ) {
+                    Ok(v) => v,
+                    Err(e) => {
+                        let why = format!("its settings could not be read: {e}");
+                        eprintln!("mcp: local server {:?} skipped, {why}", server.name);
+                        skipped.push((server.name.clone(), why));
+                        continue;
+                    }
+                };
                 let launch = match uia_mcp::bundle::apply_user_config(
                     launch,
                     &parsed.user_config,
@@ -1155,6 +1166,19 @@ mod tests {
         };
         assert_eq!(name, "mymy");
         assert!(why.contains(other), "{why}");
+    }
+
+    #[test]
+    fn an_unreadable_keyring_skips_the_server_naming_the_keyring_not_the_setting() {
+        let (reg, dir) = user_config_fixture("unreadable");
+        let plan = mcp_targets(&reg, &dir, None, &crate::secrets::UnreadableSecretStore);
+        std::fs::remove_dir_all(&dir).ok();
+        assert!(plan.targets.is_empty());
+        let [(name, why)] = plan.skipped.as_slice() else {
+            panic!("expected one skipped server, got {:?}", plan.skipped);
+        };
+        assert_eq!(name, "mymy");
+        assert!(why.contains("keyring") && why.contains("locked"), "{why}");
     }
 
     #[test]
