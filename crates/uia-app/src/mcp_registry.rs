@@ -336,19 +336,23 @@ fn read_fields(local_servers_dir: &Path, name: &str) -> Result<Fields, String> {
 }
 
 /// What `apply_user_config` will be given: plain values from the registry
-/// entry, sensitive ones from the keyring. A keyring that cannot answer reads
-/// as "unset", which `apply_user_config` then reports for a required field.
+/// entry, sensitive ones from the keyring. A keyring that cannot answer is an
+/// error, not "unset": reporting it as unset would tell the user to re-enter a
+/// secret that is saved.
 pub fn local_config_values(
     entry: &LocalServerEntry,
     fields: &Fields,
     secrets: &dyn SecretStore,
-) -> BTreeMap<String, String> {
+) -> Result<BTreeMap<String, String>, String> {
     let mut out = BTreeMap::new();
     for (key, field) in fields {
         let stored = if field.sensitive {
-            mcp_config_account(&entry.name, key)
-                .ok()
-                .and_then(|a| secrets.get(&a))
+            match mcp_config_account(&entry.name, key) {
+                Ok(a) => secrets
+                    .try_get(&a)
+                    .map_err(|e| format!("the keyring could not be read for {key}: {e}"))?,
+                Err(_) => None,
+            }
         } else {
             entry.user_config.get(key).cloned()
         };
@@ -356,7 +360,7 @@ pub fn local_config_values(
             out.insert(key.clone(), v);
         }
     }
-    out
+    Ok(out)
 }
 
 /// The MCPB path variables for this machine, for `expand_path_vars`.
@@ -397,7 +401,7 @@ pub fn describe_local_config(
         .find(|s| s.name == name)
         .ok_or_else(|| format!("no local server named {name:?} is installed"))?;
     let fields = read_fields(local_servers_dir, name)?;
-    let values = local_config_values(entry, &fields, secrets);
+    let values = local_config_values(entry, &fields, secrets)?;
     let vars = mcp_path_vars();
     Ok(fields
         .into_iter()
@@ -476,7 +480,7 @@ pub fn save_local_config(
     }
 
     // What the settings would be after this save, to enforce `required`.
-    let mut after = local_config_values(entry, &fields, secrets);
+    let mut after = local_config_values(entry, &fields, secrets)?;
     for (key, change) in &changes {
         match change.as_deref().filter(|v| !v.is_empty()) {
             Some(v) => {
@@ -502,7 +506,10 @@ pub fn save_local_config(
             continue;
         }
         let account = mcp_config_account(name, key).map_err(|e| e.to_string())?;
-        snapshot.push((account.clone(), secrets.get(&account)));
+        let prior = secrets
+            .try_get(&account)
+            .map_err(|e| format!("the keyring could not be read for {key}: {e}"))?;
+        snapshot.push((account.clone(), prior));
         keyring_ops.push((account, change.clone().filter(|v| !v.is_empty())));
     }
 
@@ -513,7 +520,9 @@ pub fn save_local_config(
                 Some(v) => secrets.set(account, v),
                 // Absent is already the desired state; deleting an absent
                 // entry is an error on the real keyring.
-                None if secrets.get(account).is_some() => secrets.delete(account),
+                // Unreadable: try the delete anyway rather than leave a
+                // half-written value behind.
+                None if !matches!(secrets.try_get(account), Ok(None)) => secrets.delete(account),
                 None => Ok(()),
             };
             if let Err(e) = restored {
@@ -2792,7 +2801,7 @@ mod config_tests {
         let fields = uia_mcp::bundle::parse_manifest(MANIFEST)
             .unwrap()
             .user_config;
-        let v = local_config_values(&reg.local_servers[0], &fields, &secrets);
+        let v = local_config_values(&reg.local_servers[0], &fields, &secrets).unwrap();
         assert_eq!(v.get("token").map(String::as_str), Some("t"));
         assert_eq!(v.get("toasts").map(String::as_str), Some("false"));
         std::fs::remove_dir_all(&fx.dir).ok();
@@ -2864,6 +2873,32 @@ mod config_tests {
             changes(&[("token", None)]),
         )
         .ok();
+        std::fs::remove_dir_all(&fx.dir).ok();
+    }
+
+    #[test]
+    fn an_unreadable_keyring_is_reported_not_shown_as_unset() {
+        let fx = fixture("unreadable");
+        let store = crate::secrets::UnreadableSecretStore;
+        let err =
+            describe_local_config(&load(&fx.registry), &fx.servers, &store, "mymy").unwrap_err();
+        assert!(err.contains("keyring") && err.contains("locked"), "{err}");
+        assert!(!err.contains("required"), "{err}");
+
+        let before = std::fs::read_to_string(&fx.registry).unwrap();
+        let err = save_local_config(
+            &fx.registry,
+            &fx.servers,
+            &store,
+            "mymy",
+            changes(&[("toasts", Some("true"))]),
+        )
+        .unwrap_err();
+        assert!(
+            err.contains("keyring") && !err.contains("required"),
+            "{err}"
+        );
+        assert_eq!(std::fs::read_to_string(&fx.registry).unwrap(), before);
         std::fs::remove_dir_all(&fx.dir).ok();
     }
 

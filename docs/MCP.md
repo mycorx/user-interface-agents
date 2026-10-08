@@ -111,6 +111,9 @@ Plain values are stored in `uia-mcp.json`; `sensitive` ones only in the OS keyri
 names, never the values, are also noted in `uia-mcp.json`, so removal still finds
 them if the bundle's manifest is already gone). Sensitive values are never
 returned to the UI; Settings only learns whether one is set.
+If the keyring cannot be read (a locked Keychain, no Secret Service), Settings
+shows that error and the server is skipped with it, rather than reporting the
+secret as missing.
 Supported types: `string`, `number`, `boolean`, `directory`, `file`; numbers
 must be finite and within `min`/`max` if declared; a `multiple` field uses its
 first value only. Saving is all-or-nothing — validation and required checks run

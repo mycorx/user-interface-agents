@@ -107,7 +107,14 @@ pub enum SecretStoreError {
 }
 
 pub trait SecretStore: Send + Sync {
+    /// `None` for an absent entry AND for a keystore that cannot answer, which
+    /// is what the API-key fallback chain wants. Anything that must tell the
+    /// two apart uses `try_get`.
     fn get(&self, account: &str) -> Option<String>;
+    /// Like `get`, but a keystore failure is an error, not "absent".
+    fn try_get(&self, account: &str) -> Result<Option<String>, SecretStoreError> {
+        Ok(self.get(account))
+    }
     fn set(&self, account: &str, value: &str) -> Result<(), SecretStoreError>;
     fn delete(&self, account: &str) -> Result<(), SecretStoreError>;
 }
@@ -123,6 +130,16 @@ impl SecretStore for OsKeyring {
         // A broken/unavailable OS keystore must degrade to the fallback
         // chain, not crash the app - so any error here becomes `None`.
         entry.get_password().ok()
+    }
+
+    fn try_get(&self, account: &str) -> Result<Option<String>, SecretStoreError> {
+        let entry = keyring::Entry::new(SERVICE, account)
+            .map_err(|e| SecretStoreError::Backend(e.to_string()))?;
+        match entry.get_password() {
+            Ok(v) => Ok(Some(v)),
+            Err(keyring::Error::NoEntry) => Ok(None),
+            Err(e) => Err(SecretStoreError::Backend(e.to_string())),
+        }
     }
 
     fn set(&self, account: &str, value: &str) -> Result<(), SecretStoreError> {
@@ -186,6 +203,27 @@ impl SecretStore for FakeSecretStore {
             .unwrap_or_else(|e| e.into_inner())
             .remove(account);
         Ok(())
+    }
+}
+
+/// A keystore that is present but cannot be read, like a locked Keychain or an
+/// absent Secret Service. `get` degrades to `None`; `try_get` reports it.
+#[cfg(test)]
+pub struct UnreadableSecretStore;
+
+#[cfg(test)]
+impl SecretStore for UnreadableSecretStore {
+    fn get(&self, _: &str) -> Option<String> {
+        None
+    }
+    fn try_get(&self, _: &str) -> Result<Option<String>, SecretStoreError> {
+        Err(SecretStoreError::Backend("keychain is locked".into()))
+    }
+    fn set(&self, _: &str, _: &str) -> Result<(), SecretStoreError> {
+        Err(SecretStoreError::Backend("keychain is locked".into()))
+    }
+    fn delete(&self, _: &str) -> Result<(), SecretStoreError> {
+        Err(SecretStoreError::Backend("keychain is locked".into()))
     }
 }
 
