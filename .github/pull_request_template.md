@@ -16,3 +16,7 @@ only if the label is semver:uai-app:none. -->
 ## Testing
 
 <!-- How you verified it: automated tests, manual steps, or N/A for docs. -->
+
+## Notes for reviewers (optional)
+
+<!-- Where to start, review order for larger PRs, and what feedback you want. -->
