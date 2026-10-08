@@ -84,8 +84,14 @@ def _pr_inputs(a):
     if a.changed_files:
         files = _lines(a.changed_files)
     elif number is not None:
-        listing = _gh_api(f"repos/{a.repo}/pulls/{number}/files", "--paginate", "--jq", ".[].filename")
-        files = [f for f in listing.split("\n") if f]
+        # A rename out of a code path is a change to that path, so include previous_filename.
+        listing = _gh_api(
+            f"repos/{a.repo}/pulls/{number}/files", "--paginate",
+            "--jq", '.[] | [.filename, (.previous_filename // "")] | @tsv',
+        )
+        files = []
+        for row in listing.split("\n"):
+            files += [p for p in row.split("\t") if p]
     else:
         raise CommandError("give --changed-files, or --event so the files can be fetched")
     return labels, files, author, body

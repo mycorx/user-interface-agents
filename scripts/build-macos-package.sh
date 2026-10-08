@@ -44,7 +44,7 @@ set -euo pipefail
 NODE_VERSION="24.21.0"                       # CI uses Node 24
 NODE_SHA256_ARM64="bed7eea5325e1108f32ce5228ddd6a5f0f08a499ee42aa7442aea583702f6057"
 NODE_SHA256_X64="1462cb3b3046b815cf8ea436d3da450ec1a9f11dac7e5a46b0ada5305d7e8097"
-PYTHON_VERSION="3.14"                        # gen-notice and scripts/release need tomllib (3.11+)
+PYTHON_VERSION="3.14"                        # gen-notice needs tomllib (3.11+); scripts/release is 3.9 + stdlib only
 RUST_CHANNEL="stable"                        # CI uses dtolnay/rust-toolchain@stable
 # pnpm is not pinned here: Corepack reads `packageManager` from package.json.
 # ------------------------------------------------------------------------------

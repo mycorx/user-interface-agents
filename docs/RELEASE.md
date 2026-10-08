@@ -108,7 +108,10 @@ and ride along with the next release.
 
 ## Dry runs
 
-Run **release** with `dry_run` ticked. It plans, builds, tests and smoke-tests the
+Run **release** with `dry_run` ticked. A dry run needs an *unreleased* tag (one
+newer than the latest published release; with nothing to promote, `plan` fails)
+and must be dispatched **from `main`** (the workflow refuses any other branch).
+It plans, builds, tests and smoke-tests the
 same target, uploads the installers as Actions artifacts (`uia-linux`,
 `uia-windows`), and creates no release. Use it to hand a tester a build and to
 rehearse a release.
@@ -120,7 +123,11 @@ rehearse a release.
    generated private key as repository secrets `RELEASE_APP_ID` and
    `RELEASE_APP_PRIVATE_KEY`. It is needed because pushes made with
    `GITHUB_TOKEN` do not trigger workflows, so a bump commit would never get its
-   required checks.
+   required checks. The commit email `uia-release-bot@users.noreply.github.com`
+   (in `release-bump.yaml` and renovate's `gitIgnoredAuthors`) is a placeholder
+   identity that GitHub resolves to whoever registers that login. Once the App
+   exists, switch both to its real bot noreply address,
+   `<bot-user-id>+<app-slug>[bot]@users.noreply.github.com`.
 2. **Labels.** Create `semver:uai-app:patch|minor|major|none`.
    If the repository has tag rulesets (Settings → Rules), allow the Actions bot to create `uai-app-*` tags.
 3. **Retag the first release.** The `tag` workflow refuses to run for a component
@@ -142,18 +149,27 @@ rehearse a release.
    `semver:patch`, `semver:none` and `semver:major` labels so open Renovate PRs
    pick up the new ones.
 
+6. **Pin the Linux smoke image (required before the first real or dry run).**
+   Replace the `@@UBUNTU_IMAGE@@` placeholder in the Linux smoke job of
+   `.github/workflows/release.yaml` with `ubuntu:24.04@sha256:<digest>`. Until
+   you do, `smoke-linux` fails. Get the digest with:
+
+   ```bash
+   docker buildx imagetools inspect ubuntu:24.04
+   ```
+
 Recommended hardening:
 
-- **Protect the release machinery.** Add a CODEOWNERS entry or a ruleset
-  requiring review for changes to `.github/workflows/` and `scripts/release/`,
-  so a PR cannot weaken `release-check`.
+- **Protect the release machinery.** CODEOWNERS or a ruleset requiring review
+  does **not** stop a PR from editing its own workflow file: a `pull_request`
+  run uses the PR's workflow YAML *before* anyone reviews it, so a PR can
+  weaken `release-check` for itself. The real controls are: a `release` GitHub
+  environment restricted to the `main` branch, with required reviewers, on the
+  `create-release` and `publish` jobs; the release App not on any bypass list;
+  and write access given only to trusted people.
 - **Keep the App minimal.** The release GitHub App must not be on any ruleset or
   branch-protection bypass list, and needs only *Contents: write* and
   *Pull requests: read*.
-- **Pin the Linux smoke image.** Before the first run, replace the
-  `@@UBUNTU_IMAGE@@` placeholder in the `release` workflow's Linux smoke job
-  (`.github/workflows/release.yaml`) with `ubuntu:24.04@sha256:<digest>`. Get the
-  digest with `docker buildx imagetools inspect ubuntu:24.04`.
 
 ## Installers are unsigned
 

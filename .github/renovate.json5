@@ -72,34 +72,48 @@
       "platformAutomerge": false, // false to let renovate bot merge the PR instead of the GitHub UI automerge
       "automergeStrategy": "squash",
     },
-    // Release labels (docs/RELEASE.md). The rules below must stay DISJOINT:
-    // `addLabels` accumulates across every matching rule, and a PR with two
-    // semver labels fails release-check.
+    // Release labels (docs/RELEASE.md). The label rules below must stay
+    // DISJOINT: `addLabels` accumulates across every matching rule, and a PR
+    // with two semver labels (or none) fails release-check.
     //
-    // Policy: only a MAJOR dependency update cuts an app version, and only a
+    // Policy: only a MAJOR cargo/npm update cuts an app version, and only a
     // patch. Everything else ships with the next release without cutting one.
+    //
+    // Coverage, update type x manager (cargo/npm = "deps", others = "other"):
+    //   deps  + major                                   -> rule 1 (patch)
+    //   deps  + minor/patch/pin/digest/pinDigest/
+    //           lockFileMaintenance/rollback/
+    //           replacement/bump                        -> rule 2 (none)
+    //   other + any update type (incl. major)           -> rule 3 (none)
     {
       "description": "Major cargo/npm updates cut a patch version of the app",
       "matchManagers": ["cargo", "npm"],
       "matchUpdateTypes": ["major"],
       "addLabels": ["semver:uai-app:patch"],
-      "automerge": false,
-      "schedule": ["before 8am on monday"],
     },
     {
-      // Workflow pins live under .github/**, which ships nothing. Their major
-      // bumps are not automerged, as before.
-      "description": "Major github-actions updates ship nothing",
-      "matchManagers": ["github-actions"],
+      "description": "Every other cargo/npm update type cuts no version",
+      "matchManagers": ["cargo", "npm"],
+      "matchUpdateTypes": [
+        "minor", "patch", "pin", "digest", "pinDigest", "lockFileMaintenance",
+        "rollback", "replacement", "bump",
+      ],
+      "addLabels": ["semver:uai-app:none"],
+    },
+    {
+      // Catch-all for every other manager (github-actions, docker, ...) and
+      // every update type, majors included. Workflow pins live under
+      // .github/**, which ships nothing.
+      "description": "Updates from any other manager cut no version",
+      "matchManagers": ["!cargo", "!npm"],
+      "addLabels": ["semver:uai-app:none"],
+    },
+    {
+      // No label here: this only changes how majors are handled.
+      "description": "Major updates are never automerged and wait for Monday",
       "matchUpdateTypes": ["major"],
-      "addLabels": ["semver:uai-app:none"],
       "automerge": false,
       "schedule": ["before 8am on monday"],
-    },
-    {
-      "description": "Everything that is not a major update cuts no version",
-      "matchUpdateTypes": ["minor", "patch", "pin", "digest", "pinDigest", "lockFileMaintenance"],
-      "addLabels": ["semver:uai-app:none"],
     },
   ],
 }

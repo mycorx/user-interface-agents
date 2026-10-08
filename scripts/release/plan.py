@@ -64,8 +64,9 @@ def tags_to_create(registry, versions: dict, existing: set) -> list:
         if not known:
             raise TagError(
                 f"{comp.name} has no tags at all, so {tag} would land on this commit by "
-                f"accident. Create the first tag by hand on the commit that really is "
-                f"{version} (docs/RELEASE.md, 'First-time setup'), then re-run."
+                f"accident. Create the prefixed tag for the LAST PUBLISHED release by hand "
+                f"(e.g. {comp.tag_for('0.1.1')} on the commit that release was built from), as in "
+                f"docs/RELEASE.md 'First-time setup', then re-run."
             )
         newest = max(known, key=semver.parse)
         if semver.parse(version) < semver.parse(newest):

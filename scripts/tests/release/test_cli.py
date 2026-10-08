@@ -279,5 +279,26 @@ class GitCommandTests(unittest.TestCase):
         self.assertIn("already has a tag", out)
 
 
+class RenameTests(unittest.TestCase):
+    def test_rename_out_of_a_code_path_counts_as_a_code_change(self):
+        from unittest import mock
+        base, head = make_repo("0.1.1"), make_repo("0.1.1")
+        tmp = Path(tempfile.mkdtemp())
+        event = write(tmp / "event.json", json.dumps({"pull_request": {
+            "number": 7, "user": {"login": "alice"}, "body": GOOD_BODY,
+            "labels": [{"name": "semver:uai-app:none"}]}}))
+        argv = ["check-pr", "--root", str(head), "--base-root", str(base),
+                "--event", event, "--repo", "o/r"]
+        # crates/... renamed into docs/...: the gh listing carries both paths.
+        with mock.patch.object(cli, "_gh_api", return_value="docs/moved.md\tcrates/uia-app/src/lib.rs\n"):
+            code, out, _ = run(*argv)
+        self.assertEqual(code, 1)
+        self.assertIn("uai-app", out)
+        # The same PR without the rename is docs-only, so `none` passes.
+        with mock.patch.object(cli, "_gh_api", return_value="docs/moved.md\t\n"):
+            code, out, _ = run(*argv)
+        self.assertEqual((code, out.strip()), (0, "release-check passed"))
+
+
 if __name__ == "__main__":
     unittest.main()

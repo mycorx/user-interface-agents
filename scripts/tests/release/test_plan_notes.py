@@ -64,6 +64,8 @@ class TagTests(unittest.TestCase):
     def test_a_component_with_no_tags_at_all_refuses_to_guess(self):
         with self.assertRaisesRegex(plan.TagError, "no tags at all"):
             plan.tags_to_create(self.registry, {"uai-app": "0.1.1"}, {"0.1.1", "0.1.0"})
+        with self.assertRaisesRegex(plan.TagError, "LAST PUBLISHED release"):
+            plan.tags_to_create(self.registry, {"uai-app": "0.1.2"}, {"0.1.1"})
 
     def test_versions_must_not_go_backwards(self):
         with self.assertRaisesRegex(plan.TagError, "only go up"):

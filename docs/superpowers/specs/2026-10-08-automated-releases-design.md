@@ -118,7 +118,7 @@ unless:
 3. `version.json` equals `bump(version.json on base, label)` (always the base's
    current version, so a stale PR is red until re-bumped);
 4. `sync --check` passes (no drift between `version.json` and the manifests);
-5. the PR description passes `check-pr-body` (see "PR template" below).
+5. the PR description passes the PR-body check (part of `check-pr`; see "PR template" below).
 
 `none` PRs: version unchanged, check 3 requires exactly that.
 
@@ -131,7 +131,7 @@ unless:
 - **Testing** — how it was verified.
 
 GitHub only pre-fills a template, so the requirement is enforced by
-`scripts/release check-pr-body` (inside `release-check`). After stripping HTML
+the PR-body check (folded into `scripts/release check-pr`, inside `release-check`). After stripping HTML
 comments (so untouched placeholders count as empty), it fails when a heading
 is missing, a section is empty or still the placeholder, or **Release note** is
 `N/A` on a PR whose label is not `none`. The Release note sections are also
@@ -144,7 +144,7 @@ The repo uses Renovate with automerge (`.github/renovate.json5`: squash,
 crates and GitHub Actions, daily `lockFileMaintenance`). Its PRs hit the same
 rules as any PR.
 
-**Policy: only a *major* dependency update cuts a version, and only a `patch`.
+**Policy: only a *major* cargo/npm dependency update cuts a version, and only a `patch`.
 Everything else Renovate does is `none`.** Minor and patch updates, pins,
 digests, GitHub Actions and lockfile maintenance never create a version or a
 tag; they ride along in the next release, because a release builds the
@@ -158,9 +158,13 @@ Changes in `renovate.json5`:
 - **One label per PR.** `addLabels` accumulates across every matching rule, so
   the rules must not overlap. Today the minor/patch rule also matches the
   `github-actions` manager. Make them disjoint:
-  - major updates (any manager) → `semver:uai-app:patch` (not automerged, as
+  - major **cargo/npm** updates → `semver:uai-app:patch` (not automerged, as
     today);
-  - every other update type, including `github-actions` → `semver:uai-app:none`.
+  - every other cargo/npm update type (minor, patch, pin, digest, lockfile
+    maintenance, rollback, replacement, bump) → `semver:uai-app:none`;
+  - every update from any other manager, majors included (e.g.
+    `github-actions`) → `semver:uai-app:none`. Majors of any manager are still
+    not automerged.
 - **`gitIgnoredAuthors`** lists the release App's commit author. Renovate
   treats a branch with foreign commits as externally modified and stops
   rebasing it; this stops the bump commit counting. It only matters for major
@@ -183,7 +187,7 @@ In `release-check`:
   rule 3 (version math) and `sync --check` still apply. This is what lets
   `lockFileMaintenance` and minor/patch updates (which rewrite `Cargo.lock` /
   `pnpm-lock.yaml`, both in `code_paths`) stay `none`, per the policy above.
-- **Renovate PRs are exempt from `check-pr-body`;** their title stands in for
+- **Renovate PRs are exempt from the PR-body check;** their title stands in for
   the Release note, listed under "Dependencies".
 
 **Setup order:** change `renovate.json5` **before** `release-check` becomes a
@@ -281,7 +285,7 @@ The old tag-push trigger is removed.
 ## Setup this needs (admin)
 
 1. **GitHub App** for `release-bump` (org-owned, `contents:write` +
-   `pull-requests:write`, installed on this repo), with its id and private key
+   `pull-requests:read`, installed on this repo), with its id and private key
    as repo secrets. The default `GITHUB_TOKEN` cannot be used: its pushes do
    not retrigger workflows, so the bump commit would never get its required
    checks.
@@ -294,8 +298,10 @@ The old tag-push trigger is removed.
 
 - **One-time, manual, before the workflows are enabled** (nobody uses the app
   yet, so rewriting the first release is acceptable):
-  1. delete the published release and tag `0.1.1` (and the `0.1.0` tag);
-  2. create tag `uai-app-0.1.1` on `fe3ef77` and publish a release for it.
+  1. create tag `uai-app-0.1.1` on `fe3ef77`;
+  2. move the published release onto it with
+     `gh release edit 0.1.1 --tag uai-app-0.1.1` (keeps its assets), then
+     delete the old `0.1.1` and `0.1.0` tags.
   Order matters: the `tag` workflow tags any `version.json` version that has no
   tag, so if `version.json` says `0.1.1` while `uai-app-0.1.1` does not exist,
   it would tag the current `main` HEAD as `0.1.1`.

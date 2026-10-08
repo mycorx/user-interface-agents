@@ -146,6 +146,12 @@ class CheckPrTests(unittest.TestCase):
         self.assertEqual(len(errors), 1)
         self.assertIn("expected 0.1.2", errors[0])
 
+    def test_bump_hint_is_a_command_that_works_as_printed(self):
+        errors = self.run_check(head_versions={"uai-app": "0.1.1"})
+        for flag in ("--root", "--base-root", "--label", "--changed-files"):
+            self.assertIn(flag, errors[0])
+        self.assertNotIn("bot", errors[0])
+
     def test_a_stale_bump_is_caught_when_base_moved(self):
         errors = self.run_check(base_versions={"uai-app": "0.1.2"})
         self.assertIn("expected 0.1.3", errors[0])

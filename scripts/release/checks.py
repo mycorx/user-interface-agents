@@ -5,7 +5,11 @@ from . import labels as labels_mod
 from . import prbody
 from .labels import RENOVATE_LOGINS
 
-BUMP_HINT = "run `python3 scripts/release bump` (see docs/RELEASE.md), or let the release-bump bot do it"
+BUMP_HINT = (
+    "run `python3 scripts/release bump --root . --base-root <checkout of the base branch> "
+    "--label <the PR's semver:... label> --changed-files <file listing the PR's paths>` "
+    "and commit the result (see docs/RELEASE.md)"
+)
 
 
 def check_pr(*, registry, labels, changed_files, author, body, base_versions, head_versions, sync_errors):
