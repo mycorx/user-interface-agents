@@ -17,7 +17,7 @@ fail() { echo "SMOKE FAIL: $*" >&2; exit 1; }
 
 export DEBIAN_FRONTEND=noninteractive
 apt-get update -qq
-apt-get install -y -qq ./"$deb" xvfb >/dev/null
+apt-get install -y -qq ./"$deb" >/dev/null
 
 pkg="$(dpkg-deb -f "$deb" Package)"
 have="$(dpkg-query -W -f='${Version}' "$pkg")"
@@ -33,6 +33,10 @@ if missing="$(ldd "$bin" | grep 'not found')"; then
   fail "the binary has unresolved libraries:
 $missing"
 fi
+
+# Installed only now, after the ldd check, so xvfb's own X/GL libraries cannot
+# mask a Depends the .deb forgot to declare.
+apt-get install -y -qq xvfb xauth >/dev/null
 
 # No display exists on the runner; xvfb gives GTK one. --smoke exits before
 # any window is made, so this only proves the process starts and links.
