@@ -325,9 +325,10 @@ mod tests {
     fn a_secret_straddling_the_line_cut_leaves_no_prefix_behind() {
         let secret = "supersecret-value-123";
         let t = StderrTail::new(vec![secret.into()]);
-        t.push_line(&format!("{}{secret} and more text", "x".repeat(295)));
+        t.push_line(&format!("{}{secret} and more text", "x".repeat(290)));
         let r = t.render();
-        assert!(!r.contains("supersec"), "{r}");
+        assert!(!r.contains("supers"), "{r}");
+        assert!(!r.contains(secret), "{r}");
         assert!(r.chars().count() <= 300);
     }
 }
