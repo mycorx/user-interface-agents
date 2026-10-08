@@ -24,7 +24,8 @@ heavily restricts it, so a `.mcpb` local server is unavailable on mobile builds.
 
 ### Manifest fields UIA acts on
 
-`user_config`, `server`, and `name`/`version` are acted on. Everything else
+`user_config`, `server`, `compatibility.platforms` and `name`/`version` are
+acted on. Everything else
 in the MCPB schema (`description`, `author`, `tools`, `dxt_version`, ...) is
 parsed but ignored — an unknown key must never make an otherwise-valid bundle
 uninstallable, and none of those fields affect what gets executed.
@@ -44,7 +45,8 @@ uninstallable, and none of those fields affect what gets executed.
         "win32": { "command": "${__dirname}/bin/my-tool.exe" }
       }
     }
-  }
+  },
+  "compatibility": { "platforms": ["darwin", "win32"] }
 }
 ```
 
@@ -58,6 +60,20 @@ uninstallable, and none of those fields affect what gets executed.
   `darwin`, `linux`), not Rust's, and merges field-by-field over the base
   config — an override naming only a Windows `.exe` still keeps the base
   `args`.
+
+- `compatibility.platforms` lists the operating systems the bundle was built
+  for, by Node's names (`win32`, `darwin`, `linux`), compared
+  case-insensitively. `validate_bundle` enforces it at install and again at
+  every launch: a bundle built for another system is refused at install
+  (nothing is left in the install directory), and an installed one that no
+  longer matches is skipped at launch and shows as **Failed** in the Status
+  column with the same reason. The reason names both sides, for example "this
+  bundle is built for linux, not for this operating system (darwin); install
+  the build made for darwin". A bundle that omits `compatibility` or
+  `platforms`, or gives an empty or malformed one (`platforms` not an array,
+  `compatibility` not an object), is unrestricted. Non-string entries in the
+  list are ignored, so a mixed list restricts to its string entries. A wrongly
+  typed `compatibility` never makes a manifest unreadable.
 
 ### Validation (`crates/uia-mcp/src/bundle/validate.rs`)
 
@@ -243,6 +259,37 @@ so a panel left open still shows what was true when it last read.
 validation) and a server that reached a connection attempt and was refused.
 Both were enabled by the user and both are silently absent from the session,
 which is the thing the column exists to make visible.
+
+### What a local server printed when it failed to start
+
+UIA pipes a local server's stderr instead of letting it inherit UIA's own
+(`crates/uia-mcp/src/stderr_tail.rs`). When the server process starts but the
+MCP handshake then fails (it exits at once, or prints an error and quits), the
+reason ends with `; the server printed: <tail>`. The tail is:
+
+- the last 12 non-blank lines, each cut to 300 characters, joined with ` | `,
+  and the whole tail cut to 600 characters keeping the end, so the last lines
+  survive;
+- stripped of ANSI escape sequences and control characters (tab is kept);
+- redacted: every launch environment value of 8 or more characters,
+  including keyring-backed `user_config` settings, is replaced by
+  `<redacted>`, both in the stored tail and in the terminal echo below.
+
+The limits:
+
+- Values shorter than 8 characters are not redacted (they would mangle words
+  such as `true`), and neither is a secret the server transforms before
+  printing it (base64-encoded, truncated, split across lines).
+- Only startup failures are annotated: the tail is read after waiting up to
+  500 ms for the stream to end following the failure. A server that dies later
+  adds nothing in Settings.
+- A spawn error (for example permission denied) has no server output, so its
+  message is unchanged.
+
+Every stderr line, at any time, is still echoed to UIA's own stderr as
+`mcp[<name>] <line>` (redacted the same way), so a server that dies after
+startup is visible only in that terminal. The reader keeps draining the pipe
+for the life of the process, so a chatty server cannot block on a full buffer.
 
 ## One namespace
 

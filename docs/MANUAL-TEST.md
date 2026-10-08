@@ -426,6 +426,96 @@ stays on disk, orphaned and unread.
       in the location above, and settings changes persist there.
 - [ ] With `UIA_CONFIG_DIR` set, both of the above defer to it.
 
+## Local `.mcpb` server and its settings
+
+Needs a real build and a `.mcpb` bundle containing a compiled executable.
+Ideally the bundle declares a `user_config` with a sensitive string, a
+`boolean`, and a string setting whose `default` is `true` or `false`, and the
+server reports (or echoes to stderr) the environment or arguments it was
+started with, so you can see what it received. Set `UIA_CONFIG_DIR` to a
+scratch directory (see "Where config and produced files live") so
+`uia-mcp.json` is easy to find and edit. Items marked **macOS/Linux** involve
+the execute bit and do not apply on Windows.
+
+### Install and configure
+
+1. Settings → MCP → **Install…** → **Local**, and pick the `.mcpb` file.
+   - [ ] The server is listed with the **Local** badge, **Enabled** unticked
+         and Status **Off**.
+2. Click **Details**.
+   - [ ] It shows Version and Runs (and Args/Env when declared). If the
+         manifest declares `user_config`, a **Configuration** section follows,
+         with `*` after the title of required settings.
+   - [ ] A `boolean` setting, and a string setting whose declared default is
+         `true` or `false`, show as switches. A string setting with no
+         default, a sensitive one and a `multiple` one are text boxes.
+3. Flip a switch, type a value in a text box, and click **Save settings**.
+   - [ ] "Saved. Restart UIA to apply." appears.
+   - [ ] `uia-mcp.json` holds the changed values, and a switch stores exactly
+         the text `true` or `false`.
+4. Restart UIA, tick **Enabled** for the server, and restart again.
+   - [ ] Status reaches **Connected**, and the server received the saved
+         values (by its own behavior, reported env, or stderr).
+5. Set a field back to its default (or leave one untouched) and **Save
+   settings**.
+   - [ ] Nothing is stored for it in `uia-mcp.json`, and an earlier stored
+         value for that key is gone.
+
+### Hand-edited value
+
+1. Quit UIA. In `uia-mcp.json`, change a switch-backed setting's stored value
+   to `something`. Start UIA and open **Details**.
+   - [ ] The field is a text box showing `something`, not a switch.
+2. Type `true` (or `false`), **Save settings**, then collapse and reopen
+   **Details**.
+   - [ ] The field is a switch again.
+
+### Sensitive setting
+
+- [ ] After saving a sensitive value, its field is empty with the placeholder
+      "(saved — type to replace)" and a **Remove** button. The value is never
+      shown again and is not in `uia-mcp.json`.
+- [ ] It is in the OS keyring (service `uia`) as
+      `mcp-config.<server>.<key>`.
+- [ ] That field's **Remove** button deletes the keyring entry and shows
+      "Removed. Restart UIA to apply."
+
+### Removing the server
+
+- [ ] Click the server's **Remove** and confirm. It leaves the list, its
+      entry and settings are gone from `uia-mcp.json`, and the keyring entry
+      `mcp-config.<server>.<key>` no longer exists.
+
+### Execute bit (macOS/Linux)
+
+- [ ] Install a bundle whose binary lacks the execute bit (for example
+      `chmod -x` it before zipping). Enabling it reaches **Connected**.
+- [ ] On an already-installed bundle, `chmod -x` the installed binary, then
+      restart. It still starts.
+
+### A server that fails at startup
+
+1. Install a bundle whose executable prints a recognizable line to stderr and
+   exits at once. Enable it and restart.
+   - [ ] Status is **Failed**, and the line beneath the row ends with
+         `the server printed: <your line>`.
+   - [ ] The same line appears in UIA's terminal as `mcp[<name>] <your line>`.
+2. Make it print the value of a sensitive setting (8 or more characters).
+   - [ ] Both the Status reason and the terminal show `<redacted>` in its
+         place.
+
+### A bundle for another platform
+
+1. Install a bundle whose `compatibility.platforms` lists only another system
+   (for example `["linux"]` on Windows or macOS).
+   - [ ] The install is refused with a message naming both systems, such as
+         "this bundle is built for linux, not for this operating system
+         (darwin); install the build made for darwin". The server is not
+         listed.
+2. Install a bundle declaring the current system in capitals (for example
+   `["DARWIN"]`).
+   - [ ] It installs and runs.
+
 ## Remote MCP server with OAuth
 
 Requires a **bundled build** on Windows or macOS. The custom `uia://` scheme
