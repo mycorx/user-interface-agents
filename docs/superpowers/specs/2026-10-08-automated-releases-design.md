@@ -159,11 +159,12 @@ Changes in `renovate.json5`:
 - Grouping npm minor/patch like the crates and Actions is no longer needed for
   versioning and is left as a separate tidy-up.
 
-**Known gap:** security fixes usually arrive as minor/patch updates, so by
-this policy they would not cut a release on their own. The suggestion is to
-label `vulnerabilityAlerts` PRs `semver:uai-app:patch` (Renovate should accept
-`addLabels` there; to be verified when writing the config) so a security fix is
-always promotable. Not decided; see open question 1.
+**Security fixes wait like any other update** (decided). This is a local
+desktop application with manual installs and no auto-updater, so cutting a
+version sooner does not get a fix to users sooner; the promotion cadence is the
+bottleneck, not the tagging. Vulnerability-alert PRs are labelled
+`semver:uai-app:none` like other non-major updates. If an urgent fix needs to
+ship at once, a maintainer labels that PR `patch` by hand and runs `release`.
 
 In `release-check`:
 
@@ -327,11 +328,7 @@ registry and label scheme are made ready for it).
 
 ## Open questions
 
-1. **Security fixes:** should Renovate's vulnerability-alert PRs be labelled
-   `semver:uai-app:patch` so they are never stranded behind the "dependencies
-   are `none`" policy?
-
-Resolved earlier:
+All resolved:
 - globs confirmed;
 - tags are `uai-app-X.Y.Z` only, no legacy-tag support; the first release is retagged by hand (see Migration);
 - the published release is `0.1.1`, so `version.json` starts there;
