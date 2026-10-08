@@ -10,6 +10,7 @@
 //! itself printed.
 
 use std::collections::VecDeque;
+use std::io::Write;
 use std::sync::{Arc, Mutex};
 use tokio::io::{AsyncBufReadExt, AsyncRead, BufReader};
 
@@ -139,16 +140,24 @@ fn strip_control(s: &str) -> String {
 /// (~64 KB) would otherwise freeze a chatty server. Each line is stored in
 /// `tail` and still echoed to our own stderr, redacted and prefixed, as the
 /// inherited stream used to be. Reads lossily so a non-UTF8 byte does not end
-/// the task, and never panics.
+/// the task. It contains no panicking path: no unwrap/indexing, the echo
+/// ignores write errors (a closed or full parent stderr must not kill the
+/// drain while the child's pipe is still open) and only a terminal read error
+/// stops it early.
 pub(crate) fn spawn_drain(
     stderr: tokio::process::ChildStderr,
     tail: StderrTail,
     server_name: String,
 ) -> tokio::task::JoinHandle<()> {
-    tokio::spawn(drain(stderr, tail, server_name))
+    tokio::spawn(drain(stderr, tail, server_name, std::io::stderr()))
 }
 
-async fn drain<R: AsyncRead + Unpin>(stderr: R, tail: StderrTail, server_name: String) {
+async fn drain<R: AsyncRead + Unpin, W: Write>(
+    stderr: R,
+    tail: StderrTail,
+    server_name: String,
+    mut out: W,
+) {
     let mut reader = BufReader::new(stderr);
     let mut line: Vec<u8> = Vec::new();
     let mut overlong = false;
@@ -156,40 +165,45 @@ async fn drain<R: AsyncRead + Unpin>(stderr: R, tail: StderrTail, server_name: S
         let (consumed, found_newline) = {
             let buf = match reader.fill_buf().await {
                 Ok(b) => b,
+                // A signal can interrupt the read; the pipe is still fine.
+                Err(e) if e.kind() == std::io::ErrorKind::Interrupted => continue,
+                // Any other pipe read error is terminal in practice.
                 Err(_) => break,
             };
             if buf.is_empty() {
                 break;
             }
             let (chunk, found) = match buf.iter().position(|b| *b == b'\n') {
-                Some(i) => (&buf[..i], true),
+                Some(i) => (buf.get(..i).unwrap_or(buf), true),
                 None => (buf, false),
             };
             let room = MAX_READ_LINE_BYTES.saturating_sub(line.len());
             if chunk.len() > room {
                 overlong = true;
             }
-            line.extend_from_slice(&chunk[..chunk.len().min(room)]);
-            (chunk.len() + usize::from(found), found)
+            line.extend_from_slice(chunk.get(..room.min(chunk.len())).unwrap_or(chunk));
+            (chunk.len().saturating_add(usize::from(found)), found)
         };
         reader.consume(consumed);
         if found_newline {
-            emit(&tail, &server_name, &line);
+            emit(&tail, &server_name, &line, &mut out);
             line.clear();
             overlong = false;
         }
     }
     // A final line with no trailing newline.
     if !line.is_empty() || overlong {
-        emit(&tail, &server_name, &line);
+        emit(&tail, &server_name, &line, &mut out);
     }
 }
 
-fn emit(tail: &StderrTail, server_name: &str, bytes: &[u8]) {
+fn emit(tail: &StderrTail, server_name: &str, bytes: &[u8], out: &mut impl Write) {
     let text = String::from_utf8_lossy(bytes);
     tail.push_line(&text);
     let echoed = tail.redact(text.trim_end_matches('\r'));
-    eprintln!("mcp[{server_name}] {echoed}");
+    // `eprintln!` panics when stderr is closed or full; losing an echoed line
+    // is harmless, losing the drain would freeze the child.
+    let _ = writeln!(out, "mcp[{server_name}] {echoed}");
 }
 
 #[cfg(test)]
@@ -263,11 +277,57 @@ mod tests {
     async fn drain_survives_non_utf8_and_a_final_unterminated_line() {
         let t = tail();
         let data: &[u8] = b"before\n\xff\xfe bad\nafter\nno-newline";
-        drain(data, t.clone(), "probe".into()).await;
+        drain(data, t.clone(), "probe".into(), Vec::new()).await;
         let r = t.render();
         assert!(r.contains("before"), "{r}");
         assert!(r.contains("bad"), "{r}");
         assert!(r.contains("after"), "{r}");
         assert!(r.ends_with("no-newline"), "{r}");
+    }
+
+    /// A writer whose every write fails, like a closed parent stderr.
+    struct BrokenWriter;
+    impl Write for BrokenWriter {
+        fn write(&mut self, _: &[u8]) -> std::io::Result<usize> {
+            Err(std::io::Error::from(std::io::ErrorKind::BrokenPipe))
+        }
+        fn flush(&mut self) -> std::io::Result<()> {
+            Err(std::io::Error::from(std::io::ErrorKind::BrokenPipe))
+        }
+    }
+
+    #[tokio::test]
+    async fn drain_keeps_reading_when_the_echo_cannot_be_written() {
+        let t = tail();
+        let data: &[u8] = b"one\ntwo\nthree\n";
+        drain(data, t.clone(), "probe".into(), BrokenWriter).await;
+        assert_eq!(t.render(), "one | two | three");
+    }
+
+    #[tokio::test]
+    async fn drain_echoes_a_redacted_prefixed_line() {
+        let t = StderrTail::new(vec!["supersecret-value".into()]);
+        let mut out = Vec::new();
+        drain(&b"k=supersecret-value\n"[..], t, "probe".into(), &mut out).await;
+        assert_eq!(String::from_utf8(out).unwrap(), "mcp[probe] k=<redacted>\n");
+    }
+
+    #[test]
+    fn an_env_value_containing_another_is_replaced_whole() {
+        let t = StderrTail::new(vec!["abcdefgh".into(), "abcdefgh-extra-1234".into()]);
+        t.push_line("v=abcdefgh-extra-1234 w=abcdefgh");
+        let r = t.render();
+        assert_eq!(r, "v=<redacted> w=<redacted>");
+        assert!(!r.contains("extra"), "{r}");
+    }
+
+    #[test]
+    fn a_secret_straddling_the_line_cut_leaves_no_prefix_behind() {
+        let secret = "supersecret-value-123";
+        let t = StderrTail::new(vec![secret.into()]);
+        t.push_line(&format!("{}{secret} and more text", "x".repeat(295)));
+        let r = t.render();
+        assert!(!r.contains("supersec"), "{r}");
+        assert!(r.chars().count() <= 300);
     }
 }

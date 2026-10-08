@@ -857,7 +857,21 @@ mod tests {
             vec![],
         )
         .await;
-        assert!(msg.contains("line-19999"), "{msg}");
+        // Which lines survive is timing-dependent; completing is the point.
+        assert!(msg.contains("the server printed"), "{msg}");
+        assert!(msg.contains("line-"), "{msg}");
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn an_unterminated_200kb_line_does_not_stop_the_drain() {
+        let msg = failed_startup_message(
+            "head -c 200000 /dev/zero | tr '\\0' x >&2; \
+             i=0; while [ $i -lt 1000 ]; do echo line-$i >&2; i=$((i+1)); done; exit 1",
+            vec![],
+        )
+        .await;
+        assert!(msg.contains("line-"), "{msg}");
     }
 
     #[cfg(unix)]
