@@ -229,6 +229,35 @@ pub struct McpExecutor {
     service: RunningService<RoleClient, ()>,
 }
 
+/// Everything on a local server's command line that may carry a secret: each
+/// env value, each argument (`apply_user_config` substitutes keyring-backed
+/// settings into args as well as env), and the part after the first `=` of an
+/// argument so `--api-key=SECRET` hides `SECRET` even when a server prints it
+/// alone. `StderrTail::new` keeps only the values long enough to redact.
+fn redaction_values(args: &[String], env: &[(String, String)]) -> Vec<String> {
+    let mut values: Vec<String> = env.iter().map(|(_, v)| v.clone()).collect();
+    for arg in args {
+        values.push(arg.clone());
+        if let Some((_, after)) = arg.split_once('=') {
+            values.push(after.to_string());
+        }
+    }
+    values
+}
+
+/// The failure reason for a server that started but did not complete the MCP
+/// handshake: rmcp's error (redacted, since it can echo launch values) plus,
+/// when the server printed anything, `; the server printed: <tail>`.
+fn startup_failure_message(error: &str, tail: &StderrTail) -> String {
+    let error = tail.redact(error);
+    let printed = tail.render();
+    if printed.is_empty() {
+        error
+    } else {
+        format!("{error}; the server printed: {printed}")
+    }
+}
+
 impl McpExecutor {
     /// `name` is the configured, user-facing identifier — NOT the command or
     /// URL. Deriving it from the transport (as this did before S14) namespaces
@@ -261,7 +290,7 @@ impl McpExecutor {
                     .stderr(std::process::Stdio::piped())
                     .spawn()
                     .map_err(|e| ToolError::Transport(e.to_string()))?;
-                let tail = StderrTail::new(env.iter().map(|(_, v)| v.clone()).collect());
+                let tail = StderrTail::new(redaction_values(&args, &env));
                 let drain =
                     stderr.map(|stderr| spawn_drain(stderr, tail.clone(), server_name.clone()));
                 let service = match ().serve(transport).await {
@@ -273,13 +302,10 @@ impl McpExecutor {
                         if let Some(drain) = drain {
                             let _ = tokio::time::timeout(Duration::from_millis(500), drain).await;
                         }
-                        let printed = tail.render();
-                        let message = if printed.is_empty() {
-                            e.to_string()
-                        } else {
-                            format!("{e}; the server printed: {printed}")
-                        };
-                        return Err(ToolError::Transport(message));
+                        return Err(ToolError::Transport(startup_failure_message(
+                            &e.to_string(),
+                            &tail,
+                        )));
                     }
                 };
                 Ok(Self {
@@ -847,6 +873,88 @@ mod tests {
         assert!(msg.contains("token is"), "{msg}");
         assert!(msg.contains("<redacted>"), "{msg}");
         assert!(!msg.contains("supersecret-value-123"), "{msg}");
+    }
+
+    /// Like `failed_startup_message`, with extra args after `sh -c script sh`
+    /// (so the script sees them as `$1`, `$2`, ...).
+    #[cfg(unix)]
+    async fn failed_startup_message_with_args(script: &str, extra: &[&str]) -> String {
+        let mut args = vec!["-c".to_string(), script.to_string(), "sh".to_string()];
+        args.extend(extra.iter().map(|a| a.to_string()));
+        match McpExecutor::connect(
+            "probe",
+            McpServerConfig::Stdio {
+                command: "/bin/sh".into(),
+                args,
+                env: vec![],
+            },
+        )
+        .await
+        {
+            Err(ToolError::Transport(msg)) => msg,
+            other => panic!("expected a Transport error, got {:?}", other.map(|_| ())),
+        }
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn a_secret_passed_as_an_argument_is_redacted_from_the_startup_output() {
+        let msg = failed_startup_message_with_args(
+            "echo \"args: $1 $2\" >&2; exit 1",
+            &["--api-key", "supersecret-12345678"],
+        )
+        .await;
+        assert!(msg.contains("args:"), "{msg}");
+        assert!(msg.contains("<redacted>"), "{msg}");
+        assert!(!msg.contains("supersecret-12345678"), "{msg}");
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn the_value_of_a_flag_equals_value_argument_is_redacted_too() {
+        // The server prints only the value part (as `${1#*=}`), which is not
+        // itself an argument, so only the after-`=` rule can catch it.
+        let msg = failed_startup_message_with_args(
+            "echo \"key is ${1#*=}\" >&2; exit 1",
+            &["--api-key=supersecret-12345678"],
+        )
+        .await;
+        assert!(msg.contains("key is"), "{msg}");
+        assert!(msg.contains("<redacted>"), "{msg}");
+        assert!(!msg.contains("supersecret-12345678"), "{msg}");
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn a_short_argument_is_not_redacted() {
+        let msg =
+            failed_startup_message_with_args("echo \"arg is $1\" >&2; exit 1", &["--stdio"]).await;
+        assert!(msg.contains("arg is --stdio"), "{msg}");
+    }
+
+    #[test]
+    fn redaction_values_cover_env_args_and_the_part_after_equals() {
+        let v = redaction_values(
+            &["--api-key=abc".to_string(), "plain".to_string()],
+            &[("K".to_string(), "envvalue".to_string())],
+        );
+        for want in ["envvalue", "--api-key=abc", "abc", "plain"] {
+            assert!(v.iter().any(|x| x == want), "missing {want}: {v:?}");
+        }
+    }
+
+    #[test]
+    fn the_error_text_is_redacted_before_the_tail_is_appended() {
+        let tail = StderrTail::new(vec!["supersecret-12345678".into()]);
+        assert_eq!(
+            startup_failure_message("boom supersecret-12345678", &tail),
+            "boom <redacted>"
+        );
+        tail.push_line("why");
+        assert_eq!(
+            startup_failure_message("boom supersecret-12345678", &tail),
+            "boom <redacted>; the server printed: why"
+        );
     }
 
     #[cfg(unix)]
