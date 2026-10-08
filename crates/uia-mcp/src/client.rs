@@ -12,6 +12,7 @@ use std::time::Duration;
 use uia_core::tools::{ToolDescriptor, ToolError, ToolExecutor, ToolResult};
 
 use crate::authed_client::AuthedHttpClient;
+use crate::stderr_tail::{StderrTail, spawn_drain};
 use crate::token::{NoToken, TokenProvider};
 
 #[derive(Clone)]
@@ -63,16 +64,22 @@ const REDACTED: &str = "<redacted>";
 /// message, and this impl is what enforces that for callers who never thought
 /// about it.
 ///
-/// `Stdio` prints in full: its `env` comes from a bundle manifest that shipped
-/// in the clear, so there is nothing there to protect.
+/// `Stdio` prints the command, the env variable NAMES (values redacted) and
+/// only the argument COUNT: a local server's env and args can carry keyring
+/// secrets substituted from its `${user_config.*}` settings.
 impl std::fmt::Debug for McpServerConfig {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
             McpServerConfig::Stdio { command, args, env } => f
                 .debug_struct("Stdio")
                 .field("command", command)
-                .field("args", args)
-                .field("env", env)
+                .field("args", &format_args!("<{} redacted>", args.len()))
+                .field(
+                    "env",
+                    &env.iter()
+                        .map(|(name, _)| (name.as_str(), REDACTED))
+                        .collect::<Vec<_>>(),
+                )
                 .finish(),
             McpServerConfig::Http {
                 url,
@@ -222,6 +229,35 @@ pub struct McpExecutor {
     service: RunningService<RoleClient, ()>,
 }
 
+/// Everything on a local server's command line that may carry a secret: each
+/// env value, each argument (`apply_user_config` substitutes keyring-backed
+/// settings into args as well as env), and the part after the first `=` of an
+/// argument so `--api-key=SECRET` hides `SECRET` even when a server prints it
+/// alone. `StderrTail::new` keeps only the values long enough to redact.
+fn redaction_values(args: &[String], env: &[(String, String)]) -> Vec<String> {
+    let mut values: Vec<String> = env.iter().map(|(_, v)| v.clone()).collect();
+    for arg in args {
+        values.push(arg.clone());
+        if let Some((_, after)) = arg.split_once('=') {
+            values.push(after.to_string());
+        }
+    }
+    values
+}
+
+/// The failure reason for a server that started but did not complete the MCP
+/// handshake: rmcp's error (redacted, since it can echo launch values) plus,
+/// when the server printed anything, `; the server printed: <tail>`.
+fn startup_failure_message(error: &str, tail: &StderrTail) -> String {
+    let error = tail.redact(error);
+    let printed = tail.render();
+    if printed.is_empty() {
+        error
+    } else {
+        format!("{error}; the server printed: {printed}")
+    }
+}
+
 impl McpExecutor {
     /// `name` is the configured, user-facing identifier — NOT the command or
     /// URL. Deriving it from the transport (as this did before S14) namespaces
@@ -246,12 +282,32 @@ impl McpExecutor {
                 for (key, value) in &env {
                     cmd.env(key, value);
                 }
-                let transport =
-                    TokioChildProcess::new(cmd).map_err(|e| ToolError::Transport(e.to_string()))?;
-                let service =
-                    ().serve(transport)
-                        .await
-                        .map_err(|e| ToolError::Transport(e.to_string()))?;
+                // Pipe the child's stderr instead of inheriting it: a server that
+                // dies at startup says why on stderr, and an inherited stream is
+                // invisible to Settings. The drain below keeps echoing each line
+                // to our own stderr, so terminal behavior is unchanged.
+                let (transport, stderr) = TokioChildProcess::builder(cmd)
+                    .stderr(std::process::Stdio::piped())
+                    .spawn()
+                    .map_err(|e| ToolError::Transport(e.to_string()))?;
+                let tail = StderrTail::new(redaction_values(&args, &env));
+                let drain =
+                    stderr.map(|stderr| spawn_drain(stderr, tail.clone(), server_name.clone()));
+                let service = match ().serve(transport).await {
+                    Ok(service) => service,
+                    Err(e) => {
+                        // The child has usually exited by now, so its stream
+                        // ends and the drain finishes; bound the wait anyway
+                        // in case it is still alive.
+                        if let Some(drain) = drain {
+                            let _ = tokio::time::timeout(Duration::from_millis(500), drain).await;
+                        }
+                        return Err(ToolError::Transport(startup_failure_message(
+                            &e.to_string(),
+                            &tail,
+                        )));
+                    }
+                };
                 Ok(Self {
                     server_name,
                     service,
@@ -444,21 +500,21 @@ mod tests {
         assert!(printed.contains(REDACTED), "{printed}");
     }
 
-    /// The other variant stays fully printable: a bundle manifest's `env`
-    /// shipped in the clear, so redacting it would cost debuggability for no
-    /// secrecy gain.
+    /// A stdio server's env can carry a keyring secret (a substituted
+    /// `${user_config.*}` value), so only the variable NAMES are printed.
     #[test]
-    fn a_stdio_configs_env_is_still_printed_in_full() {
+    fn a_stdio_configs_env_values_are_never_printed() {
         let cfg = McpServerConfig::Stdio {
             command: "uvx".into(),
             args: vec!["mcp-server-time".into()],
-            env: vec![("TZ".into(), "UTC".into())],
+            env: vec![("API_TOKEN".into(), "sk-super-secret-value".into())],
         };
         let printed = format!("{cfg:?}");
         assert!(printed.contains("uvx"), "{printed}");
-        assert!(printed.contains("mcp-server-time"), "{printed}");
-        assert!(printed.contains("TZ"), "{printed}");
-        assert!(printed.contains("UTC"), "{printed}");
+        assert!(!printed.contains("mcp-server-time"), "{printed}");
+        assert!(printed.contains("API_TOKEN"), "{printed}");
+        assert!(!printed.contains("sk-super-secret-value"), "{printed}");
+        assert!(printed.contains(REDACTED), "{printed}");
     }
 
     /// A remote server's auth header is the whole reason a private MCP
@@ -771,6 +827,178 @@ mod tests {
             redirected_seen.lock().unwrap().is_none(),
             "the custom header leaked to the redirect target"
         );
+    }
+
+    /// Connects `/bin/sh -c script` (which never speaks MCP, so the handshake
+    /// fails) and returns the transport error text.
+    #[cfg(unix)]
+    async fn failed_startup_message(script: &str, env: Vec<(String, String)>) -> String {
+        let result = tokio::time::timeout(
+            Duration::from_secs(10),
+            McpExecutor::connect(
+                "probe",
+                McpServerConfig::Stdio {
+                    command: "/bin/sh".into(),
+                    args: vec!["-c".into(), script.into()],
+                    env,
+                },
+            ),
+        )
+        .await
+        .expect("connect must not hang on a chatty server");
+        match result {
+            Err(ToolError::Transport(msg)) => msg,
+            Err(other) => panic!("expected a Transport error, got {other:?}"),
+            Ok(_) => panic!("a script that never speaks MCP must not connect"),
+        }
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn a_failed_startup_shows_what_the_server_printed() {
+        let msg =
+            failed_startup_message("echo 'cannot read credentials.json' >&2; exit 3", vec![]).await;
+        assert!(msg.contains("cannot read credentials.json"), "{msg}");
+        assert!(msg.contains("the server printed"), "{msg}");
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn a_launch_env_secret_is_redacted_from_the_startup_output() {
+        let msg = failed_startup_message(
+            "echo \"token is $TOKEN\" >&2; exit 1",
+            vec![("TOKEN".into(), "supersecret-value-123".into())],
+        )
+        .await;
+        assert!(msg.contains("token is"), "{msg}");
+        assert!(msg.contains("<redacted>"), "{msg}");
+        assert!(!msg.contains("supersecret-value-123"), "{msg}");
+    }
+
+    /// Like `failed_startup_message`, with extra args after `sh -c script sh`
+    /// (so the script sees them as `$1`, `$2`, ...).
+    #[cfg(unix)]
+    async fn failed_startup_message_with_args(script: &str, extra: &[&str]) -> String {
+        let mut args = vec!["-c".to_string(), script.to_string(), "sh".to_string()];
+        args.extend(extra.iter().map(|a| a.to_string()));
+        match McpExecutor::connect(
+            "probe",
+            McpServerConfig::Stdio {
+                command: "/bin/sh".into(),
+                args,
+                env: vec![],
+            },
+        )
+        .await
+        {
+            Err(ToolError::Transport(msg)) => msg,
+            other => panic!("expected a Transport error, got {:?}", other.map(|_| ())),
+        }
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn a_secret_passed_as_an_argument_is_redacted_from_the_startup_output() {
+        let msg = failed_startup_message_with_args(
+            "echo \"args: $1 $2\" >&2; exit 1",
+            &["--api-key", "supersecret-12345678"],
+        )
+        .await;
+        assert!(msg.contains("args:"), "{msg}");
+        assert!(msg.contains("<redacted>"), "{msg}");
+        assert!(!msg.contains("supersecret-12345678"), "{msg}");
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn the_value_of_a_flag_equals_value_argument_is_redacted_too() {
+        // The server prints only the value part (as `${1#*=}`), which is not
+        // itself an argument, so only the after-`=` rule can catch it.
+        let msg = failed_startup_message_with_args(
+            "echo \"key is ${1#*=}\" >&2; exit 1",
+            &["--api-key=supersecret-12345678"],
+        )
+        .await;
+        assert!(msg.contains("key is"), "{msg}");
+        assert!(msg.contains("<redacted>"), "{msg}");
+        assert!(!msg.contains("supersecret-12345678"), "{msg}");
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn a_short_argument_is_not_redacted() {
+        let msg =
+            failed_startup_message_with_args("echo \"arg is $1\" >&2; exit 1", &["--stdio"]).await;
+        assert!(msg.contains("arg is --stdio"), "{msg}");
+    }
+
+    #[test]
+    fn redaction_values_cover_env_args_and_the_part_after_equals() {
+        let v = redaction_values(
+            &["--api-key=abc".to_string(), "plain".to_string()],
+            &[("K".to_string(), "envvalue".to_string())],
+        );
+        for want in ["envvalue", "--api-key=abc", "abc", "plain"] {
+            assert!(v.iter().any(|x| x == want), "missing {want}: {v:?}");
+        }
+    }
+
+    #[test]
+    fn the_error_text_is_redacted_before_the_tail_is_appended() {
+        let tail = StderrTail::new(vec!["supersecret-12345678".into()]);
+        assert_eq!(
+            startup_failure_message("boom supersecret-12345678", &tail),
+            "boom <redacted>"
+        );
+        tail.push_line("why");
+        assert_eq!(
+            startup_failure_message("boom supersecret-12345678", &tail),
+            "boom <redacted>; the server printed: why"
+        );
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn a_very_chatty_server_never_blocks_on_a_full_stderr_pipe() {
+        let msg = failed_startup_message(
+            "i=0; while [ $i -lt 20000 ]; do echo line-$i >&2; i=$((i+1)); done; exit 1",
+            vec![],
+        )
+        .await;
+        // Which lines survive is timing-dependent; completing is the point.
+        assert!(msg.contains("the server printed"), "{msg}");
+        assert!(msg.contains("line-"), "{msg}");
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn an_unterminated_200kb_line_does_not_stop_the_drain() {
+        let msg = failed_startup_message(
+            "head -c 200000 /dev/zero | tr '\\0' x >&2; \
+             i=0; while [ $i -lt 1000 ]; do echo line-$i >&2; i=$((i+1)); done; exit 1",
+            vec![],
+        )
+        .await;
+        assert!(msg.contains("line-"), "{msg}");
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn a_command_that_cannot_be_spawned_has_no_server_output_to_show() {
+        let result = McpExecutor::connect(
+            "probe",
+            McpServerConfig::Stdio {
+                command: "/nonexistent/uia-no-such-server".into(),
+                args: vec![],
+                env: vec![],
+            },
+        )
+        .await;
+        match result {
+            Err(ToolError::Transport(msg)) => assert!(!msg.contains("the server printed"), "{msg}"),
+            Err(other) => panic!("expected a Transport error, got {other:?}"),
+            Ok(_) => panic!("a missing command must not connect"),
+        }
     }
 
     #[tokio::test]

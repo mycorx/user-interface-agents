@@ -7,6 +7,7 @@ pub mod callback;
 pub mod client;
 pub mod oauth;
 pub mod router;
+mod stderr_tail;
 pub mod token;
 pub mod translate;
 pub mod wire_names;

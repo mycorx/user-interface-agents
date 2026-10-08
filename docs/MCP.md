@@ -12,7 +12,11 @@ Exactly two transports are supported.
 
 A `.mcpb` is a zip containing a `manifest.json` that declares a command to
 launch. UIA extracts it, validates it, and — only if it passes — records it
-as an installed local server and runs it as a subprocess over stdio.
+as an installed local server and runs it as a subprocess over stdio. Extraction
+restores each file's permission bits from the archive and makes the manifest's
+launch command executable, so a bundle's binary is runnable after install. For
+a bundle installed before this fix, the launch command is made executable at
+launch if it has no execute bit.
 
 **Desktop only.** iOS's sandbox forbids spawning subprocesses and Android
 heavily restricts it, so a `.mcpb` local server is unavailable on mobile builds.
@@ -20,9 +24,10 @@ heavily restricts it, so a `.mcpb` local server is unavailable on mobile builds.
 
 ### Manifest fields UIA acts on
 
-Everything else in the MCPB schema (`description`, `author`, `tools`,
-`dxt_version`, ...) is parsed but ignored — an unknown key must never make
-an otherwise-valid bundle uninstallable, and none of those fields affect
+`user_config`, `server`, `compatibility.platforms` and `name`/`version` are
+acted on. Everything else in the MCPB schema (`description`, `author`,
+`tools`, `dxt_version`, ...) is parsed but ignored — an unknown key must never
+make an otherwise-valid bundle uninstallable, and none of those fields affect
 what gets executed.
 
 ```json
@@ -40,7 +45,8 @@ what gets executed.
         "win32": { "command": "${__dirname}/bin/my-tool.exe" }
       }
     }
-  }
+  },
+  "compatibility": { "platforms": ["darwin", "win32"] }
 }
 ```
 
@@ -54,10 +60,24 @@ what gets executed.
   `darwin`, `linux`), not Rust's, and merges field-by-field over the base
   config — an override naming only a Windows `.exe` still keeps the base
   `args`.
+- `compatibility.platforms` lists the operating systems the bundle was built
+  for, by Node's names (`win32`, `darwin`, `linux`), compared
+  case-insensitively. `validate_bundle` enforces it at install and again at
+  every launch: a bundle built for another system is refused at install
+  (nothing is left in the install directory), and an installed one that no
+  longer matches is skipped at launch and shows as **Failed** in the Status
+  column with the same reason. The reason names both sides, for example "this
+  bundle is built for linux, not for this operating system (darwin); install
+  the build made for darwin". A bundle that omits `compatibility` or
+  `platforms`, or gives an empty or malformed one (`platforms` not an array,
+  `compatibility` not an object), is unrestricted. Non-string entries in the
+  list are ignored, so a mixed list restricts to its string entries. A wrongly
+  typed `compatibility` never makes a manifest unreadable.
 
 ### Validation (`crates/uia-mcp/src/bundle/validate.rs`)
 
-Four checks, deliberately overlapping — no single one is trusted alone:
+A platform-compatibility refusal runs first (it is not a trust check), then
+four trust checks, deliberately overlapping — no single one is trusted alone:
 
 1. **`server.type` must be `"binary"`.** The bundle's own claim.
 2. **The resolved command must stay inside the extracted bundle directory**
@@ -72,6 +92,60 @@ Four checks, deliberately overlapping — no single one is trusted alone:
 Together, these stop a manifest from pointing at an interpreter already on
 the machine and calling itself a binary local server, or from launching anything
 outside the bundle it shipped in.
+
+### Settings: `user_config`
+
+A manifest's `user_config` declares settings the user fills in once. UIA shows
+them under **Settings → MCP → (server) → Configuration** and substitutes
+`${user_config.<key>}` in `args` and `env` at launch, after validation — so a
+setting can never change which executable runs. `${user_config.*}` in `command`
+is not supported: it is refused at validation (`UserConfigInCommand`), because a
+setting must never choose what runs.
+
+Value order: the saved value, then the manifest `default`, then an error if
+the field is `required` (the server shows as Failed with the reason). Substitution
+is a single pass — a value that itself contains `${...}` is never expanded again.
+Plain values are stored in `uia-mcp.json`; `sensitive` ones only in the OS keyring
+(macOS Keychain, Windows Credential Manager, Secret Service on Linux) under
+`mcp-config.<server>.<key>`, and are deleted when the server is removed (the key
+names, never the values, are also noted in `uia-mcp.json`, so removal still finds
+them if the bundle's manifest is already gone). Sensitive values are never
+returned to the UI; Settings only learns whether one is set.
+Supported types: `string`, `number`, `boolean`, `directory`, `file`; numbers
+must be finite and within `min`/`max` if declared; a `multiple` field uses its
+first value only. Saving is all-or-nothing — validation and required checks run
+first, then keyring writes are rolled back if a later write or the registry write
+fails. Changes apply on the next restart.
+
+A sensitive value placed in `args` is visible to anyone who can list processes,
+so prefer `env` for secrets.
+
+**Path variables.** In the manifest's `default`, `args` and `env` values, UIA
+expands `${HOME}`, `${DESKTOP}`, `${DOCUMENTS}`, `${DOWNLOADS}`, `${/}` and
+`${pathSeparator}` (the last two are the OS path separator), alongside
+`${__dirname}`. They are never expanded in `command` (it must stay inside the
+bundle), in `env` keys, or in a value the user typed. A variable UIA does not
+know, or that the OS cannot name on this machine, is left in the text unchanged
+and does not fail the server. On Windows `${HOME}` contains
+backslashes, so authors who want native separators should use `${/}`.
+
+**Forgiving fields.** Only the attributes of each `user_config` field are read
+leniently: a wrongly typed attribute (a numeric `title`, say) falls back to its
+default instead of failing the whole manifest, and an entry that is not an
+object is skipped. An unparseable `sensitive` is treated as sensitive, so a
+secret never ends up in plain text. The rest of the manifest stays strict.
+
+**Form behavior.** Defaults are shown in the form but stored only when you
+change them: a value equal to the default is not saved, and saving it clears an
+earlier stored value. A `boolean` setting, or a string setting whose declared
+default is exactly `true` or `false`, is shown as a toggle (it still stores
+that text); a stored value alone does not make a toggle, a string setting with
+no default stays a text box, and sensitive and `multiple` fields never are. If
+a stored value is neither empty nor `true`/`false` (for example after hand-editing
+`uia-mcp.json`), the setting shows as a text box with that value until it is set
+back, so the form never hides what the server is actually given.
+Number settings are typed as text and refused at save if not a number;
+`min`/`max` are enforced when saving.
 
 ### What the rule actually enforces: self-contained, not compiled
 
@@ -187,6 +261,44 @@ so a panel left open still shows what was true when it last read.
 validation) and a server that reached a connection attempt and was refused.
 Both were enabled by the user and both are silently absent from the session,
 which is the thing the column exists to make visible.
+
+### What a local server printed when it failed to start
+
+UIA pipes a local server's stderr instead of letting it inherit UIA's own
+(`crates/uia-mcp/src/stderr_tail.rs`). When the server process starts but the
+MCP handshake then fails (it exits at once, or prints an error and quits), the
+reason ends with `; the server printed: <tail>`. The tail is:
+
+- the last 12 non-blank lines, each cut to 300 characters, joined with ` | `,
+  and the whole tail cut to 600 characters keeping the end, so the last lines
+  survive;
+- stripped of ANSI escape sequences and control characters (tab is kept);
+- redacted: every launch environment value, every argument, and the value
+  after `=` in a `--flag=value` argument, each of 8 or more characters, is
+  replaced by `<redacted>`, both in the stored tail and in the terminal echo
+  below. This includes keyring-backed `user_config` settings, which can be
+  substituted into either.
+
+The limits:
+
+- Values shorter than 8 characters are not redacted (they would mangle words
+  such as `true`), and neither is a secret the server transforms before
+  printing it (base64-encoded, truncated, split across lines).
+- Redaction is by length, not by knowing what is secret, so a long value that
+  is not secret (a file path, a home-location string) is replaced too and a
+  message can read "cannot open <redacted>".
+- On Windows, a server that writes in the console's code page (non-UTF-8, for
+  example localized error text) shows replacement characters.
+- Only startup failures are annotated: the tail is read after waiting up to
+  500 ms for the stream to end following the failure. A server that dies later
+  adds nothing in Settings.
+- A spawn error (for example permission denied) has no server output, so its
+  message is unchanged.
+
+Every stderr line, at any time, is still echoed to UIA's own stderr as
+`mcp[<name>] <line>` (redacted the same way), so a server that dies after
+startup is visible only in that terminal. The reader keeps draining the pipe
+for the life of the process, so a chatty server cannot block on a full buffer.
 
 ## One namespace
 

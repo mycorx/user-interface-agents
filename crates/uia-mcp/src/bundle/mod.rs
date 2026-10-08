@@ -18,10 +18,10 @@ pub mod install;
 pub mod manifest;
 pub mod validate;
 
-pub use install::{InstalledBundle, install_bundle};
+pub use install::{InstalledBundle, ensure_executable, install_bundle};
 pub use manifest::{
-    McpbManifest, McpbMcpConfig, McpbServer, ResolvedLaunch, current_platform, parse_manifest,
-    resolve_launch,
+    Compatibility, McpbManifest, McpbMcpConfig, McpbServer, ResolvedLaunch, UserConfigField,
+    apply_user_config, current_platform, expand_path_vars, parse_manifest, resolve_launch,
 };
 pub use validate::{SCRIPT_EXTENSIONS, validate_bundle};
 
@@ -41,6 +41,15 @@ pub enum BundleError {
          exactly what requiring a bundle is meant to prevent"
     )]
     NotBinary(String),
+    #[error(
+        "this bundle is built for {}, not for this operating system ({current}); \
+         install the build made for {current}",
+        declared.join(", ")
+    )]
+    UnsupportedPlatform {
+        declared: Vec<String>,
+        current: String,
+    },
     #[error("the bundle declares no command and no entry point, so there is nothing to run")]
     NoCommand,
     #[error("the bundle's launch command {0:?} is a .{1} script, not a compiled executable")]
@@ -57,6 +66,17 @@ pub enum BundleError {
     EscapesBundle(String),
     #[error("the bundle's launch command {0:?} is not a file inside the bundle")]
     MissingCommand(String),
+    #[error(
+        "the setting {0:?} is required but has no value and no default; set it in \
+         Settings \u{2192} MCP"
+    )]
+    MissingUserConfig(String),
+    #[error("the manifest references ${{user_config.{0}}}, which it never declares")]
+    UndeclaredUserConfig(String),
+    #[error(
+        "the launch command {0:?} references a user setting; a setting may not choose what runs"
+    )]
+    UserConfigInCommand(String),
     #[error("invalid local server name: {0}")]
     Name(String),
     #[error("a local server named {0:?} is already installed")]

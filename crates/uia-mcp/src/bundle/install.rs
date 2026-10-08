@@ -63,7 +63,49 @@ fn extract_to(source: &Path, staging: &Path) -> Result<(), BundleError> {
         }
         let mut sink = std::fs::File::create(&out)?;
         std::io::copy(&mut entry, &mut sink)?;
+        drop(sink);
+        restore_mode(&out, entry.unix_mode())?;
     }
+    Ok(())
+}
+
+/// `File::create` gives 0644, so without this every binary in the archive
+/// loses its execute bit and fails at spawn with EACCES. Only the permission
+/// bits come back, masked to 0755 — setuid/setgid/sticky and group/world
+/// write from an untrusted archive do not.
+#[cfg(unix)]
+fn restore_mode(path: &Path, mode: Option<u32>) -> std::io::Result<()> {
+    use std::os::unix::fs::PermissionsExt;
+    match mode {
+        Some(mode) => std::fs::set_permissions(path, std::fs::Permissions::from_mode(mode & 0o755)),
+        None => Ok(()),
+    }
+}
+
+#[cfg(not(unix))]
+fn restore_mode(_path: &Path, _mode: Option<u32>) -> std::io::Result<()> {
+    Ok(())
+}
+
+/// Makes `path` runnable if it has no execute bit at all; a file that is
+/// already executable by anyone is left exactly as it is. Used at install (an
+/// archive zipped where unix modes don't exist records none) and again at
+/// launch (a bundle installed before modes were restored is 0644 on disk).
+/// The path is one `validate_bundle` already confirmed is a file inside the
+/// bundle. No-op off unix.
+#[cfg(unix)]
+pub fn ensure_executable(path: &Path) -> std::io::Result<()> {
+    use std::os::unix::fs::PermissionsExt;
+    let mut perms = std::fs::metadata(path)?.permissions();
+    if perms.mode() & 0o111 != 0 {
+        return Ok(());
+    }
+    perms.set_mode(perms.mode() | 0o111);
+    std::fs::set_permissions(path, perms)
+}
+
+#[cfg(not(unix))]
+pub fn ensure_executable(_path: &Path) -> std::io::Result<()> {
     Ok(())
 }
 
@@ -133,6 +175,11 @@ pub fn install_bundle(
             return Err(e);
         }
     };
+
+    if let Err(e) = ensure_executable(Path::new(&launch.command)) {
+        std::fs::remove_dir_all(&final_dir).ok();
+        return Err(BundleError::Io(e));
+    }
 
     Ok(InstalledBundle {
         name: manifest.name,
@@ -208,6 +255,122 @@ mod tests {
         assert!(command_ok, "got {}", installed.launch.command);
     }
 
+    /// `File::create` yields 0644, so a binary that came out of the zip
+    /// without its execute bit fails at spawn with EACCES ("Permission denied
+    /// (os error 13)") — the server then shows as Failed before it ever runs.
+    #[cfg(unix)]
+    #[test]
+    fn an_executable_in_the_archive_stays_executable_once_installed() {
+        use std::os::unix::fs::PermissionsExt;
+        let src =
+            std::env::temp_dir().join(format!("uia-mcpb-src-{}-exec.mcpb", std::process::id()));
+        {
+            let mut zip = zip::ZipWriter::new(std::fs::File::create(&src).unwrap());
+            let plain: zip::write::FileOptions<'_, ()> = zip::write::FileOptions::default();
+            zip.start_file("manifest.json", plain).unwrap();
+            zip.write_all(GOOD_MANIFEST.as_bytes()).unwrap();
+            zip.start_file("server/clock", plain.unix_permissions(0o755))
+                .unwrap();
+            zip.write_all(ELF).unwrap();
+            zip.finish().unwrap();
+        }
+        let dest = local_servers_dir("exec");
+
+        let installed = install_bundle(&src, &dest).unwrap();
+
+        let mode = std::fs::metadata(&installed.launch.command)
+            .unwrap()
+            .permissions()
+            .mode();
+        std::fs::remove_file(&src).ok();
+        std::fs::remove_dir_all(&dest).ok();
+        assert_eq!(mode & 0o111, 0o111, "mode was {mode:o}");
+    }
+
+    /// Installs a one-binary bundle whose `server/clock` entry records `mode`,
+    /// and returns the mode it landed with.
+    #[cfg(unix)]
+    fn installed_mode_for_recorded(label: &str, mode: u32) -> u32 {
+        use std::os::unix::fs::PermissionsExt;
+        let src =
+            std::env::temp_dir().join(format!("uia-mcpb-src-{}-{label}.mcpb", std::process::id()));
+        {
+            let mut zip = zip::ZipWriter::new(std::fs::File::create(&src).unwrap());
+            let plain: zip::write::FileOptions<'_, ()> = zip::write::FileOptions::default();
+            zip.start_file("manifest.json", plain).unwrap();
+            zip.write_all(GOOD_MANIFEST.as_bytes()).unwrap();
+            zip.start_file("server/clock", plain.unix_permissions(mode))
+                .unwrap();
+            zip.write_all(ELF).unwrap();
+            zip.finish().unwrap();
+        }
+        let dest = local_servers_dir(label);
+        let installed = install_bundle(&src, &dest).unwrap();
+        let landed = std::fs::metadata(&installed.launch.command)
+            .unwrap()
+            .permissions()
+            .mode();
+        std::fs::remove_file(&src).ok();
+        std::fs::remove_dir_all(&dest).ok();
+        landed & 0o777
+    }
+
+    /// An archive is untrusted: it must not be able to install the launched
+    /// binary group- or world-writable by recording 0777.
+    #[cfg(unix)]
+    #[test]
+    fn archive_permission_bits_are_masked_to_0755() {
+        assert_eq!(installed_mode_for_recorded("m777", 0o777), 0o755);
+        let m666 = installed_mode_for_recorded("m666", 0o666);
+        assert_eq!(m666 & 0o022, 0, "mode was {m666:o}");
+        assert_eq!(installed_mode_for_recorded("m755", 0o755), 0o755);
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn ensure_executable_adds_the_bit_only_when_none_is_set() {
+        use std::os::unix::fs::PermissionsExt;
+        let dir = local_servers_dir("ensure");
+        std::fs::create_dir_all(&dir).unwrap();
+        let plain = dir.join("plain");
+        let exec = dir.join("exec");
+        std::fs::write(&plain, b"x").unwrap();
+        std::fs::write(&exec, b"x").unwrap();
+        std::fs::set_permissions(&plain, std::fs::Permissions::from_mode(0o644)).unwrap();
+        std::fs::set_permissions(&exec, std::fs::Permissions::from_mode(0o755)).unwrap();
+
+        ensure_executable(&plain).unwrap();
+        ensure_executable(&exec).unwrap();
+        let missing = ensure_executable(&dir.join("nope"));
+
+        let mode = |p: &Path| std::fs::metadata(p).unwrap().permissions().mode() & 0o777;
+        let (plain_mode, exec_mode) = (mode(&plain), mode(&exec));
+        std::fs::remove_dir_all(&dir).ok();
+        assert_ne!(plain_mode & 0o111, 0, "mode was {plain_mode:o}");
+        assert_eq!(exec_mode, 0o755);
+        assert!(missing.is_err());
+    }
+
+    /// An archive built where unix modes don't exist (zipped on Windows) names
+    /// no mode at all. The approved launch command must still be runnable.
+    #[cfg(unix)]
+    #[test]
+    fn the_launch_command_is_executable_even_when_the_archive_records_no_mode() {
+        use std::os::unix::fs::PermissionsExt;
+        let src = write_mcpb("nomode", GOOD_MANIFEST, &[("server/clock", ELF)]);
+        let dest = local_servers_dir("nomode");
+
+        let installed = install_bundle(&src, &dest).unwrap();
+
+        let mode = std::fs::metadata(&installed.launch.command)
+            .unwrap()
+            .permissions()
+            .mode();
+        std::fs::remove_file(&src).ok();
+        std::fs::remove_dir_all(&dest).ok();
+        assert_eq!(mode & 0o111, 0o111, "mode was {mode:o}");
+    }
+
     /// The install must be all-or-nothing: a half-extracted rejected bundle
     /// on disk is a local server nobody approved sitting where approved ones live.
     #[test]
@@ -250,6 +413,52 @@ mod tests {
              (including any hidden .staging-* dir): {leftover_entries:?}",
             leftover_entries.len()
         );
+    }
+
+    /// A platform name that is not the one this test runs on.
+    fn other_platform() -> &'static str {
+        ["win32", "darwin", "linux"]
+            .into_iter()
+            .find(|p| *p != current_platform())
+            .unwrap()
+    }
+
+    #[test]
+    fn a_bundle_for_another_platform_leaves_nothing_in_the_install_directory() {
+        let other = other_platform();
+        let manifest = format!(
+            r#"{{
+            "manifest_version": "0.2",
+            "name": "elsewhere",
+            "version": "1.0.0",
+            "compatibility": {{ "platforms": ["{other}"] }},
+            "server": {{
+                "type": "binary",
+                "entry_point": "server/elsewhere",
+                "mcp_config": {{ "command": "${{__dirname}}/server/elsewhere" }}
+            }}
+        }}"#
+        );
+        let src = write_mcpb(
+            "elsewhere",
+            &manifest,
+            &[("server/elsewhere", b"\x7fELF-bytes")],
+        );
+        let dest = local_servers_dir("elsewhere");
+
+        let err = install_bundle(&src, &dest).unwrap_err();
+
+        let leftover_entries: Vec<_> = std::fs::read_dir(&dest)
+            .map(|entries| entries.filter_map(|e| e.ok()).collect())
+            .unwrap_or_default();
+        std::fs::remove_file(&src).ok();
+        std::fs::remove_dir_all(&dest).ok();
+
+        assert!(
+            matches!(&err, BundleError::UnsupportedPlatform { declared, .. } if declared == &[other]),
+            "got {err:?}"
+        );
+        assert!(leftover_entries.is_empty(), "left {leftover_entries:?}");
     }
 
     #[test]

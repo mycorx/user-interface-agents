@@ -35,11 +35,10 @@ concurrency:
   cancel-in-progress: true
 
 jobs:
-  # Fails in seconds, before either build job allocates a runner -- and
-  # `windows-latest` bills at 2x while this repository is private, so a
-  # mistyped tag is worth catching for free.
+  # Fails in seconds, before either build job allocates a runner, so a
+  # mistyped tag is caught before a long build starts.
   version-gate:
-    runs-on: ubuntu-latest #mycorx-ubuntu
+    runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
       - run: ./scripts/tests/release-version/run-release-version-tests.sh
@@ -68,7 +67,7 @@ jobs:
   # Linux runner meant the MSI was never built or tested at all.
   create-release:
     needs: version-gate
-    runs-on: ubuntu-latest #mycorx-ubuntu
+    runs-on: ubuntu-latest
     permissions:
       contents: write
     outputs:
@@ -120,7 +119,7 @@ jobs:
 
   linux:
     needs: [version-gate, create-release]
-    runs-on: ubuntu-latest #mycorx-ubuntu
+    runs-on: ubuntu-latest
     permissions:
       contents: write
     steps:
@@ -197,8 +196,7 @@ jobs:
 
   windows:
     needs: [version-gate, create-release]
-    # GitHub-hosted: an MSI cannot be produced on the Linux self-hosted
-    # runner, and WiX only runs on Windows.
+    # An MSI cannot be produced on a Linux runner: WiX only runs on Windows.
     runs-on: windows-latest
     permissions:
       contents: write
@@ -244,10 +242,10 @@ jobs:
   # by double-clicking (docs/RELEASE.md). So nothing is built or attached
   # here; the job only leaves a visible note on the run that macOS users
   # build locally. It runs on Linux, not macOS, because it compiles nothing
-  # and a macOS runner bills at 10x while this repository is private.
+  # and needs no macOS tooling.
   macos-local-build-note:
     needs: version-gate
-    runs-on: ubuntu-latest #mycorx-ubuntu
+    runs-on: ubuntu-latest
     steps:
       - name: Point macOS users at the local build
         run: |

@@ -4,8 +4,8 @@ on:
     types: [opened, synchronize, reopened]
   workflow_dispatch:
 jobs:
-  test:
-    runs-on: ubuntu-latest #mycorx-ubuntu
+  test-ubuntu:
+    runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
       - uses: dtolnay/rust-toolchain@6bed0761d98439e5a578e2877258200ad565ba87 # stable
@@ -22,11 +22,11 @@ jobs:
       - run: cargo test --workspace
   # NOTICE.txt attributes every third-party dependency, so it has to be checked
   # against the real graph rather than trusted to whoever changed a manifest.
-  # Its own job because it needs pnpm and Node, which the `test` job does not
+  # Its own job because it needs pnpm and Node, which the `test-ubuntu` job does not
   # otherwise carry — and `pnpm licenses list` reads the installed store, so
   # node_modules must exist for the npm half to mean anything.
   notice:
-    runs-on: ubuntu-latest #mycorx-ubuntu
+    runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
       - uses: dtolnay/rust-toolchain@6bed0761d98439e5a578e2877258200ad565ba87 # stable
@@ -49,7 +49,7 @@ jobs:
   # shipped as a runtime "command not found".
   #
   # This is a compile check, not a test run: main.rs holds no tests, and the
-  # logic worth testing belongs in the lib, where the `test` job already runs
+  # logic worth testing belongs in the lib, where the `test-ubuntu` job already runs
   # it without a GUI toolchain. `--all-targets` so the bin, its tests and its
   # benches all typecheck.
   #
@@ -57,7 +57,7 @@ jobs:
   # libwebkit2gtk-4.1-dev alone is ~190 packages, which has no business on the
   # critical path.
   desktop-build:
-    runs-on: ubuntu-latest #mycorx-ubuntu
+    runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
       - uses: dtolnay/rust-toolchain@6bed0761d98439e5a578e2877258200ad565ba87 # stable
@@ -84,11 +84,11 @@ jobs:
       - run: cargo clippy -p uia-app --features desktop --all-targets -- -D warnings
 
   # `aec` is off by default because webrtc-audio-processing links a bundled
-  # C++ library needing meson + ninja + libclang, which the main `test` job's
+  # C++ library needing meson + ninja + libclang, which the main `test-ubuntu` job's
   # runner does not carry. Building it nowhere meant the whole path was
   # untested in CI. Its own job keeps that toolchain off the critical path.
   aec-feature:
-    runs-on: ubuntu-latest #mycorx-ubuntu
+    runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
       - uses: dtolnay/rust-toolchain@6bed0761d98439e5a578e2877258200ad565ba87 # stable
@@ -101,3 +101,67 @@ jobs:
           key: aec-feature
       - run: cargo build -p uia-audio --features aec
       - run: cargo test -p uia-audio --features aec
+
+  # Every job above runs on Linux, so code that only exists on another OS never
+  # compiled in CI: the `cfg(not(unix))` Windows branches, the Credential
+  # Manager and Keychain keyring backends, the per-OS echo cancellation
+  # (Voice Processing IO on macOS), and paths with backslashes. These two jobs
+  # run the same compile and test checks natively on each OS, so a change that
+  # only breaks one of them is caught on the PR instead of on a user's machine.
+  #
+  # Two jobs rather than a matrix so a failure names its OS in the checks list
+  # and each OS keeps its own cache key. The repository scripts (copyright
+  # headers, IPC event names, NOTICE, ...) stay in the Linux jobs above: they
+  # are platform-independent and need bash 4 / Python 3.11, which macOS does
+  # not ship.
+  #
+  # No apt-style system packages: GTK and WebKit are Linux-only, and tauri
+  # uses the OS's own webview on both of these. Standard GitHub-hosted runners
+  # are free for a public repository, so both run on every pull request.
+  test-windows:
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - uses: dtolnay/rust-toolchain@6bed0761d98439e5a578e2877258200ad565ba87 # stable
+      - uses: pnpm/action-setup@ea17c68df8912ef543352723c149a84f56e3d413 # v6.1.0
+      - uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7.0.0
+        with:
+          node-version: 24
+          cache: pnpm
+      - uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2.9.2
+        with:
+          key: test-windows
+      - run: pnpm install --frozen-lockfile
+      # `tauri::generate_context!()` embeds the frontend at compile time from
+      # the gitignored dist/ -- see `desktop-build` above.
+      - run: pnpm build
+      - run: cargo test --workspace
+      - run: cargo clippy --all-targets -- -D warnings
+      # Compiles main.rs and every #[tauri::command] against the Windows
+      # WebView2 bindings -- the code a user actually runs.
+      - run: cargo check -p uia-app --features desktop --all-targets
+      - run: cargo clippy -p uia-app --features desktop --all-targets -- -D warnings
+
+  # `macos-latest` is an Apple silicon runner. The release workflow's
+  # commented-out `macos` job builds the universal (Intel + Apple silicon)
+  # binary separately; this job only checks that the code builds and passes.
+  test-macos:
+    runs-on: macos-latest
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - uses: dtolnay/rust-toolchain@6bed0761d98439e5a578e2877258200ad565ba87 # stable
+      - uses: pnpm/action-setup@ea17c68df8912ef543352723c149a84f56e3d413 # v6.1.0
+      - uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7.0.0
+        with:
+          node-version: 24
+          cache: pnpm
+      - uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2.9.2
+        with:
+          key: test-macos
+      - run: pnpm install --frozen-lockfile
+      - run: pnpm build
+      - run: cargo test --workspace
+      - run: cargo clippy --all-targets -- -D warnings
+      # Compiles main.rs and every #[tauri::command] against WKWebView.
+      - run: cargo check -p uia-app --features desktop --all-targets
+      - run: cargo clippy -p uia-app --features desktop --all-targets -- -D warnings

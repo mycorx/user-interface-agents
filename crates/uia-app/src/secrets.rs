@@ -57,10 +57,32 @@ pub fn is_mcp_oauth_account(account: &str) -> bool {
         .is_some_and(|server| uia_mcp::validate_server_name(server).is_ok())
 }
 
+/// Prefix for per-local-server setting accounts: `mcp-config.<server>.<key>`,
+/// the home of a `.mcpb` manifest's `sensitive` `user_config` values.
+pub const MCP_CONFIG_ACCOUNT_PREFIX: &str = "mcp-config.";
+
+/// The account for one sensitive setting. Both parts pass the same
+/// `[A-Za-z0-9_-]` rule as a server name, so neither can contain the `.`
+/// separator and frontend input cannot name an arbitrary account.
+pub fn mcp_config_account(server: &str, key: &str) -> Result<String, SecretStoreError> {
+    let bad = |what: &str| SecretStoreError::UnknownAccount(format!("{what} is not a valid name"));
+    uia_mcp::validate_server_name(server).map_err(|_| bad("server"))?;
+    uia_mcp::validate_server_name(key).map_err(|_| bad("setting key"))?;
+    Ok(format!("{MCP_CONFIG_ACCOUNT_PREFIX}{server}.{key}"))
+}
+
+pub fn is_mcp_config_account(account: &str) -> bool {
+    account
+        .strip_prefix(MCP_CONFIG_ACCOUNT_PREFIX)
+        .and_then(|rest| rest.split_once('.'))
+        .is_some_and(|(server, key)| mcp_config_account(server, key).is_ok())
+}
+
 pub fn is_known_account(account: &str) -> bool {
     KNOWN_ACCOUNTS.contains(&account)
         || LEGACY_ACCOUNTS.contains(&account)
         || is_mcp_oauth_account(account)
+        || is_mcp_config_account(account)
 }
 
 /// The one piece of the Tauri command surface worth unit-testing directly -
@@ -224,6 +246,26 @@ mod tests {
         assert!(!is_known_account("mcp-oauth.../../secrets"));
         assert!(!is_known_account("mcp-oauth.has space"));
         assert!(validate_account("mcp-oauth./etc/passwd").is_err());
+    }
+
+    #[test]
+    fn a_server_setting_account_is_known_and_round_trips() {
+        let acct = mcp_config_account("mymy-assistant", "api_token").unwrap();
+        assert_eq!(acct, "mcp-config.mymy-assistant.api_token");
+        assert!(is_known_account(&acct));
+        assert!(validate_account(&acct).is_ok());
+    }
+
+    #[test]
+    fn traversal_shaped_or_empty_parts_are_not_accounts() {
+        assert!(mcp_config_account("a/b", "k").is_err());
+        assert!(mcp_config_account("srv", "../k").is_err());
+        assert!(mcp_config_account("srv", "").is_err());
+        assert!(mcp_config_account("", "k").is_err());
+        assert!(!is_known_account("mcp-config."));
+        assert!(!is_known_account("mcp-config.srv"));
+        assert!(!is_known_account("mcp-config.srv.a.b"));
+        assert!(!is_known_account("mcp-config.srv.a b"));
     }
 
     #[test]

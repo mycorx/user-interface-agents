@@ -61,6 +61,23 @@
     env_keys: string[];
   };
 
+  // Mirrors `uia_app::mcp_registry::ConfigFieldView`. A sensitive field
+  // never has `value`; `is_set` is all the backend will say about it.
+  type ConfigField = {
+    key: string;
+    kind: string;
+    title: string;
+    description: string | null;
+    required: boolean;
+    sensitive: boolean;
+    multiple: boolean;
+    min: number | null;
+    max: number | null;
+    default: string | null;
+    value: string | null;
+    is_set: boolean;
+  };
+
   // What the Status column shows. `pending` is the honest answer for a
   // server the running session never attempted — it is neither healthy nor
   // broken, and showing either would be a lie.
@@ -103,6 +120,11 @@
   // each, so fetching them all on mount would stat every installed bundle
   // just to draw the list. `string` is the failure reason.
   let localDetails = $state<Record<string, LocalServerDetails | string>>({});
+  // Per local server: its settings schema (`string` is the reason it could
+  // not be read), the text currently in each input, and the last save outcome.
+  let configFields = $state<Record<string, ConfigField[] | string>>({});
+  let configDraft = $state<Record<string, Record<string, string>>>({});
+  let configNote = $state<Record<string, { ok: boolean; text: string }>>({});
 
   let installError = $state<string | null>(null);
   let installing = $state(false);
@@ -217,6 +239,10 @@
   }
 
   async function toggleDetails(row: Row) {
+    // A note describes the last save of an earlier visit; drop it on both
+    // expand and collapse. Not in `loadConfig`, which runs right after a save
+    // and would erase the "Saved" it just set.
+    delete configNote[row.name];
     if (expanded === row.name) {
       expanded = null;
       return;
@@ -234,6 +260,107 @@
       });
     } catch (e) {
       localDetails[row.name] = String(e);
+    }
+    await loadConfig(row.name);
+  }
+
+  // Decided from the LOADED field, never the live draft, so the control does
+  // not change type while the user edits. A string setting whose DECLARED
+  // default is exactly `true`/`false` is a switch in disguise; it still stores
+  // that string. A stored value alone never makes a toggle: a switch cannot
+  // show "auto" or empty, so a free-text setting (default "auto", stored
+  // "true") would become impossible to set back.
+  //
+  // The reverse also holds: a stored value that is neither empty nor
+  // `true`/`false` (hand-edited `uia-mcp.json`, an older build) cannot be shown
+  // by a switch — it would read as "off" while the server is handed the odd
+  // text, and the next save would overwrite it unseen. Such a field falls back
+  // to a text box showing the real value, and becomes a switch again on the
+  // load after it is set back to `true`/`false`. `loadConfig` re-reads every
+  // time a row is expanded, so this is re-evaluated then, not only at restart.
+  function isToggleField(f: ConfigField): boolean {
+    if (f.value != null && f.value !== '' && f.value !== 'true' && f.value !== 'false') return false;
+    if (f.kind === 'boolean') return true;
+    if (f.kind !== 'string' || f.sensitive || f.multiple) return false;
+    return f.default === 'true' || f.default === 'false';
+  }
+
+  // Plain decimal only: `Number()` would also accept `0x10`, `0b1` and
+  // `Infinity`, which the backend then refuses.
+  const DECIMAL = /^[+-]?(\d+\.?\d*|\.\d+)([eE][+-]?\d+)?$/;
+
+  // `keepDraft` refreshes what the fields say (is a secret set?) without
+  // discarding what the user has typed into the others and not yet saved.
+  async function loadConfig(name: string, keepDraft = false) {
+    try {
+      const fields = await invoke<ConfigField[]>('get_mcp_local_server_config', { name });
+      configFields[name] = fields;
+      // A sensitive input starts empty: leaving it empty means "keep".
+      const fresh = Object.fromEntries(
+        fields.map((f) => [f.key, f.sensitive ? '' : (f.value ?? f.default ?? '')]),
+      );
+      const kept = keepDraft ? (configDraft[name] ?? {}) : {};
+      configDraft[name] = Object.fromEntries(
+        fields.map((f) => [f.key, f.key in kept ? kept[f.key] : fresh[f.key]]),
+      );
+    } catch (e) {
+      configFields[name] = String(e);
+    }
+  }
+
+  async function saveConfig(name: string) {
+    const fields = configFields[name];
+    if (typeof fields === 'string' || fields === undefined) return;
+    // A key left out of `values` is unchanged; `null` clears it.
+    const values: Record<string, string | null> = {};
+    for (const f of fields) {
+      // Every value goes over IPC as a string (the command takes strings), so
+      // coerce whatever the draft holds.
+      let text = String(configDraft[name][f.key] ?? '');
+      if (f.kind === 'number') text = text.trim();
+      if (f.sensitive && text === '') continue; // keep the stored secret
+      if (f.kind === 'number' && text !== '' && !DECIMAL.test(text)) {
+        configNote[name] = { ok: false, text: `${f.title}: "${text}" is not a number` };
+        return;
+      }
+      if (!f.sensitive && text === (f.default ?? null)) {
+        // Shown as a default, not chosen: store nothing (and clear any
+        // previously stored value).
+        values[f.key] = null;
+      } else if (text === '' && isToggleField(f) && f.default === null) {
+        // An unset toggle displays unchecked, so that is what it saves as.
+        values[f.key] = 'false';
+      } else {
+        values[f.key] = text === '' ? null : text;
+      }
+    }
+    try {
+      await invoke('set_mcp_local_server_config', { name, values });
+      configNote[name] = { ok: true, text: 'Saved. Restart UIA to apply.' };
+      onchange();
+      await loadConfig(name);
+    } catch (e) {
+      configNote[name] = { ok: false, text: String(e) };
+    }
+  }
+
+  async function clearSecret(name: string, key: string) {
+    try {
+      await invoke('set_mcp_local_server_config', { name, values: { [key]: null } });
+      configNote[name] = { ok: true, text: 'Removed. Restart UIA to apply.' };
+      onchange();
+    } catch (e) {
+      configNote[name] = { ok: false, text: String(e) };
+    }
+    await loadConfig(name, true);
+  }
+
+  async function pickPath(name: string, key: string, directory: boolean) {
+    try {
+      const chosen = await open({ directory, multiple: false });
+      if (typeof chosen === 'string') configDraft[name][key] = chosen;
+    } catch (e) {
+      configNote[name] = { ok: false, text: `Could not open the file picker: ${e}` };
     }
   }
 
@@ -681,6 +808,82 @@
                       Re-checked every launch, not just at install &mdash; this is what
                       would run now.
                     </p>
+                    {#if Array.isArray(configFields[row.name]) && (configFields[row.name] as ConfigField[]).length > 0}
+                      {@const cfgFields = configFields[row.name] as ConfigField[]}
+                      <p class="declaration-head"><strong>Configuration</strong></p>
+                      {#each cfgFields as f (f.key)}
+                        {@const inputId = `cfg-${row.name}-${f.key}`}
+                        <div class="field">
+                          <label for={inputId}>{f.title}{f.required ? ' *' : ''}</label>
+                          {#if isToggleField(f)}
+                            <input
+                              id={inputId}
+                              type="checkbox"
+                              role="switch"
+                              checked={configDraft[row.name]?.[f.key] === 'true'}
+                              onchange={(e) =>
+                                (configDraft[row.name][f.key] = e.currentTarget.checked
+                                  ? 'true'
+                                  : 'false')}
+                            />
+                          {:else if f.kind === 'directory' || f.kind === 'file'}
+                            <div class="cfg-row">
+                              <input
+                                id={inputId}
+                                type={f.sensitive ? 'password' : 'text'}
+                                autocomplete="off"
+                                placeholder={f.sensitive && f.is_set
+                                  ? '•••••••• (saved — type or browse to replace)'
+                                  : ''}
+                                bind:value={configDraft[row.name][f.key]}
+                              />
+                              <button
+                                type="button"
+                                onclick={() => pickPath(row.name, f.key, f.kind === 'directory')}
+                              >
+                                Browse&hellip;
+                              </button>
+                              {#if f.sensitive && f.is_set}
+                                <button type="button" onclick={() => clearSecret(row.name, f.key)}>
+                                  Remove
+                                </button>
+                              {/if}
+                            </div>
+                          {:else}
+                            <div class="cfg-row">
+                              <input
+                                id={inputId}
+                                type={f.sensitive ? 'password' : 'text'}
+                                inputmode={f.kind === 'number' ? 'decimal' : undefined}
+                                autocomplete="off"
+                                placeholder={f.sensitive && f.is_set
+                                  ? '•••••••• (saved — type to replace)'
+                                  : ''}
+                                bind:value={configDraft[row.name][f.key]}
+                              />
+                              {#if f.sensitive && f.is_set}
+                                <button type="button" onclick={() => clearSecret(row.name, f.key)}>
+                                  Remove
+                                </button>
+                              {/if}
+                            </div>
+                          {/if}
+                          {#if f.description}<p class="hint">{f.description}</p>{/if}
+                        </div>
+                      {/each}
+                      <div class="save-row">
+                        <button type="button" onclick={() => saveConfig(row.name)}>
+                          Save settings
+                        </button>
+                      </div>
+                      {#if configNote[row.name]}
+                        <p class={configNote[row.name].ok ? 'hint' : 'field-error'}>
+                          {configNote[row.name].text}
+                        </p>
+                      {/if}
+                    {:else if typeof configFields[row.name] === 'string'}
+                      <p class="hint">Settings unavailable: {configFields[row.name]}</p>
+                    {/if}
                   {/if}
                 </td>
               </tr>
@@ -1064,6 +1267,51 @@
     padding: 6px 10px;
   }
 
+  /* A native checkbox drawn as a switch: keyboard and checked semantics stay. */
+  .field input[role='switch'] {
+    appearance: none;
+    position: relative;
+    width: 32px;
+    height: 18px;
+    margin: 0;
+    border-radius: 9px;
+    background: rgba(255, 255, 255, 0.18);
+    cursor: pointer;
+    transition: background 0.15s ease;
+  }
+
+  .field input[role='switch']::before {
+    content: '';
+    position: absolute;
+    top: 2px;
+    left: 2px;
+    width: 14px;
+    height: 14px;
+    border-radius: 50%;
+    background: #fff;
+    transition: transform 0.15s ease;
+  }
+
+  .field input[role='switch']:checked {
+    background: var(--accent, #6ea8fe);
+  }
+
+  .field input[role='switch']:checked::before {
+    transform: translateX(14px);
+  }
+
+  .field input[role='switch']:focus-visible {
+    outline: 2px solid var(--accent, #6ea8fe);
+    outline-offset: 2px;
+  }
+
+  @media (prefers-reduced-motion: reduce) {
+    .field input[role='switch'],
+    .field input[role='switch']::before {
+      transition: none;
+    }
+  }
+
   .header-fields {
     display: grid;
     grid-template-columns: 1fr 1fr;
@@ -1366,6 +1614,13 @@
     color: #8890a0;
   }
 
+  /* A settings input with its Browse / Remove button beside it. */
+  .cfg-row {
+    display: flex;
+    align-items: center;
+    gap: 8px;
+  }
+
   .save-row {
     display: flex;
     align-items: center;
@@ -1373,6 +1628,7 @@
   }
 
   .save-row button,
+  .cfg-row button,
   .actions button {
     font: inherit;
     color: inherit;

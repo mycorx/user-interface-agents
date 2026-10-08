@@ -181,13 +181,41 @@ mod tests {
         );
     }
 
+    /// Tests run on parallel threads, and the clock only ticks in microseconds
+    /// on macOS, so a name built from the time alone is shared by tests that
+    /// start together — and they then truncate each other's key file.
+    #[test]
+    fn scratch_directories_are_unique_when_threads_start_together() {
+        const THREADS: usize = 16;
+        let barrier = std::sync::Arc::new(std::sync::Barrier::new(THREADS));
+        let handles: Vec<_> = (0..THREADS)
+            .map(|_| {
+                let barrier = barrier.clone();
+                std::thread::spawn(move || {
+                    barrier.wait();
+                    tempdir()
+                })
+            })
+            .collect();
+        let dirs: std::collections::HashSet<_> =
+            handles.into_iter().map(|h| h.join().unwrap()).collect();
+        assert_eq!(
+            dirs.len(),
+            THREADS,
+            "two threads were handed the same directory"
+        );
+    }
+
     /// A unique scratch directory; avoids a dev-dependency for four tests.
+    ///
+    /// Named from the process id and a counter, never the clock: parallel test
+    /// threads can read the same tick (macOS's is a microsecond), and two tests
+    /// sharing a directory share `gpt-api.key`, so one truncates it while the
+    /// other reads it.
     fn tempdir() -> std::path::PathBuf {
-        let n = std::time::SystemTime::now()
-            .duration_since(std::time::UNIX_EPOCH)
-            .unwrap()
-            .as_nanos();
-        let p = std::env::temp_dir().join(format!("uia-openai-creds-{n}"));
+        static COUNTER: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+        let n = COUNTER.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+        let p = std::env::temp_dir().join(format!("uia-openai-creds-{}-{n}", std::process::id()));
         std::fs::create_dir_all(&p).unwrap();
         p
     }

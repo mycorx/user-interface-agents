@@ -58,6 +58,18 @@ pub fn validate_bundle(
         return Err(BundleError::NotBinary(manifest.server.server_type.clone()));
     }
 
+    let declared = &manifest.compatibility.platforms;
+    if !declared.is_empty()
+        && !declared
+            .iter()
+            .any(|p| p.trim().eq_ignore_ascii_case(platform))
+    {
+        return Err(BundleError::UnsupportedPlatform {
+            declared: declared.clone(),
+            current: platform.to_string(),
+        });
+    }
+
     let dirname = bundle_dir.to_string_lossy().replace('\\', "/");
     let launch = resolve_launch(manifest, platform, &dirname)?;
 
@@ -65,6 +77,12 @@ pub fn validate_bundle(
     let resolved = normalize(&command);
     if !resolved.starts_with(normalize(bundle_dir)) {
         return Err(BundleError::EscapesBundle(launch.command.clone()));
+    }
+    // `user_config` is applied after validation, so a template left in the
+    // command would let a setting pick a different executable than the one
+    // approved here.
+    if launch.command.contains("${user_config.") {
+        return Err(BundleError::UserConfigInCommand(launch.command.clone()));
     }
 
     if let Some(ext) = resolved.extension().and_then(|e| e.to_str()) {
@@ -259,5 +277,85 @@ mod tests {
 
         std::fs::remove_dir_all(&dir).ok();
         assert!(matches!(err, BundleError::Name(_)), "got {err:?}");
+    }
+
+    /// `user_config` is applied AFTER validation, so a command that is only a
+    /// template can never be validated into existence: it resolves outside
+    /// the bundle. A user-set value must never get to choose the executable.
+    #[test]
+    fn a_command_that_is_only_a_user_config_reference_is_refused() {
+        let dir = bundle_with("server/probe", b"\x7fELF");
+        let m = manifest_for("binary", "${user_config.exe}");
+        let err = validate_bundle(&m, "linux", &dir).unwrap_err();
+        std::fs::remove_dir_all(&dir).ok();
+        assert!(matches!(err, BundleError::EscapesBundle(_)), "got {err:?}");
+    }
+
+    /// A template inside an otherwise in-bundle path would let a setting
+    /// choose the executable after validation approved a different one.
+    #[test]
+    fn a_command_that_contains_a_user_config_reference_is_refused() {
+        let dir = bundle_with("server/${user_config.x}", b"\x7fELF");
+        let m = manifest_for("binary", "${__dirname}/server/${user_config.x}");
+        let err = validate_bundle(&m, "linux", &dir).unwrap_err();
+        std::fs::remove_dir_all(&dir).ok();
+        assert!(
+            matches!(err, BundleError::UserConfigInCommand(_)),
+            "got {err:?}"
+        );
+    }
+
+    fn declaring(platforms: &[&str]) -> crate::bundle::McpbManifest {
+        let mut m = manifest_for("binary", "${__dirname}/server/probe");
+        m.compatibility.platforms = platforms.iter().map(|p| p.to_string()).collect();
+        m
+    }
+
+    #[test]
+    fn a_bundle_for_another_platform_is_refused_naming_both() {
+        let dir = bundle_with("server/probe", ELF);
+        let err = validate_bundle(&declaring(&["darwin"]), "linux", &dir).unwrap_err();
+        std::fs::remove_dir_all(&dir).ok();
+        assert!(
+            matches!(&err, BundleError::UnsupportedPlatform { declared, current }
+                if declared == &["darwin"] && current == "linux"),
+            "got {err:?}"
+        );
+        let msg = err.to_string();
+        assert!(msg.contains("darwin") && msg.contains("linux"), "{msg}");
+    }
+
+    #[test]
+    fn a_bundle_for_this_platform_passes_case_insensitively() {
+        let dir = bundle_with("server/probe", ELF);
+        let exact = validate_bundle(&declaring(&["darwin"]), "darwin", &dir);
+        let cased = validate_bundle(&declaring(&["Darwin"]), "darwin", &dir);
+        let several = validate_bundle(&declaring(&["win32", "darwin"]), "darwin", &dir);
+        let padded = validate_bundle(&declaring(&[" darwin\t"]), "darwin", &dir);
+        std::fs::remove_dir_all(&dir).ok();
+        assert!(exact.is_ok() && cased.is_ok() && several.is_ok() && padded.is_ok());
+    }
+
+    #[test]
+    fn a_bundle_declaring_no_platform_runs_everywhere() {
+        let dir = bundle_with("server/probe", ELF);
+        let m = manifest_for("binary", "${__dirname}/server/probe");
+        let results: Vec<_> = ["win32", "darwin", "linux"]
+            .iter()
+            .map(|p| validate_bundle(&m, p, &dir).is_ok())
+            .collect();
+        std::fs::remove_dir_all(&dir).ok();
+        assert_eq!(results, [true, true, true]);
+    }
+
+    #[test]
+    fn a_windows_bundle_is_refused_on_macos() {
+        let dir = bundle_with("server/probe", ELF);
+        let err = validate_bundle(&declaring(&["win32"]), "darwin", &dir).unwrap_err();
+        std::fs::remove_dir_all(&dir).ok();
+        assert!(
+            matches!(err, BundleError::UnsupportedPlatform { .. }),
+            "got {err:?}"
+        );
     }
 }

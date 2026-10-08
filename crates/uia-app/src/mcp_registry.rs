@@ -17,8 +17,9 @@
 //! `desktop` feature OFF, so anything that must be tested cannot live in
 //! `main.rs`. The `#[tauri::command]` wrappers there are glue over this.
 
+use crate::secrets::{SecretStore, mcp_config_account};
 use serde::{Deserialize, Serialize};
-use std::collections::HashMap;
+use std::collections::{BTreeMap, HashMap};
 use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex};
 use uia_mcp::McpServerConfig;
@@ -64,6 +65,15 @@ pub struct LocalServerEntry {
     pub version: Option<String>,
     #[serde(default)]
     pub enabled: bool,
+    /// Plain (non-sensitive) `user_config` values. Sensitive ones live only in
+    /// the OS keyring, never here.
+    #[serde(default)]
+    pub user_config: BTreeMap<String, String>,
+    /// Names (never values) of the sensitive settings that have a keyring
+    /// entry, so removing the server can delete them even when its manifest
+    /// is already gone.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub sensitive_keys: Vec<String>,
 }
 
 /// How a remote server authenticates. `Static` is a pasted header (the
@@ -297,6 +307,302 @@ pub fn describe_local_server(
     })
 }
 
+/// One field of a server's settings form. A sensitive field never carries its
+/// value — only whether one is stored.
+#[derive(Debug, Clone, PartialEq, Serialize)]
+pub struct ConfigFieldView {
+    pub key: String,
+    pub kind: String,
+    pub title: String,
+    pub description: Option<String>,
+    pub required: bool,
+    pub sensitive: bool,
+    pub multiple: bool,
+    pub min: Option<f64>,
+    pub max: Option<f64>,
+    pub default: Option<String>,
+    pub value: Option<String>,
+    pub is_set: bool,
+}
+
+type Fields = BTreeMap<String, uia_mcp::bundle::UserConfigField>;
+
+fn read_fields(local_servers_dir: &Path, name: &str) -> Result<Fields, String> {
+    let raw = std::fs::read_to_string(local_servers_dir.join(name).join("manifest.json"))
+        .map_err(|e| format!("its installed files are missing: {e}"))?;
+    uia_mcp::bundle::parse_manifest(&raw)
+        .map(|m| m.user_config)
+        .map_err(|e| format!("its manifest.json is unreadable: {e}"))
+}
+
+/// What `apply_user_config` will be given: plain values from the registry
+/// entry, sensitive ones from the keyring. A keyring that cannot answer reads
+/// as "unset", which `apply_user_config` then reports for a required field.
+pub fn local_config_values(
+    entry: &LocalServerEntry,
+    fields: &Fields,
+    secrets: &dyn SecretStore,
+) -> BTreeMap<String, String> {
+    let mut out = BTreeMap::new();
+    for (key, field) in fields {
+        let stored = if field.sensitive {
+            mcp_config_account(&entry.name, key)
+                .ok()
+                .and_then(|a| secrets.get(&a))
+        } else {
+            entry.user_config.get(key).cloned()
+        };
+        if let Some(v) = stored.filter(|v| !v.is_empty()) {
+            out.insert(key.clone(), v);
+        }
+    }
+    out
+}
+
+/// The MCPB path variables for this machine, for `expand_path_vars`.
+///
+/// A directory the OS cannot name is omitted rather than guessed, so the
+/// variable stays as written in the text instead of becoming a wrong path.
+/// The lookup lives here, not in `uia-mcp`, which has no `directories`.
+pub fn mcp_path_vars() -> BTreeMap<String, String> {
+    let mut vars = BTreeMap::new();
+    if let Some(dirs) = directories::UserDirs::new() {
+        let named = [
+            ("HOME", Some(dirs.home_dir())),
+            ("DESKTOP", dirs.desktop_dir()),
+            ("DOCUMENTS", dirs.document_dir()),
+            ("DOWNLOADS", dirs.download_dir()),
+        ];
+        for (name, dir) in named {
+            if let Some(dir) = dir {
+                vars.insert(name.to_string(), dir.to_string_lossy().into_owned());
+            }
+        }
+    }
+    for name in ["/", "pathSeparator"] {
+        vars.insert(name.to_string(), std::path::MAIN_SEPARATOR_STR.to_string());
+    }
+    vars
+}
+
+pub fn describe_local_config(
+    registry: &McpRegistry,
+    local_servers_dir: &Path,
+    secrets: &dyn SecretStore,
+    name: &str,
+) -> Result<Vec<ConfigFieldView>, String> {
+    let entry = registry
+        .local_servers
+        .iter()
+        .find(|s| s.name == name)
+        .ok_or_else(|| format!("no local server named {name:?} is installed"))?;
+    let fields = read_fields(local_servers_dir, name)?;
+    let values = local_config_values(entry, &fields, secrets);
+    let vars = mcp_path_vars();
+    Ok(fields
+        .into_iter()
+        .map(|(key, f)| {
+            let stored = values.get(&key).cloned();
+            ConfigFieldView {
+                title: f.title.clone().unwrap_or_else(|| key.clone()),
+                description: f.description.clone(),
+                required: f.required,
+                sensitive: f.sensitive,
+                multiple: f.multiple,
+                min: f.min,
+                max: f.max,
+                // What the server will actually get, so the form shows the real
+                // path rather than `${HOME}/...`.
+                default: f
+                    .default_text()
+                    .map(|d| uia_mcp::bundle::expand_path_vars(&d, &vars)),
+                is_set: stored.is_some(),
+                value: if f.sensitive { None } else { stored },
+                kind: if f.kind.is_empty() {
+                    "string".into()
+                } else {
+                    f.kind
+                },
+                key,
+            }
+        })
+        .collect())
+}
+
+fn check_value(key: &str, f: &uia_mcp::bundle::UserConfigField, v: &str) -> Result<(), String> {
+    match f.kind.as_str() {
+        "number" => {
+            let n: f64 = v
+                .trim()
+                .parse()
+                .map_err(|_| format!("{key}: the value is not a number"))?;
+            if !n.is_finite() {
+                return Err(format!("{key}: the value is not a finite number"));
+            }
+            if f.min.is_some_and(|m| n < m) || f.max.is_some_and(|m| n > m) {
+                return Err(format!("{key}: the value is outside the allowed range"));
+            }
+            Ok(())
+        }
+        "boolean" if v != "true" && v != "false" => Err(format!("{key}: expected true or false")),
+        _ => Ok(()),
+    }
+}
+
+/// Validates every change against the manifest, then writes: keyring first,
+/// registry second, so a keyring failure leaves the registry untouched.
+pub fn save_local_config(
+    registry_path: &Path,
+    local_servers_dir: &Path,
+    secrets: &dyn SecretStore,
+    name: &str,
+    changes: BTreeMap<String, Option<String>>,
+) -> Result<(), String> {
+    let mut registry = load(registry_path);
+    let entry = registry
+        .local_servers
+        .iter_mut()
+        .find(|s| s.name == name)
+        .ok_or_else(|| format!("no local server named {name:?} is installed"))?;
+    let fields = read_fields(local_servers_dir, name)?;
+
+    for (key, change) in &changes {
+        let f = fields
+            .get(key)
+            .ok_or_else(|| format!("{key}: this server declares no such setting"))?;
+        if let Some(v) = change.as_deref().filter(|v| !v.is_empty()) {
+            check_value(key, f, v)?;
+        }
+    }
+
+    // What the settings would be after this save, to enforce `required`.
+    let mut after = local_config_values(entry, &fields, secrets);
+    for (key, change) in &changes {
+        match change.as_deref().filter(|v| !v.is_empty()) {
+            Some(v) => {
+                after.insert(key.clone(), v.to_string());
+            }
+            None => {
+                after.remove(key);
+            }
+        }
+    }
+    for (key, f) in &fields {
+        if f.required && !after.contains_key(key) && f.default_text().is_none() {
+            return Err(format!("{key}: this setting is required"));
+        }
+    }
+
+    // Snapshot every sensitive key this save touches, so a failure part-way
+    // can put the keyring back exactly as it was.
+    let mut snapshot: Vec<(String, Option<String>)> = Vec::new();
+    let mut keyring_ops: Vec<(String, Option<String>)> = Vec::new();
+    for (key, change) in &changes {
+        if !fields[key].sensitive {
+            continue;
+        }
+        let account = mcp_config_account(name, key).map_err(|e| e.to_string())?;
+        snapshot.push((account.clone(), secrets.get(&account)));
+        keyring_ops.push((account, change.clone().filter(|v| !v.is_empty())));
+    }
+
+    let rollback = |why: String| -> String {
+        let mut failed = Vec::new();
+        for (account, prior) in &snapshot {
+            let restored = match prior {
+                Some(v) => secrets.set(account, v),
+                // Absent is already the desired state; deleting an absent
+                // entry is an error on the real keyring.
+                None if secrets.get(account).is_some() => secrets.delete(account),
+                None => Ok(()),
+            };
+            if let Err(e) = restored {
+                failed.push(format!("{account}: {e}"));
+            }
+        }
+        if failed.is_empty() {
+            why
+        } else {
+            format!(
+                "{why} (and restoring the previous keyring values failed: {})",
+                failed.join("; ")
+            )
+        }
+    };
+
+    for ((account, new), (_, prior)) in keyring_ops.iter().zip(&snapshot) {
+        let applied = match new {
+            Some(v) => secrets.set(account, v),
+            None if prior.is_some() => secrets.delete(account),
+            None => Ok(()),
+        };
+        if let Err(e) = applied {
+            return Err(rollback(e.to_string()));
+        }
+    }
+    for (key, change) in &changes {
+        if fields[key].sensitive {
+            let set = change.as_deref().is_some_and(|v| !v.is_empty());
+            entry.sensitive_keys.retain(|k| k != key);
+            if set {
+                entry.sensitive_keys.push(key.clone());
+            }
+            continue;
+        }
+        match change.as_deref().filter(|v| !v.is_empty()) {
+            Some(v) => {
+                entry.user_config.insert(key.clone(), v.to_string());
+            }
+            None => {
+                entry.user_config.remove(key);
+            }
+        }
+    }
+    save(registry_path, &registry).map_err(|e| rollback(e.to_string()))
+}
+
+/// Record first, credentials second, files last — the order
+/// `remove_remote_and_clear_credentials` uses, so a failure part-way cannot
+/// resurrect a server the user removed. The manifest is read up front: it is
+/// the other record of which keys have keyring entries.
+pub fn remove_local_server_and_clear_config(
+    registry_path: &Path,
+    local_servers_dir: &Path,
+    secrets: &dyn SecretStore,
+    name: &str,
+) -> Result<(), String> {
+    let mut registry = load(registry_path);
+    // The keys the record noted, plus whatever the manifest declares sensitive
+    // (an entry saved before the record existed has none noted).
+    let mut sensitive_keys: Vec<String> = registry
+        .local_servers
+        .iter()
+        .find(|s| s.name == name)
+        .map(|s| s.sensitive_keys.clone())
+        .unwrap_or_default();
+    if let Ok(fields) = read_fields(local_servers_dir, name) {
+        sensitive_keys.extend(
+            fields
+                .into_iter()
+                .filter(|(_, v)| v.sensitive)
+                .map(|(k, _)| k),
+        );
+    }
+    sensitive_keys.sort();
+    sensitive_keys.dedup();
+    registry
+        .remove_local_server(name)
+        .map_err(|e| e.to_string())?;
+    save(registry_path, &registry).map_err(|e| e.to_string())?;
+    for key in sensitive_keys {
+        if let Ok(account) = mcp_config_account(name, &key) {
+            let _ = secrets.delete(&account);
+        }
+    }
+    std::fs::remove_dir_all(local_servers_dir.join(name)).ok();
+    Ok(())
+}
+
 /// Removes a remote server and deletes any saved OAuth sign-in with it.
 ///
 /// The two halves belong together. Removing only the record left the access
@@ -401,6 +707,8 @@ impl McpRegistry {
             name,
             version,
             enabled: false,
+            user_config: BTreeMap::new(),
+            ..Default::default()
         });
         Ok(())
     }
@@ -1014,7 +1322,6 @@ mod tests {
     use super::*;
     // The trait, for its `get`/`set` on `FakeSecretStore` below -- the module
     // itself only ever names it as `dyn crate::secrets::SecretStore`.
-    use crate::secrets::SecretStore as _;
 
     fn temp_path(label: &str) -> PathBuf {
         let dir = std::env::temp_dir().join(format!("uia-reg-{}-{label}", std::process::id()));
@@ -1064,6 +1371,8 @@ mod tests {
                 name: name.into(),
                 version: Some("1.0.0".into()),
                 enabled: true,
+                user_config: BTreeMap::new(),
+                ..Default::default()
             }],
             remote_servers: vec![],
         }
@@ -1328,6 +1637,8 @@ mod tests {
                 name: "clock".into(),
                 version: Some("1.4.0".into()),
                 enabled: true,
+                user_config: BTreeMap::new(),
+                ..Default::default()
             }],
             remote_servers: vec![remote("docs")],
         };
@@ -1349,11 +1660,15 @@ mod tests {
                     name: "clock".into(),
                     version: None,
                     enabled: false,
+                    user_config: BTreeMap::new(),
+                    ..Default::default()
                 },
                 LocalServerEntry {
                     name: "files".into(),
                     version: None,
                     enabled: false,
+                    user_config: BTreeMap::new(),
+                    ..Default::default()
                 },
             ],
             remote_servers: vec![],
@@ -1515,6 +1830,8 @@ mod tests {
                 name: "docs".into(),
                 version: None,
                 enabled: false,
+                user_config: BTreeMap::new(),
+                ..Default::default()
             }],
             remote_servers: vec![],
         };
@@ -2224,5 +2541,601 @@ mod tests {
             "the stale session for the old url must have been dropped, not left pending \
              alongside the new one"
         );
+    }
+}
+
+#[cfg(test)]
+mod config_tests {
+    use super::*;
+    use crate::secrets::FakeSecretStore;
+
+    const MANIFEST: &str = r#"{
+        "manifest_version": "0.3", "name": "mymy", "version": "1.0.0",
+        "server": { "type": "binary", "entry_point": "server/x",
+            "mcp_config": { "command": "${__dirname}/server/x" } },
+        "user_config": {
+            "toasts": { "type": "string", "title": "Toasts", "default": "true" },
+            "token":  { "type": "string", "sensitive": true, "required": true },
+            "retries": { "type": "number", "min": 0, "max": 5 },
+            "verbose": { "type": "boolean" }
+        }
+    }"#;
+
+    struct Fx {
+        dir: PathBuf,
+        servers: PathBuf,
+        registry: PathBuf,
+    }
+
+    fn fixture(label: &str) -> Fx {
+        let dir = std::env::temp_dir().join(format!("uia-cfg-{}-{label}", std::process::id()));
+        std::fs::remove_dir_all(&dir).ok();
+        let servers = dir.join("mcp-local-servers");
+        std::fs::create_dir_all(servers.join("mymy")).unwrap();
+        std::fs::write(servers.join("mymy").join("manifest.json"), MANIFEST).unwrap();
+        let registry = dir.join("uia-mcp.json");
+        let mut r = McpRegistry::default();
+        r.add_local_server("mymy".into(), Some("1.0.0".into()))
+            .unwrap();
+        save(&registry, &r).unwrap();
+        Fx {
+            dir,
+            servers,
+            registry,
+        }
+    }
+
+    fn changes(pairs: &[(&str, Option<&str>)]) -> BTreeMap<String, Option<String>> {
+        pairs
+            .iter()
+            .map(|(k, v)| (k.to_string(), v.map(str::to_string)))
+            .collect()
+    }
+
+    #[test]
+    fn path_vars_carry_the_separators_and_the_home_directory() {
+        let vars = mcp_path_vars();
+        assert_eq!(
+            vars.get("/").map(String::as_str),
+            Some(std::path::MAIN_SEPARATOR_STR)
+        );
+        assert_eq!(
+            vars.get("pathSeparator").map(String::as_str),
+            Some(std::path::MAIN_SEPARATOR_STR)
+        );
+        if let Some(dirs) = directories::UserDirs::new() {
+            assert_eq!(
+                vars.get("HOME").map(String::as_str),
+                Some(dirs.home_dir().to_string_lossy().as_ref())
+            );
+        }
+    }
+
+    #[test]
+    fn the_settings_form_shows_the_default_with_path_variables_expanded() {
+        let fx = fixture("pathdefault");
+        std::fs::write(
+            fx.servers.join("mymy").join("manifest.json"),
+            r#"{"manifest_version":"0.3","name":"mymy","version":"1",
+                "server":{"type":"binary","entry_point":"server/mymy"},
+                "user_config":{"root":{"type":"directory","default":"${HOME}/x"}}}"#,
+        )
+        .unwrap();
+        let secrets = FakeSecretStore::new();
+        let view =
+            describe_local_config(&load(&fx.registry), &fx.servers, &secrets, "mymy").unwrap();
+        std::fs::remove_dir_all(&fx.dir).ok();
+        let Some(home) = mcp_path_vars().get("HOME").cloned() else {
+            eprintln!("skipped: no home directory in this environment");
+            return;
+        };
+        assert_eq!(view[0].default, Some(format!("{home}/x")));
+    }
+
+    #[test]
+    fn an_old_registry_file_without_user_config_still_loads() {
+        let raw =
+            r#"{"local_servers":[{"name":"a","version":"1","enabled":true}],"remote_servers":[]}"#;
+        let r: McpRegistry = serde_json::from_str(raw).unwrap();
+        assert!(r.local_servers[0].user_config.is_empty());
+    }
+
+    #[test]
+    fn plain_values_land_in_the_registry_and_secrets_land_only_in_the_keyring() {
+        let fx = fixture("split");
+        let secrets = FakeSecretStore::new();
+        save_local_config(
+            &fx.registry,
+            &fx.servers,
+            &secrets,
+            "mymy",
+            changes(&[
+                ("toasts", Some("false")),
+                ("token", Some("sekret-123")),
+                ("retries", Some("3")),
+            ]),
+        )
+        .unwrap();
+
+        let file = std::fs::read_to_string(&fx.registry).unwrap();
+        assert!(file.contains("\"toasts\""), "{file}");
+        assert!(
+            !file.contains("sekret-123"),
+            "secret leaked into the registry: {file}"
+        );
+        assert_eq!(
+            secrets.get("mcp-config.mymy.token").as_deref(),
+            Some("sekret-123")
+        );
+
+        let view =
+            describe_local_config(&load(&fx.registry), &fx.servers, &secrets, "mymy").unwrap();
+        let token = view.iter().find(|f| f.key == "token").unwrap();
+        assert!(token.is_set);
+        assert_eq!(
+            token.value, None,
+            "a sensitive value must never be returned"
+        );
+        let toasts = view.iter().find(|f| f.key == "toasts").unwrap();
+        assert_eq!(toasts.value.as_deref(), Some("false"));
+        assert_eq!(toasts.default.as_deref(), Some("true"));
+        std::fs::remove_dir_all(&fx.dir).ok();
+    }
+
+    #[test]
+    fn a_key_the_manifest_does_not_declare_is_rejected_and_nothing_is_written() {
+        let fx = fixture("undeclared");
+        let secrets = FakeSecretStore::new();
+        let before = std::fs::read_to_string(&fx.registry).unwrap();
+        let err = save_local_config(
+            &fx.registry,
+            &fx.servers,
+            &secrets,
+            "mymy",
+            changes(&[("token", Some("t")), ("nope", Some("x"))]),
+        )
+        .unwrap_err();
+        assert!(err.contains("nope"), "{err}");
+        assert_eq!(std::fs::read_to_string(&fx.registry).unwrap(), before);
+        assert_eq!(
+            secrets.get("mcp-config.mymy.token"),
+            None,
+            "secret written despite rejection"
+        );
+        std::fs::remove_dir_all(&fx.dir).ok();
+    }
+
+    #[test]
+    fn values_are_checked_against_their_declared_type_and_range() {
+        let fx = fixture("types");
+        let secrets = FakeSecretStore::new();
+        for (key, bad) in [("retries", "9"), ("retries", "abc"), ("verbose", "yes")] {
+            let err = save_local_config(
+                &fx.registry,
+                &fx.servers,
+                &secrets,
+                "mymy",
+                changes(&[("token", Some("t")), (key, Some(bad))]),
+            )
+            .unwrap_err();
+            assert!(err.contains(key), "{key}={bad}: {err}");
+            assert!(!err.contains(bad), "the error echoed the value: {err}");
+        }
+        std::fs::remove_dir_all(&fx.dir).ok();
+    }
+
+    #[test]
+    fn saving_without_a_required_value_is_refused() {
+        let fx = fixture("required");
+        let secrets = FakeSecretStore::new();
+        let err = save_local_config(
+            &fx.registry,
+            &fx.servers,
+            &secrets,
+            "mymy",
+            changes(&[("toasts", Some("true"))]),
+        )
+        .unwrap_err();
+        assert!(err.contains("token"), "{err}");
+        std::fs::remove_dir_all(&fx.dir).ok();
+    }
+
+    #[test]
+    fn an_omitted_secret_is_kept_and_a_null_secret_is_cleared() {
+        let fx = fixture("keep");
+        let secrets = FakeSecretStore::new();
+        save_local_config(
+            &fx.registry,
+            &fx.servers,
+            &secrets,
+            "mymy",
+            changes(&[("token", Some("t1"))]),
+        )
+        .unwrap();
+        save_local_config(
+            &fx.registry,
+            &fx.servers,
+            &secrets,
+            "mymy",
+            changes(&[("toasts", Some("false"))]),
+        )
+        .unwrap();
+        assert_eq!(secrets.get("mcp-config.mymy.token").as_deref(), Some("t1"));
+        // Clearing a required secret is refused (it has no default)...
+        assert!(
+            save_local_config(
+                &fx.registry,
+                &fx.servers,
+                &secrets,
+                "mymy",
+                changes(&[("token", None)])
+            )
+            .is_err()
+        );
+        assert_eq!(secrets.get("mcp-config.mymy.token").as_deref(), Some("t1"));
+        std::fs::remove_dir_all(&fx.dir).ok();
+    }
+
+    #[test]
+    fn local_config_values_reads_plain_from_the_entry_and_secrets_from_the_keyring() {
+        let fx = fixture("values");
+        let secrets = FakeSecretStore::new();
+        save_local_config(
+            &fx.registry,
+            &fx.servers,
+            &secrets,
+            "mymy",
+            changes(&[("token", Some("t")), ("toasts", Some("false"))]),
+        )
+        .unwrap();
+        let reg = load(&fx.registry);
+        let fields = uia_mcp::bundle::parse_manifest(MANIFEST)
+            .unwrap()
+            .user_config;
+        let v = local_config_values(&reg.local_servers[0], &fields, &secrets);
+        assert_eq!(v.get("token").map(String::as_str), Some("t"));
+        assert_eq!(v.get("toasts").map(String::as_str), Some("false"));
+        std::fs::remove_dir_all(&fx.dir).ok();
+    }
+
+    #[test]
+    fn removing_a_server_clears_its_keyring_entries_and_its_files() {
+        let fx = fixture("remove");
+        let secrets = FakeSecretStore::new();
+        save_local_config(
+            &fx.registry,
+            &fx.servers,
+            &secrets,
+            "mymy",
+            changes(&[("token", Some("t"))]),
+        )
+        .unwrap();
+        remove_local_server_and_clear_config(&fx.registry, &fx.servers, &secrets, "mymy").unwrap();
+        assert!(load(&fx.registry).local_servers.is_empty());
+        assert_eq!(secrets.get("mcp-config.mymy.token"), None);
+        assert!(!fx.servers.join("mymy").exists());
+        std::fs::remove_dir_all(&fx.dir).ok();
+    }
+
+    #[test]
+    fn removing_a_server_with_no_manifest_still_clears_its_secrets() {
+        let fx = fixture("remove-no-manifest");
+        let secrets = FakeSecretStore::new();
+        save_local_config(
+            &fx.registry,
+            &fx.servers,
+            &secrets,
+            "mymy",
+            changes(&[("token", Some("t"))]),
+        )
+        .unwrap();
+        assert_eq!(
+            load(&fx.registry).local_servers[0].sensitive_keys,
+            ["token"]
+        );
+        std::fs::remove_file(fx.servers.join("mymy").join("manifest.json")).unwrap();
+        remove_local_server_and_clear_config(&fx.registry, &fx.servers, &secrets, "mymy").unwrap();
+        assert_eq!(secrets.get("mcp-config.mymy.token"), None);
+        std::fs::remove_dir_all(&fx.dir).ok();
+    }
+
+    #[test]
+    fn a_saved_secret_is_recorded_by_name_only() {
+        let fx = fixture("sensitive-keys");
+        let secrets = FakeSecretStore::new();
+        save_local_config(
+            &fx.registry,
+            &fx.servers,
+            &secrets,
+            "mymy",
+            changes(&[("token", Some("s3cret-value"))]),
+        )
+        .unwrap();
+        let raw = std::fs::read_to_string(&fx.registry).unwrap();
+        assert!(
+            raw.contains("token") && !raw.contains("s3cret-value"),
+            "{raw}"
+        );
+        save_local_config(
+            &fx.registry,
+            &fx.servers,
+            &secrets,
+            "mymy",
+            changes(&[("token", None)]),
+        )
+        .ok();
+        std::fs::remove_dir_all(&fx.dir).ok();
+    }
+
+    const MANIFEST2: &str = r#"{
+        "manifest_version": "0.3", "name": "mymy", "version": "1.0.0",
+        "server": { "type": "binary", "entry_point": "server/x",
+            "mcp_config": { "command": "${__dirname}/server/x" } },
+        "user_config": {
+            "a": { "type": "string", "sensitive": true },
+            "b": { "type": "string", "sensitive": true },
+            "note": { "type": "string" },
+            "region": { "type": "string", "required": true, "default": "eu" }
+        }
+    }"#;
+
+    fn fixture2(label: &str) -> Fx {
+        let fx = fixture(label);
+        std::fs::write(fx.servers.join("mymy").join("manifest.json"), MANIFEST2).unwrap();
+        fx
+    }
+
+    /// Delegates to a `FakeSecretStore` but fails the Nth `set` (1-based) and,
+    /// optionally, every `delete` of one account.
+    struct FailingStore {
+        inner: FakeSecretStore,
+        sets: std::sync::atomic::AtomicUsize,
+        fail_set_on_nth: usize,
+        fail_delete_of: Option<String>,
+        /// Like the real OS keyring: deleting an absent entry is an error.
+        strict_delete: bool,
+    }
+
+    impl FailingStore {
+        fn new(fail_set_on_nth: usize, fail_delete_of: Option<&str>) -> Self {
+            Self {
+                inner: FakeSecretStore::new(),
+                sets: std::sync::atomic::AtomicUsize::new(0),
+                fail_set_on_nth,
+                fail_delete_of: fail_delete_of.map(str::to_string),
+                strict_delete: false,
+            }
+        }
+    }
+
+    impl SecretStore for FailingStore {
+        fn get(&self, account: &str) -> Option<String> {
+            self.inner.get(account)
+        }
+        fn set(&self, account: &str, value: &str) -> Result<(), crate::secrets::SecretStoreError> {
+            let n = self.sets.fetch_add(1, std::sync::atomic::Ordering::SeqCst) + 1;
+            if n == self.fail_set_on_nth {
+                return Err(crate::secrets::SecretStoreError::Backend("boom".into()));
+            }
+            self.inner.set(account, value)
+        }
+        fn delete(&self, account: &str) -> Result<(), crate::secrets::SecretStoreError> {
+            if self.fail_delete_of.as_deref() == Some(account) {
+                return Err(crate::secrets::SecretStoreError::Backend(
+                    "no delete".into(),
+                ));
+            }
+            if self.strict_delete && self.inner.get(account).is_none() {
+                return Err(crate::secrets::SecretStoreError::Backend(
+                    "no such entry".into(),
+                ));
+            }
+            self.inner.delete(account)
+        }
+    }
+
+    #[test]
+    fn a_failing_second_secret_write_restores_the_first_to_unset_and_leaves_the_registry_alone() {
+        let fx = fixture2("rb-unset");
+        let secrets = FailingStore::new(2, None);
+        let before = std::fs::read_to_string(&fx.registry).unwrap();
+        let err = save_local_config(
+            &fx.registry,
+            &fx.servers,
+            &secrets,
+            "mymy",
+            changes(&[("a", Some("A2")), ("b", Some("B2")), ("note", Some("n"))]),
+        )
+        .unwrap_err();
+        assert!(err.contains("boom"), "{err}");
+        assert_eq!(secrets.get("mcp-config.mymy.a"), None);
+        assert_eq!(secrets.get("mcp-config.mymy.b"), None);
+        assert_eq!(std::fs::read_to_string(&fx.registry).unwrap(), before);
+        std::fs::remove_dir_all(&fx.dir).ok();
+    }
+
+    #[test]
+    fn a_failing_second_secret_write_restores_the_first_to_its_prior_value() {
+        let fx = fixture2("rb-prior");
+        // fail on the 3rd set: the first save's `a` is set #1, this save's `a` #2, `b` #3.
+        let secrets = FailingStore::new(3, None);
+        save_local_config(
+            &fx.registry,
+            &fx.servers,
+            &secrets,
+            "mymy",
+            changes(&[("a", Some("A1"))]),
+        )
+        .unwrap();
+        let before = std::fs::read_to_string(&fx.registry).unwrap();
+        let err = save_local_config(
+            &fx.registry,
+            &fx.servers,
+            &secrets,
+            "mymy",
+            changes(&[("a", Some("A2")), ("b", Some("B2")), ("note", Some("n"))]),
+        )
+        .unwrap_err();
+        assert!(err.contains("boom"), "{err}");
+        assert_eq!(secrets.get("mcp-config.mymy.a").as_deref(), Some("A1"));
+        assert_eq!(secrets.get("mcp-config.mymy.b"), None);
+        assert_eq!(std::fs::read_to_string(&fx.registry).unwrap(), before);
+        std::fs::remove_dir_all(&fx.dir).ok();
+    }
+
+    #[test]
+    fn a_failing_delete_is_surfaced_and_earlier_changes_are_restored() {
+        let fx = fixture2("rb-delete");
+        let secrets = FailingStore::new(usize::MAX, Some("mcp-config.mymy.b"));
+        secrets.inner.set("mcp-config.mymy.a", "A1").unwrap();
+        secrets.inner.set("mcp-config.mymy.b", "B1").unwrap();
+        let err = save_local_config(
+            &fx.registry,
+            &fx.servers,
+            &secrets,
+            "mymy",
+            changes(&[("a", Some("A2")), ("b", None)]),
+        )
+        .unwrap_err();
+        assert!(err.contains("no delete"), "{err}");
+        assert_eq!(secrets.get("mcp-config.mymy.a").as_deref(), Some("A1"));
+        assert_eq!(secrets.get("mcp-config.mymy.b").as_deref(), Some("B1"));
+        std::fs::remove_dir_all(&fx.dir).ok();
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn a_failing_registry_write_restores_the_keyring() {
+        use std::os::unix::fs::PermissionsExt;
+        let fx = fixture2("rb-registry");
+        let secrets = FakeSecretStore::new();
+        secrets.set("mcp-config.mymy.a", "A1").unwrap();
+        let before = std::fs::read_to_string(&fx.registry).unwrap();
+        std::fs::set_permissions(&fx.registry, std::fs::Permissions::from_mode(0o444)).unwrap();
+        if std::fs::OpenOptions::new()
+            .append(true)
+            .open(&fx.registry)
+            .is_ok()
+        {
+            // Privileged enough (root) to ignore the mode: the write cannot be
+            // made to fail this way, so there is nothing to prove.
+            std::fs::remove_dir_all(&fx.dir).ok();
+            return;
+        }
+        let err = save_local_config(
+            &fx.registry,
+            &fx.servers,
+            &secrets,
+            "mymy",
+            changes(&[("a", Some("A2")), ("b", Some("B2")), ("note", Some("n"))]),
+        )
+        .unwrap_err();
+        std::fs::set_permissions(&fx.registry, std::fs::Permissions::from_mode(0o644)).unwrap();
+        assert!(!err.is_empty());
+        assert_eq!(secrets.get("mcp-config.mymy.a").as_deref(), Some("A1"));
+        assert_eq!(secrets.get("mcp-config.mymy.b"), None);
+        assert_eq!(std::fs::read_to_string(&fx.registry).unwrap(), before);
+        std::fs::remove_dir_all(&fx.dir).ok();
+    }
+
+    #[test]
+    fn clearing_a_non_required_secret_deletes_it_and_clearing_a_plain_value_removes_it() {
+        let fx = fixture2("clear");
+        let secrets = FakeSecretStore::new();
+        save_local_config(
+            &fx.registry,
+            &fx.servers,
+            &secrets,
+            "mymy",
+            changes(&[("a", Some("A1")), ("note", Some("n"))]),
+        )
+        .unwrap();
+        assert_eq!(secrets.get("mcp-config.mymy.a").as_deref(), Some("A1"));
+        assert_eq!(
+            load(&fx.registry).local_servers[0]
+                .user_config
+                .get("note")
+                .map(String::as_str),
+            Some("n")
+        );
+        save_local_config(
+            &fx.registry,
+            &fx.servers,
+            &secrets,
+            "mymy",
+            changes(&[("a", None), ("note", Some(""))]),
+        )
+        .unwrap();
+        assert_eq!(secrets.get("mcp-config.mymy.a"), None);
+        assert!(load(&fx.registry).local_servers[0].user_config.is_empty());
+        std::fs::remove_dir_all(&fx.dir).ok();
+    }
+
+    #[test]
+    fn non_finite_numbers_are_rejected_and_the_range_bounds_are_inclusive() {
+        let fx = fixture("numbers");
+        let secrets = FakeSecretStore::new();
+        for bad in ["NaN", "inf", "-inf", "infinity"] {
+            let err = save_local_config(
+                &fx.registry,
+                &fx.servers,
+                &secrets,
+                "mymy",
+                changes(&[("token", Some("t")), ("retries", Some(bad))]),
+            )
+            .unwrap_err();
+            assert!(err.contains("retries"), "{bad}: {err}");
+        }
+        for ok in ["0", "5"] {
+            save_local_config(
+                &fx.registry,
+                &fx.servers,
+                &secrets,
+                "mymy",
+                changes(&[("token", Some("t")), ("retries", Some(ok))]),
+            )
+            .unwrap();
+        }
+        std::fs::remove_dir_all(&fx.dir).ok();
+    }
+
+    #[test]
+    fn a_required_field_with_a_default_needs_no_value() {
+        let fx = fixture2("default");
+        let secrets = FakeSecretStore::new();
+        save_local_config(
+            &fx.registry,
+            &fx.servers,
+            &secrets,
+            "mymy",
+            changes(&[("note", Some("n"))]),
+        )
+        .unwrap();
+        std::fs::remove_dir_all(&fx.dir).ok();
+    }
+
+    #[test]
+    fn rolling_back_never_deletes_an_entry_that_was_never_written() {
+        let fx = fixture2("rb-strict");
+        let mut secrets = FailingStore::new(2, None);
+        secrets.strict_delete = true;
+        let before = std::fs::read_to_string(&fx.registry).unwrap();
+        let err = save_local_config(
+            &fx.registry,
+            &fx.servers,
+            &secrets,
+            "mymy",
+            changes(&[("a", Some("A2")), ("b", Some("B2"))]),
+        )
+        .unwrap_err();
+        assert!(err.contains("boom"), "{err}");
+        assert!(
+            !err.contains("restor"),
+            "a spurious rollback failure was reported: {err}"
+        );
+        assert_eq!(secrets.get("mcp-config.mymy.a"), None);
+        assert_eq!(secrets.get("mcp-config.mymy.b"), None);
+        assert_eq!(std::fs::read_to_string(&fx.registry).unwrap(), before);
+        std::fs::remove_dir_all(&fx.dir).ok();
     }
 }
