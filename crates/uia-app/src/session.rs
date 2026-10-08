@@ -380,10 +380,10 @@ pub fn mcp_targets(
                 continue;
             }
         };
-        // Deliberately `validate_bundle`, not `resolve_launch`: the four
-        // trust checks run again on EVERY launch, not just at install. The
-        // manifest is a file in the config directory, and anything that can
-        // write one file there afterwards — another app, a restored or
+        // Deliberately `validate_bundle`, not `resolve_launch`: the platform
+        // refusal and the four trust checks run again on EVERY launch, not
+        // just at install. The manifest is a file in the config directory,
+        // and anything that can write one file there afterwards — another app, a restored or
         // synced config folder, the server's own binary rewriting its own
         // manifest — could otherwise turn an approved local server into
         // `command: "cmd.exe"` with nothing to stop it. "We already

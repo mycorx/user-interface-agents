@@ -490,7 +490,9 @@ the execute bit and do not apply on Windows.
 
 - [ ] Install a bundle whose binary lacks the execute bit (for example
       `chmod -x` it before zipping). Enabling it reaches **Connected**.
-- [ ] On an already-installed bundle, `chmod -x` the installed binary, then
+- [ ] On an already-installed bundle, `chmod -x` the installed binary (in the config directory, at
+      `mcp-local-servers/<name>/<entry point from manifest.json>`, next to
+      `uia-mcp.json`), then
       restart. It still starts.
 
 ### A server that fails at startup

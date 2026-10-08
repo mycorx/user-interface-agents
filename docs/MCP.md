@@ -77,7 +77,8 @@ uninstallable, and none of those fields affect what gets executed.
 
 ### Validation (`crates/uia-mcp/src/bundle/validate.rs`)
 
-Four checks, deliberately overlapping — no single one is trusted alone:
+A platform-compatibility refusal runs first (it is not a trust check), then
+four trust checks, deliberately overlapping — no single one is trusted alone:
 
 1. **`server.type` must be `"binary"`.** The bundle's own claim.
 2. **The resolved command must stay inside the extracted bundle directory**
@@ -271,15 +272,22 @@ reason ends with `; the server printed: <tail>`. The tail is:
   and the whole tail cut to 600 characters keeping the end, so the last lines
   survive;
 - stripped of ANSI escape sequences and control characters (tab is kept);
-- redacted: every launch environment value of 8 or more characters,
-  including keyring-backed `user_config` settings, is replaced by
-  `<redacted>`, both in the stored tail and in the terminal echo below.
+- redacted: every launch environment value, every argument, and the value
+  after `=` in a `--flag=value` argument, each of 8 or more characters, is
+  replaced by `<redacted>`, both in the stored tail and in the terminal echo
+  below. This includes keyring-backed `user_config` settings, which can be
+  substituted into either.
 
 The limits:
 
 - Values shorter than 8 characters are not redacted (they would mangle words
   such as `true`), and neither is a secret the server transforms before
   printing it (base64-encoded, truncated, split across lines).
+- Redaction is by length, not by knowing what is secret, so a long value that
+  is not secret (a file path, a home-location string) is replaced too and a
+  message can read "cannot open <redacted>".
+- On Windows, a server that writes in the console's code page (non-UTF-8, for
+  example localized error text) shows replacement characters.
 - Only startup failures are annotated: the tail is read after waiting up to
   500 ms for the stream to end following the failure. A server that dies later
   adds nothing in Settings.
