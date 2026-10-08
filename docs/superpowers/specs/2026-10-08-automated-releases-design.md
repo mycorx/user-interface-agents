@@ -358,5 +358,5 @@ All resolved:
 - the smoke test uses installer metadata plus a `--smoke` early-exit flag.
 
 Setup task for the admin, outside the code: create the App, install it on this
-repo, and add its id and private key as repo secrets (`RELEASE_APP_ID`,
+repo, and add its client id and private key as repo secrets (`RELEASE_APP_CLIENT_ID`,
 `RELEASE_APP_PRIVATE_KEY`). The implementation plan lists the exact steps.

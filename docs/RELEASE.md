@@ -118,16 +118,14 @@ rehearse a release.
 
 ## First-time setup (one admin, once)
 
-1. **GitHub App.** Create an org-owned App with *Contents: read & write* and
-   *Pull requests: read*, install it on this repository, and store its id and a
-   generated private key as repository secrets `RELEASE_APP_ID` and
-   `RELEASE_APP_PRIVATE_KEY`. It is needed because pushes made with
-   `GITHUB_TOKEN` do not trigger workflows, so a bump commit would never get its
-   required checks. The commit email `uia-release-bot@users.noreply.github.com`
-   (in `release-bump.yaml` and renovate's `gitIgnoredAuthors`) is a placeholder
-   identity that GitHub resolves to whoever registers that login. Once the App
-   exists, switch both to its real bot noreply address,
-   `<bot-user-id>+<app-slug>[bot]@users.noreply.github.com`.
+1. **GitHub App.** The org-owned App `automated-release` needs *Contents:
+   read & write* and *Pull requests: read* (nothing else), installed on this
+   repository. Store its **client ID** and a generated private key as repository
+   secrets `RELEASE_APP_CLIENT_ID` and `RELEASE_APP_PRIVATE_KEY`. It is needed
+   because pushes made with `GITHUB_TOKEN` do not trigger workflows, so a bump
+   commit would never get its required checks. Bump commits are authored as
+   `339497082+automated-release[bot]@users.noreply.github.com` (set in
+   `release-bump.yaml` and listed in renovate's `gitIgnoredAuthors`).
 2. **Labels.** Create `semver:uai-app:patch|minor|major|none`.
    If the repository has tag rulesets (Settings → Rules), allow the Actions bot to create `uai-app-*` tags.
 3. **Retag the first release.** The `tag` workflow refuses to run for a component

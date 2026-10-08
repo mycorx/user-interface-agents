@@ -34,7 +34,7 @@
   // release-bump pushes a version commit to Renovate's PR branches. Without
   // this, Renovate treats the branch as hand-edited and stops rebasing it.
   // Must match the email in .github/workflows/release-bump.yaml.
-  "gitIgnoredAuthors": ["uia-release-bot@users.noreply.github.com"],
+  "gitIgnoredAuthors": ["339497082+automated-release[bot]@users.noreply.github.com"],
 
   "packageRules": [
     {

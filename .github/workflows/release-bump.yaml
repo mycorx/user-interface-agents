@@ -31,7 +31,7 @@ jobs:
       - id: app
         uses: actions/create-github-app-token@bcd2ba49218906704ab6c1aa796996da409d3eb1 # v3.2.0
         with:
-          app-id: ${{ secrets.RELEASE_APP_ID }}
+          client-id: ${{ secrets.RELEASE_APP_CLIENT_ID }}
           private-key: ${{ secrets.RELEASE_APP_PRIVATE_KEY }}
           permission-contents: write
           permission-pull-requests: read
@@ -63,7 +63,7 @@ jobs:
           fi
           # Renovate must not mistake this commit for a human edit; the same
           # email is listed in renovate.json5's gitIgnoredAuthors.
-          git config user.name "uia-release-bot"
-          git config user.email "uia-release-bot@users.noreply.github.com"
+          git config user.name "automated-release[bot]"
+          git config user.email "339497082+automated-release[bot]@users.noreply.github.com"
           git commit -a -m "chore(release): sync version.json and manifests"
           git push
