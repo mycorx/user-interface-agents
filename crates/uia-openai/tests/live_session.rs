@@ -156,7 +156,9 @@ async fn synthesize_speech(api_key: &str, text: &str) -> Vec<i16> {
     assert!(resp.status().is_success(), "tts returned {}", resp.status());
     let bytes = resp.bytes().await.expect("tts body");
     bytes
-        .chunks_exact(2)
+        .as_chunks::<2>()
+        .0
+        .iter()
         .map(|b| i16::from_le_bytes([b[0], b[1]]))
         .collect()
 }

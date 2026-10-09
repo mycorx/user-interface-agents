@@ -436,13 +436,13 @@ pub fn mcp_targets(
                 // Only the weather server's own process gets this — an env
                 // var is per-process anyway, but the name check is what keeps
                 // the intent explicit rather than accidental.
-                if server.name == OPEN_METEO_SERVER_NAME {
-                    if let Some(value) = home_location {
-                        env.push((
-                            OPEN_METEO_DEFAULT_LOCATION_ENV.to_string(),
-                            value.to_string(),
-                        ));
-                    }
+                if server.name == OPEN_METEO_SERVER_NAME
+                    && let Some(value) = home_location
+                {
+                    env.push((
+                        OPEN_METEO_DEFAULT_LOCATION_ENV.to_string(),
+                        value.to_string(),
+                    ));
                 }
                 targets.push((
                     server.name.clone(),

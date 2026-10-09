@@ -1619,33 +1619,30 @@ pub fn migrate_plaintext_credentials_into_keystore(
     config: &Config,
     store: &dyn crate::secrets::SecretStore,
 ) {
-    if store.get("openai_api_key").is_none() {
-        if let Some(key) = config.openai.resolve_plaintext_only() {
-            if let Err(e) = store.set("openai_api_key", &key) {
-                eprintln!("warning: failed to migrate openai_api_key into OS keystore: {e}");
-            }
-        }
+    if store.get("openai_api_key").is_none()
+        && let Some(key) = config.openai.resolve_plaintext_only()
+        && let Err(e) = store.set("openai_api_key", &key)
+    {
+        eprintln!("warning: failed to migrate openai_api_key into OS keystore: {e}");
     }
     let nova_id_present = store.get("nova_access_key_id").is_some();
     let nova_secret_present = store.get("nova_secret_access_key").is_some();
-    if !nova_id_present && !nova_secret_present {
-        if let Some((id, secret)) = config.bedrock.resolve_plaintext_only() {
-            if let Err(e) = store.set("nova_access_key_id", &id) {
-                eprintln!("warning: failed to migrate nova_access_key_id into OS keystore: {e}");
-            }
-            if let Err(e) = store.set("nova_secret_access_key", &secret) {
-                eprintln!(
-                    "warning: failed to migrate nova_secret_access_key into OS keystore: {e}"
-                );
-            }
+    if !nova_id_present
+        && !nova_secret_present
+        && let Some((id, secret)) = config.bedrock.resolve_plaintext_only()
+    {
+        if let Err(e) = store.set("nova_access_key_id", &id) {
+            eprintln!("warning: failed to migrate nova_access_key_id into OS keystore: {e}");
+        }
+        if let Err(e) = store.set("nova_secret_access_key", &secret) {
+            eprintln!("warning: failed to migrate nova_secret_access_key into OS keystore: {e}");
         }
     }
-    if store.get("foundry_api_key").is_none() {
-        if let Some(key) = config.foundry.resolve_plaintext_only() {
-            if let Err(e) = store.set("foundry_api_key", &key) {
-                eprintln!("warning: failed to migrate foundry_api_key into OS keystore: {e}");
-            }
-        }
+    if store.get("foundry_api_key").is_none()
+        && let Some(key) = config.foundry.resolve_plaintext_only()
+        && let Err(e) = store.set("foundry_api_key", &key)
+    {
+        eprintln!("warning: failed to migrate foundry_api_key into OS keystore: {e}");
     }
 }
 
@@ -1696,26 +1693,26 @@ impl Config {
         // just as launch-fragile as the uia.toml lookup above was.
         if let Some(key_file) = &cfg.openai.key_file {
             let key_path = Path::new(key_file);
-            if key_path.is_relative() {
-                if let Some(base) = path.parent() {
-                    cfg.openai.key_file = Some(base.join(key_path).to_string_lossy().into_owned());
-                }
+            if key_path.is_relative()
+                && let Some(base) = path.parent()
+            {
+                cfg.openai.key_file = Some(base.join(key_path).to_string_lossy().into_owned());
             }
         }
         if let Some(key_file) = &cfg.bedrock.key_file {
             let key_path = Path::new(key_file);
-            if key_path.is_relative() {
-                if let Some(base) = path.parent() {
-                    cfg.bedrock.key_file = Some(base.join(key_path).to_string_lossy().into_owned());
-                }
+            if key_path.is_relative()
+                && let Some(base) = path.parent()
+            {
+                cfg.bedrock.key_file = Some(base.join(key_path).to_string_lossy().into_owned());
             }
         }
         if let Some(key_file) = &cfg.foundry.key_file {
             let key_path = Path::new(key_file);
-            if key_path.is_relative() {
-                if let Some(base) = path.parent() {
-                    cfg.foundry.key_file = Some(base.join(key_path).to_string_lossy().into_owned());
-                }
+            if key_path.is_relative()
+                && let Some(base) = path.parent()
+            {
+                cfg.foundry.key_file = Some(base.join(key_path).to_string_lossy().into_owned());
             }
         }
         Ok(cfg)

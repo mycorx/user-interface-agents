@@ -636,11 +636,11 @@ fn main() {
                 let _ = hud.set_always_on_top(always_on_top);
                 let hud_to_hide = hud.clone();
                 hud.on_window_event(move |event| {
-                    if let tauri::WindowEvent::CloseRequested { api, .. } = event {
-                        if !quit_on_close {
-                            api.prevent_close();
-                            let _ = hud_to_hide.hide();
-                        }
+                    if let tauri::WindowEvent::CloseRequested { api, .. } = event
+                        && !quit_on_close
+                    {
+                        api.prevent_close();
+                        let _ = hud_to_hide.hide();
                     }
                 });
             }

@@ -53,13 +53,12 @@ impl ToolExecutor for FakeExecutor {
         deadline: Duration,
     ) -> Result<ToolResult, ToolError> {
         self.calls.lock().unwrap().push((name.to_string(), args));
-        if let Some(d) = self.delay {
-            if tokio::time::timeout(deadline, tokio::time::sleep(d))
+        if let Some(d) = self.delay
+            && tokio::time::timeout(deadline, tokio::time::sleep(d))
                 .await
                 .is_err()
-            {
-                return Err(ToolError::Timeout(deadline));
-            }
+        {
+            return Err(ToolError::Timeout(deadline));
         }
         self.results
             .get(name)

@@ -16,7 +16,7 @@ exclude = ["spikes/nova-probe", "spikes/openai-probe"]
 
 [workspace.package]
 edition = "2024"
-rust-version = "1.85"
+rust-version = "1.99"
 authors = ["MycorX (Daniel, Sole Trader)"]
 # Dual source-available license, recipient's choice; the texts are in
 # LICENSE.md and LICENSES/. PolyForm Internal Use is not on the SPDX list

@@ -357,10 +357,10 @@ fn replace_durably(tmp: &Path, dest: &Path, bytes: &[u8]) -> std::io::Result<()>
                 // has already published the rename, and failing here would lose
                 // a turn that is safely on disk to guard against a power cut
                 // that may never come.
-                if let Some(dir) = dest.parent() {
-                    if let Ok(d) = std::fs::File::open(dir) {
-                        d.sync_all().ok();
-                    }
+                if let Some(dir) = dest.parent()
+                    && let Ok(d) = std::fs::File::open(dir)
+                {
+                    d.sync_all().ok();
                 }
             }
         }
