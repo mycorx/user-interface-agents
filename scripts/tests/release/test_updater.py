@@ -56,6 +56,13 @@ class BuildManifestTests(unittest.TestCase):
         with self.assertRaisesRegex(updater.ManifestError, "has no .*\\.sig"):
             build([MSI, MSI + ".sig", DEB], {MSI + ".sig": "S"})
 
+    def test_empty_signature_fails_like_a_missing_one(self):
+        for empty in ("", "  \n"):
+            with self.subTest(sig=repr(empty)):
+                with self.assertRaisesRegex(updater.ManifestError, "has no .*\\.sig"):
+                    build([MSI, MSI + ".sig", DEB, DEB + ".sig"],
+                          {MSI + ".sig": "S", DEB + ".sig": empty})
+
     def test_two_installers_for_one_platform_fails(self):
         other = "uia_0.2.0_x64_fr-FR.msi"
         names = [MSI, MSI + ".sig", other, other + ".sig", DEB, DEB + ".sig"]

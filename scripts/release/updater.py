@@ -38,9 +38,10 @@ def build_manifest(*, version, notes, pub_date, tag, repo, asset_names, signatur
             raise ManifestError(f"more than one {platform} installer: {matches}")
         name = matches[0]
         signature = signatures.get(name + ".sig")
-        if signature is None:
+        if signature is None or not signature.strip():
             raise ManifestError(
-                f"{name} has no {name}.sig; one unsigned entry makes every client reject the update"
+                f"{name} has no {name}.sig (or it is empty); one unsigned entry makes every"
+                " client reject the update"
             )
         # From the tag, not the asset's browser_download_url: a draft's URL
         # says `untagged-…` and stops working once the release is published.
