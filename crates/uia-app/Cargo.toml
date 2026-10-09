@@ -124,7 +124,7 @@ tauri-plugin-single-instance = { version = "2.5.2", optional = true, features = 
 tauri-plugin-opener = { version = "2.7.0", optional = true }
 # Checks the GitHub release feed (latest.json), verifies the minisign
 # signature against the public key in tauri.conf.json, and installs.
-# 2.10 is the first release that installs .deb updates.
+# Needs >= 2.10 to install .deb updates; on the 2.13 line to match tauri 2.12.
 tauri-plugin-updater = { version = "2.13", optional = true }
 
 # Makes Windows-native echo cancellation the default on Windows, with no

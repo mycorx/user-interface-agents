@@ -565,7 +565,7 @@ fn main() {
                 .show_menu_on_left_click(true);
             // `TrayIconBuilder` sets no icon on its own - without an explicit
             // `.icon()` call the tray entry is created with no image at all
-            // (confirmed against tauri 2.11.5's source: `build()` passes
+            // (confirmed against tauri 2.12.2's source: `build()` passes
             // straight through to the underlying `tray_icon` crate with
             // whatever `.icon()` set, no fallback to the app's window icon).
             // Reuse the icon baked in from `icons/icon.png` via
