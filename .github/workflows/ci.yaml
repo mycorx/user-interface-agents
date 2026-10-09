@@ -11,7 +11,75 @@ on:
         type: string
         default: ""
 jobs:
+  # A PR that touches only docs, markdown or other non-code files has nothing for
+  # these jobs to check, so they are skipped. The skip is per JOB, not a `paths:`
+  # filter on the workflow: a workflow that never starts leaves its required
+  # checks "Expected" forever and the PR cannot merge, whereas a job skipped by
+  # `if:` counts as passing. `ci-ok` at the bottom is the one required check.
+  #
+  # "Code" is every `code_paths` entry in .github/release-components.json (the
+  # same definition the release labels use) plus what CI itself runs or checks.
+  # Editing the registry is itself a trigger, so a PR cannot narrow the filter
+  # and skip the jobs in the same change.
+  #
+  # workflow_dispatch and workflow_call (release.yaml, at the commit being
+  # shipped) always run everything.
+  changes:
+    runs-on: ubuntu-latest
+    outputs:
+      code: ${{ steps.filter.outputs.code }}
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          ref: ${{ inputs.ref }}
+          # The PR merge commit and its first parent, the base branch tip.
+          fetch-depth: 2
+          persist-credentials: false
+      - id: filter
+        env:
+          EVENT: ${{ github.event_name }}
+        run: |
+          python3 - <<'PY'
+          import json, os, subprocess, sys
+          sys.path.insert(0, "scripts/release")
+          from paths import matches
+
+          # What CI runs or checks beyond the app's own code_paths.
+          EXTRA = [
+              ".github/workflows/**",
+              ".github/release-components.json",
+              "scripts/**",
+              "NOTICE.txt",
+              "LICENSES/**",
+              "uia.example.toml",
+          ]
+
+          def emit(code, why):
+              print(f"code={code}: {why}")
+              with open(os.environ["GITHUB_OUTPUT"], "a") as out:
+                  out.write(f"code={code}\n")
+
+          if os.environ["EVENT"] != "pull_request":
+              emit("true", f"{os.environ['EVENT']} always runs the full suite")
+              sys.exit(0)
+
+          with open(".github/release-components.json") as f:
+              registry = json.load(f)
+          patterns = EXTRA + [p for c in registry.values() for p in c["code_paths"]]
+          files = subprocess.run(
+              ["git", "diff", "--name-only", "HEAD^1", "HEAD"],
+              check=True, capture_output=True, text=True,
+          ).stdout.splitlines()
+          print("changed files:", *files, sep="\n  ")
+          hit = [f for f in files if any(matches(p, f) for p in patterns)]
+          if hit:
+              emit("true", f"{hit[0]} is a code path")
+          else:
+              emit("false", "no code, script or workflow changes")
+          PY
   test-ubuntu:
+    needs: changes
+    if: needs.changes.outputs.code == 'true'
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
@@ -36,6 +104,8 @@ jobs:
   # otherwise carry — and `pnpm licenses list` reads the installed store, so
   # node_modules must exist for the npm half to mean anything.
   notice:
+    needs: changes
+    if: needs.changes.outputs.code == 'true'
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
@@ -69,6 +139,8 @@ jobs:
   # libwebkit2gtk-4.1-dev alone is ~190 packages, which has no business on the
   # critical path.
   desktop-build:
+    needs: changes
+    if: needs.changes.outputs.code == 'true'
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
@@ -102,6 +174,8 @@ jobs:
   # runner does not carry. Building it nowhere meant the whole path was
   # untested in CI. Its own job keeps that toolchain off the critical path.
   aec-feature:
+    needs: changes
+    if: needs.changes.outputs.code == 'true'
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
@@ -135,6 +209,8 @@ jobs:
   # uses the OS's own webview on both of these. Standard GitHub-hosted runners
   # are free for a public repository, so both run on every pull request.
   test-windows:
+    needs: changes
+    if: needs.changes.outputs.code == 'true'
     runs-on: windows-latest
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
@@ -164,6 +240,8 @@ jobs:
   # commented-out `macos` job builds the universal (Intel + Apple silicon)
   # binary separately; this job only checks that the code builds and passes.
   test-macos:
+    needs: changes
+    if: needs.changes.outputs.code == 'true'
     runs-on: macos-latest
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
@@ -185,3 +263,14 @@ jobs:
       # Compiles main.rs and every #[tauri::command] against WKWebView.
       - run: cargo check -p uia-app --features desktop --all-targets
       - run: cargo clippy -p uia-app --features desktop --all-targets -- -D warnings
+
+  # The single required check. A job skipped by `changes` passes; one that failed
+  # or was cancelled fails this, so branch protection only needs to name `ci-ok`.
+  ci-ok:
+    needs: [changes, test-ubuntu, notice, desktop-build, aec-feature, test-windows, test-macos]
+    if: always()
+    runs-on: ubuntu-latest
+    steps:
+      - run: |
+          echo '${{ toJSON(needs) }}'
+          test '${{ contains(needs.*.result, 'failure') || contains(needs.*.result, 'cancelled') }}' = false
