@@ -35,7 +35,10 @@ the entitlement below, and the `APPLE_*` repository secrets (certificate,
 signing identity, notarization credentials). It builds one universal `.app` +
 `.dmg` on `macos-latest` and fails the run unless the result is signed,
 carries the microphone entitlement, passes Gatekeeper and is notarized. To
-switch it on, uncomment it and delete `macos-local-build-note`.
+switch it on, uncomment it and delete `macos-local-build-note`. Also add
+`macos` to `updater-manifest`'s `needs` and pass `--require macos` to its
+command, so the macOS update joins `latest.json` (see the "Before enabling"
+step 3 in the workflow comments).
 
 **Before a signed macOS release, do not forget the microphone entitlement.**
 `crates/uia-app/Info.plist` already carries `NSMicrophoneUsageDescription`, which
@@ -225,10 +228,7 @@ updates will see it.
 To withdraw a bad release, delete it from the GitHub Releases page or move it
 back to draft status. The `/latest/` endpoint then falls back to the previous
 published release. Installs that have already downloaded and installed the
-withdrawn release remain on that version; fix forward by releasing a new
-version, or delete the release and publish a corrected version with the same
-version number (only after all installs have been persuaded to re-check, which
-requires a long enough auto-check interval or a manual "Check now").
+withdrawn release remain on that version. Fix forward with a new version.
 
 ### The signing key
 
@@ -243,7 +243,9 @@ pnpm exec tauri signer generate -w ~/.tauri/uia.key
 ```
 
 The command prompts for a passphrase and saves the keypair to `~/.tauri/uia.key`.
-Provide the passphrase when prompted during release runs in CI.
+Create two repository secrets: `TAURI_SIGNING_PRIVATE_KEY` (the full contents of
+`~/.tauri/uia.key`) and `TAURI_SIGNING_PRIVATE_KEY_PASSWORD` (the passphrase).
+The release workflow reads these secrets automatically.
 
 **Store both the private key and passphrase securely.** The keypair is not
 rotatable in any ordinary sense: every installed client trusts exactly the key
@@ -271,8 +273,9 @@ production account once that is stood up.
 
 The release workflow uses the secrets `TAURI_SIGNING_PRIVATE_KEY` and
 `TAURI_SIGNING_PRIVATE_KEY_PASSWORD` to sign installers in both the `linux` and
-`windows` jobs, including on dry runs. Dry run signing verifies the key is
-available and the installer builds with signatures intact.
+`windows` jobs, including on dry runs. A dry run proves the key and passphrase
+work in CI and that the installers are signed (the `uia-linux` and `uia-windows`
+artifacts contain `.sig` files).
 
 ### Local builds
 
@@ -282,33 +285,6 @@ generation and installer signing) unless `TAURI_SIGNING_PRIVATE_KEY` is set in
 the environment. This keeps local development builds simple and avoids signing
 overhead on every build; only CI-run builds with the private key set produce
 signed installers.
-
-### macOS: signed builds are ready to enable
-
-The `macos` job at the end of `.github/workflows/release.yaml` is commented out.
-To enable signed macOS releases, uncomment it and delete the `macos-local-build-note`
-job (which currently leaves only a notice). You will need:
-
-1. An Apple Developer ID certificate and signing identity
-2. Notarization credentials (Apple ID with App-Specific Password)
-3. Repository secrets: `APPLE_CERTIFICATE`, `APPLE_CERTIFICATE_PASSWORD`,
-   `APPLE_SIGNING_IDENTITY`, `APPLE_NOTARIZATION_USERNAME`,
-   `APPLE_NOTARIZATION_PASSWORD`
-4. The microphone entitlement in `crates/uia-app/Info.plist` —
-   `com.apple.security.device.audio-input` — because signed macOS builds use
-   the hardened runtime, and under that the microphone is blocked without it
-
-**Before uncommenting, add the microphone entitlement.** `crates/uia-app/Info.plist`
-already has `NSMicrophoneUsageDescription` (which prompts the user). Create
-`crates/uia-app/Entitlements.plist` with `com.apple.security.device.audio-input`
-set to `true`, then add `bundle.macOS.entitlements` in `tauri.conf.json` pointing
-at it. Verify the result before shipping with:
-
-```bash
-codesign -d --entitlements - uia.app
-```
-
-Ad-hoc local builds (without Developer ID signing) do not need the entitlement.
 
 ## Linux builds refuse to run under WSL
 
