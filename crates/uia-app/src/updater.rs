@@ -18,6 +18,9 @@ use uia_core::session::State;
 pub const FIRST_CHECK_DELAY: Duration = Duration::from_secs(30);
 pub const CHECK_INTERVAL: Duration = Duration::from_secs(6 * 60 * 60);
 pub const SIGNATURE_FAILURE: &str = "Update failed signature check";
+/// How often a downloaded update re-reads the session state while it waits
+/// for the assistant to go quiet before installing.
+pub const INSTALL_GATE_POLL: Duration = Duration::from_millis(250);
 
 /// Everything the HUD and Settings render about updates. Emitted on
 /// [`crate::hud::UPDATE_EVENT`] and returned by `get_update_status`.
@@ -54,6 +57,17 @@ pub enum CheckOutcome {
         notes: Option<String>,
     },
     Error(String),
+}
+
+/// Who asked for a check. A scheduled check runs unseen, so it must not
+/// disturb an offer the user is already looking at.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum CheckTrigger {
+    /// Settings' "Check now" or the tray item: the result, errors included,
+    /// is what the user asked to see.
+    Manual,
+    /// The 30 s / 6 h background schedule.
+    Scheduled,
 }
 
 pub enum InstallError {
@@ -97,6 +111,42 @@ pub fn status_after_check(
             error: None,
         },
         CheckOutcome::Error(message) => UpdateStatus::Failed { message },
+    }
+}
+
+/// Whether a check publishes `Checking` before it runs. A scheduled check
+/// does not over an existing offer, so the banner never flickers.
+pub fn shows_checking(previous: &UpdateStatus, trigger: CheckTrigger) -> bool {
+    !(trigger == CheckTrigger::Scheduled && matches!(previous, UpdateStatus::Available { .. }))
+}
+
+/// [`status_after_check`], except that a scheduled check that errors leaves
+/// an existing offer in place instead of replacing it with `Failed`.
+pub fn status_after_triggered_check(
+    previous: &UpdateStatus,
+    trigger: CheckTrigger,
+    outcome: CheckOutcome,
+    current: &str,
+    rejected: Option<&str>,
+) -> UpdateStatus {
+    if trigger == CheckTrigger::Scheduled
+        && matches!(previous, UpdateStatus::Available { .. })
+        && matches!(outcome, CheckOutcome::Error(_))
+    {
+        return previous.clone();
+    }
+    status_after_check(outcome, current, rejected)
+}
+
+/// An install that fails before its download starts (the re-check errors or
+/// finds nothing). The offer on screen, if any, stays with the error on it;
+/// otherwise the failure is shown as is.
+pub fn status_after_early_install_error(previous: &UpdateStatus, message: String) -> UpdateStatus {
+    match previous {
+        UpdateStatus::Available { version, notes, .. } => {
+            status_after_install_error(version, notes.clone(), InstallError::Other(message))
+        }
+        _ => UpdateStatus::Failed { message },
     }
 }
 
@@ -166,14 +216,33 @@ mod desktop {
         let _ = app.emit(crate::hud::UPDATE_EVENT, &status);
     }
 
+    /// Holds `UpdaterState::busy` for one check or install and clears it on
+    /// every exit path.
+    struct BusyGuard<'a>(&'a AtomicBool);
+
+    impl<'a> BusyGuard<'a> {
+        fn acquire(busy: &'a AtomicBool) -> Option<Self> {
+            (!busy.swap(true, Ordering::SeqCst)).then_some(Self(busy))
+        }
+    }
+
+    impl Drop for BusyGuard<'_> {
+        fn drop(&mut self) {
+            self.0.store(false, Ordering::SeqCst);
+        }
+    }
+
     /// One check. A second call while a check or install runs returns the
     /// current status instead of starting another.
-    pub async fn check_now(app: &AppHandle) -> UpdateStatus {
+    pub async fn check_now(app: &AppHandle, trigger: CheckTrigger) -> UpdateStatus {
         let state = app.state::<UpdaterState>();
-        if state.busy.swap(true, Ordering::SeqCst) {
+        let Some(_busy) = BusyGuard::acquire(&state.busy) else {
             return state.status();
+        };
+        let previous = state.status();
+        if shows_checking(&previous, trigger) {
+            publish(app, UpdateStatus::Checking);
         }
-        publish(app, UpdateStatus::Checking);
         let outcome = match app.updater() {
             Err(e) => CheckOutcome::Error(e.to_string()),
             Ok(updater) => match updater.check().await {
@@ -187,35 +256,51 @@ mod desktop {
         };
         let current = app.package_info().version.to_string();
         let rejected = state.rejected.lock().unwrap().clone();
-        let status = status_after_check(outcome, &current, rejected.as_deref());
+        let status = status_after_triggered_check(
+            &previous,
+            trigger,
+            outcome,
+            &current,
+            rejected.as_deref(),
+        );
         publish(app, status.clone());
-        state.busy.store(false, Ordering::SeqCst);
         status
     }
 
-    /// Downloads, installs and restarts. Refused while the assistant is busy.
-    /// On Windows the installer exits the app itself and this never returns.
+    /// Downloads, waits until the assistant is quiet, installs and restarts.
+    /// Refused while the assistant is busy. On Windows the installer exits
+    /// the app itself and this never returns.
     pub async fn install(app: &AppHandle) -> Result<(), String> {
         let state = app.state::<UpdaterState>();
         if !may_install(state.session_state()) {
             return Err("The assistant is busy. Install when it is quiet.".to_string());
         }
-        if state.busy.swap(true, Ordering::SeqCst) {
+        let Some(_busy) = BusyGuard::acquire(&state.busy) else {
             return Err("An update check or install is already running.".to_string());
-        }
-        let result = install_inner(app).await;
-        state.busy.store(false, Ordering::SeqCst);
-        result
+        };
+        install_inner(app).await
     }
 
     async fn install_inner(app: &AppHandle) -> Result<(), String> {
-        let update = app
-            .updater()
-            .map_err(|e| e.to_string())?
-            .check()
-            .await
-            .map_err(|e| e.to_string())?
-            .ok_or_else(|| "No update is available any more.".to_string())?;
+        let found = match app.updater() {
+            Err(e) => Err(e.to_string()),
+            Ok(updater) => match updater.check().await {
+                Ok(Some(update)) => Ok(update),
+                Ok(None) => Err("No update is available any more.".to_string()),
+                Err(e) => Err(e.to_string()),
+            },
+        };
+        let update = match found {
+            Ok(update) => update,
+            Err(message) => {
+                let previous = app.state::<UpdaterState>().status();
+                publish(
+                    app,
+                    status_after_early_install_error(&previous, message.clone()),
+                );
+                return Err(message);
+            }
+        };
         let version = update.version.clone();
         let notes = update.body.clone();
         publish(
@@ -230,8 +315,9 @@ mod desktop {
         let progress_version = version.clone();
         let mut downloaded: u64 = 0;
         let mut last: Option<u8> = Some(0);
-        let result = update
-            .download_and_install(
+        // `download` verifies the signature, so a bad one fails here.
+        let bytes = match update
+            .download(
                 move |chunk, total| {
                     downloaded += chunk as u64;
                     let percent = download_percent(downloaded, total);
@@ -248,20 +334,46 @@ mod desktop {
                 },
                 || {},
             )
-            .await;
+            .await
+        {
+            Ok(bytes) => bytes,
+            Err(e) => return Err(install_failed(app, &version, notes, e)),
+        };
 
-        match result {
-            Ok(()) => app.restart(),
-            Err(e) => {
-                let kind = classify(&e);
-                if matches!(kind, InstallError::Signature) {
-                    *app.state::<UpdaterState>().rejected.lock().unwrap() = Some(version.clone());
-                }
-                let message = e.to_string();
-                publish(app, status_after_install_error(&version, notes, kind));
-                Err(message)
-            }
+        // A turn may have started during the download. The install exits or
+        // restarts the app (and on Linux raises an admin prompt), so it
+        // waits for the assistant to go quiet again.
+        publish(
+            app,
+            UpdateStatus::Downloading {
+                version: version.clone(),
+                percent: Some(100),
+            },
+        );
+        while !may_install(app.state::<UpdaterState>().session_state()) {
+            tokio::time::sleep(INSTALL_GATE_POLL).await;
         }
+
+        match update.install(bytes) {
+            Ok(()) => app.restart(),
+            Err(e) => Err(install_failed(app, &version, notes, e)),
+        }
+    }
+
+    /// Records a signature failure (R3), publishes the resulting status and
+    /// returns the message for the command's `Err`.
+    fn install_failed(
+        app: &AppHandle,
+        version: &str,
+        notes: Option<String>,
+        e: tauri_plugin_updater::Error,
+    ) -> String {
+        let kind = classify(&e);
+        if matches!(kind, InstallError::Signature) {
+            *app.state::<UpdaterState>().rejected.lock().unwrap() = Some(version.to_string());
+        }
+        publish(app, status_after_install_error(version, notes, kind));
+        e.to_string()
     }
 
     fn classify(e: &tauri_plugin_updater::Error) -> InstallError {
@@ -287,7 +399,7 @@ mod desktop {
                 let settings: crate::settings::AgentSettings =
                     crate::settings::load(&agent_settings_path).unwrap_or_default();
                 if crate::settings::resolve_auto_update_check(settings.auto_update_check) {
-                    check_now(&app).await;
+                    check_now(&app, CheckTrigger::Scheduled).await;
                 }
             }
         });
@@ -393,6 +505,92 @@ mod tests {
             status_after_install_error("0.3.0", None, InstallError::Signature),
             UpdateStatus::Failed {
                 message: SIGNATURE_FAILURE.into()
+            }
+        );
+    }
+
+    fn offer() -> UpdateStatus {
+        UpdateStatus::Available {
+            version: "0.3.0".into(),
+            notes: Some("n".into()),
+            error: None,
+        }
+    }
+
+    #[test]
+    fn a_scheduled_check_shows_no_checking_over_an_offer() {
+        assert!(!shows_checking(&offer(), CheckTrigger::Scheduled));
+        assert!(shows_checking(&offer(), CheckTrigger::Manual));
+        assert!(shows_checking(&UpdateStatus::Idle, CheckTrigger::Scheduled));
+        assert!(shows_checking(
+            &UpdateStatus::UpToDate {
+                current: "0.2.0".into()
+            },
+            CheckTrigger::Scheduled
+        ));
+    }
+
+    #[test]
+    fn a_failed_scheduled_check_keeps_an_existing_offer() {
+        let error = || CheckOutcome::Error("offline".into());
+        assert_eq!(
+            status_after_triggered_check(&offer(), CheckTrigger::Scheduled, error(), "0.2.0", None),
+            offer()
+        );
+        // A manual check shows its error, so Settings can say what went wrong.
+        assert_eq!(
+            status_after_triggered_check(&offer(), CheckTrigger::Manual, error(), "0.2.0", None),
+            UpdateStatus::Failed {
+                message: "offline".into()
+            }
+        );
+        // With no offer on screen a scheduled failure is reported as before.
+        assert_eq!(
+            status_after_triggered_check(
+                &UpdateStatus::Idle,
+                CheckTrigger::Scheduled,
+                error(),
+                "0.2.0",
+                None
+            ),
+            UpdateStatus::Failed {
+                message: "offline".into()
+            }
+        );
+        // A successful scheduled check still replaces the offer.
+        assert_eq!(
+            status_after_triggered_check(
+                &offer(),
+                CheckTrigger::Scheduled,
+                CheckOutcome::Found {
+                    version: "0.3.1".into(),
+                    notes: None
+                },
+                "0.2.0",
+                None
+            ),
+            UpdateStatus::Available {
+                version: "0.3.1".into(),
+                notes: None,
+                error: None
+            }
+        );
+    }
+
+    #[test]
+    fn an_install_that_fails_before_downloading_keeps_the_offer_with_its_error() {
+        assert_eq!(
+            status_after_early_install_error(&offer(), "gone".into()),
+            UpdateStatus::Available {
+                version: "0.3.0".into(),
+                notes: Some("n".into()),
+                error: Some("gone".into())
+            }
+        );
+        assert_eq!(
+            status_after_early_install_error(&UpdateStatus::Idle, "gone".into()),
+            UpdateStatus::Failed {
+                message: "gone".into()
             }
         );
     }

@@ -35,7 +35,7 @@ use uia_app::settings::{
     self, agent_settings_path_for, audio_settings_path_for, foundry_settings_path_for,
     model_settings_path_for, settings_path_for, ui_settings_path_for,
 };
-use uia_app::updater::{self, UpdateStatus, UpdaterState};
+use uia_app::updater::{self, CheckTrigger, UpdateStatus, UpdaterState};
 use uia_core::activation::{Activation, ActivationEvent, ChannelActivation};
 use uia_core::session::SessionControl;
 
@@ -602,7 +602,7 @@ fn main() {
                     }
                     let check_app = app.clone();
                     tauri::async_runtime::spawn(async move {
-                        updater::check_now(&check_app).await;
+                        updater::check_now(&check_app, CheckTrigger::Manual).await;
                     });
                     return;
                 }
@@ -837,7 +837,7 @@ fn get_update_status(app: AppHandle, state: tauri::State<UpdaterState>) -> Updat
 /// whether or not automatic checks are on.
 #[tauri::command]
 async fn check_for_update(app: AppHandle) -> UpdateStatus {
-    updater::check_now(&app).await
+    updater::check_now(&app, CheckTrigger::Manual).await
 }
 
 /// Refused (Err) while the assistant is mid-turn; see `updater::may_install`.
