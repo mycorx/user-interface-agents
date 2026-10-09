@@ -10,8 +10,11 @@ on:
   push:
     branches: [main]
 
+# The tag is created with the release App's token, not GITHUB_TOKEN: the tag
+# ruleset only lets the App (and admins) create tags, and GITHUB_TOKEN cannot be
+# on a ruleset bypass list. So the job's own token stays read-only.
 permissions:
-  contents: write
+  contents: read
 
 # Two quick merges queue rather than race for the same version.
 concurrency:
@@ -22,12 +25,19 @@ jobs:
   tag:
     runs-on: ubuntu-latest
     steps:
+      - id: app
+        uses: actions/create-github-app-token@bcd2ba49218906704ab6c1aa796996da409d3eb1 # v3.2.0
+        with:
+          client-id: ${{ secrets.RELEASE_APP_CLIENT_ID }}
+          private-key: ${{ secrets.RELEASE_APP_PRIVATE_KEY }}
+          permission-contents: write
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
+          persist-credentials: false
           # Full history and all tags: "does this version already have a tag"
           # and the refuse-to-guess guard both read the existing tags.
           fetch-depth: 0
       - name: Tag the merge commit
         env:
-          GH_TOKEN: ${{ github.token }}
+          GH_TOKEN: ${{ steps.app.outputs.token }}
         run: python3 scripts/release tag --sha "$GITHUB_SHA"

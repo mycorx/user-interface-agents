@@ -302,3 +302,15 @@ class RenameTests(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+class RunErrorTests(unittest.TestCase):
+    def test_failure_includes_stderr_and_stdout(self):
+        # gh puts the API's reason on stdout and only a summary on stderr.
+        script = ("import sys; print('{\"message\": \"Repository rule violations found\"}');"
+                  " sys.stderr.write('gh: Reference update failed (HTTP 422)'); sys.exit(1)")
+        with self.assertRaises(cli.CommandError) as ctx:
+            cli._run(["python3", "-c", script])
+        msg = str(ctx.exception)
+        self.assertIn("Reference update failed (HTTP 422)", msg)
+        self.assertIn("Repository rule violations found", msg)

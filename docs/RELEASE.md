@@ -127,7 +127,20 @@ rehearse a release.
    `339497082+automated-release[bot]@users.noreply.github.com` (set in
    `release-bump.yaml` and listed in renovate's `gitIgnoredAuthors`).
 2. **Labels.** Create `semver:uai-app:patch|minor|major|none`.
-   If the repository has tag rulesets (Settings → Rules), allow the Actions bot to create `uai-app-*` tags.
+   **Tag ruleset** (Settings → Rules → Rulesets, target: tags): restrict
+   creations, updates and deletions, with the bypass list limited to admins and
+   the `automated-release` App. The `tag` workflow creates tags with the App's
+   token, because `GITHUB_TOKEN` cannot be put on a bypass list. Add a
+   *Restrict tag names* rule (must match) with:
+
+   ```
+   ^uai-[a-z][a-z0-9]*(-[a-z][a-z0-9]*)*-(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)$
+   ```
+
+   That allows `uai-<component>-X.Y.Z` for any component and nothing else (no
+   bare or suffixed versions). Add the App to this ruleset's bypass list only,
+   not to branch rules. If `tag` fails with `HTTP 422`, the log now includes the
+   rule that rejected it.
 3. **Retag the first release.** The `tag` workflow refuses to run for a component
    with no `uai-app-*` tags (it would stamp the current `main` as the version in
    `version.json`). Create `uai-app-0.1.1` on the commit of the published 0.1.1

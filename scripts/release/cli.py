@@ -22,7 +22,10 @@ class CommandError(Exception):
 def _run(args, cwd=None) -> str:
     done = subprocess.run(args, cwd=cwd, capture_output=True, text=True)
     if done.returncode != 0:
-        raise CommandError(f"`{' '.join(args)}` failed: {done.stderr.strip() or done.stdout.strip()}")
+        # gh prints the API's explanation (e.g. the ruleset that rejected a
+        # tag) as the JSON body on stdout, and only a one-line summary on stderr.
+        detail = "\n".join(x for x in (done.stderr.strip(), done.stdout.strip()) if x)
+        raise CommandError(f"`{' '.join(args)}` failed: {detail}")
     return done.stdout
 
 
