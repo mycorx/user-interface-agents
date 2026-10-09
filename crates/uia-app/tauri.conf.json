@@ -43,6 +43,7 @@
   "bundle": {
     "active": true,
     "targets": ["msi"],
+    "createUpdaterArtifacts": true,
     "icon": ["icons/32x32.png", "icons/128x128.png", "icons/icon.ico"]
   },
   "plugins": {
@@ -50,6 +51,13 @@
       "desktop": {
         "schemes": ["uia"]
       }
+    },
+    "updater": {
+      "pubkey": "dW50cnVzdGVkIGNvbW1lbnQ6IG1pbmlzaWduIHB1YmxpYyBrZXk6IEYzRTQzRUI2NkRFNjlBNkMKUldSc211WnR0ajdrOC8rcm9ieWRTcGRGWW5VcE45TllZQkdLRUtFMkgzRjFwMVUyZWFtVWE1djEK",
+      "endpoints": [
+        "https://github.com/mycorx/user-interface-agents/releases/latest/download/latest.json"
+      ],
+      "windows": { "installMode": "passive" }
     }
   }
 }

@@ -30,6 +30,7 @@ desktop = [
     "dep:tauri-plugin-deep-link",
     "dep:tauri-plugin-single-instance",
     "dep:tauri-plugin-opener",
+    "dep:tauri-plugin-updater",
     "dep:tauri-build",
     "keyring/sync-secret-service",
     "keyring/crypto-rust",
@@ -121,6 +122,9 @@ tauri-plugin-single-instance = { version = "2.4.3", optional = true, features = 
 # controls is the whole point of the redirect-based OAuth flow the plan
 # picked over an embedded login form.
 tauri-plugin-opener = { version = "2.5.4", optional = true }
+# Checks the GitHub release feed (latest.json), verifies the minisign
+# signature against the public key in tauri.conf.json, and installs.
+tauri-plugin-updater = { version = "2", optional = true }
 
 # Makes Windows-native echo cancellation the default on Windows, with no
 # `--features` flag for anyone to remember — including `pnpm run tauri dev` and

@@ -124,6 +124,176 @@ pub fn download_percent(downloaded: u64, total: Option<u64>) -> Option<u8> {
     }
 }
 
+#[cfg(feature = "desktop")]
+pub use desktop::{UpdaterState, check_now, install, spawn_background_checks};
+
+#[cfg(feature = "desktop")]
+mod desktop {
+    use super::*;
+    use std::path::PathBuf;
+    use std::sync::Mutex;
+    use std::sync::atomic::{AtomicBool, Ordering};
+    use tauri::{AppHandle, Emitter, Manager};
+    use tauri_plugin_updater::UpdaterExt;
+
+    /// Managed state: what the UI last saw, the session state the install
+    /// gate reads, and a version this run will not offer again.
+    #[derive(Default)]
+    pub struct UpdaterState {
+        status: Mutex<UpdateStatus>,
+        session: Mutex<Option<State>>,
+        rejected: Mutex<Option<String>>,
+        busy: AtomicBool,
+    }
+
+    impl UpdaterState {
+        pub fn status(&self) -> UpdateStatus {
+            self.status.lock().unwrap().clone()
+        }
+
+        /// Called from `emit_state`, so the gate always sees what the HUD sees.
+        pub fn set_session_state(&self, state: State) {
+            *self.session.lock().unwrap() = Some(state);
+        }
+
+        fn session_state(&self) -> State {
+            self.session.lock().unwrap().unwrap_or(State::Idle)
+        }
+    }
+
+    fn publish(app: &AppHandle, status: UpdateStatus) {
+        *app.state::<UpdaterState>().status.lock().unwrap() = status.clone();
+        let _ = app.emit(crate::hud::UPDATE_EVENT, &status);
+    }
+
+    /// One check. A second call while a check or install runs returns the
+    /// current status instead of starting another.
+    pub async fn check_now(app: &AppHandle) -> UpdateStatus {
+        let state = app.state::<UpdaterState>();
+        if state.busy.swap(true, Ordering::SeqCst) {
+            return state.status();
+        }
+        publish(app, UpdateStatus::Checking);
+        let outcome = match app.updater() {
+            Err(e) => CheckOutcome::Error(e.to_string()),
+            Ok(updater) => match updater.check().await {
+                Ok(Some(update)) => CheckOutcome::Found {
+                    version: update.version,
+                    notes: update.body,
+                },
+                Ok(None) => CheckOutcome::NoUpdate,
+                Err(e) => CheckOutcome::Error(e.to_string()),
+            },
+        };
+        let current = app.package_info().version.to_string();
+        let rejected = state.rejected.lock().unwrap().clone();
+        let status = status_after_check(outcome, &current, rejected.as_deref());
+        publish(app, status.clone());
+        state.busy.store(false, Ordering::SeqCst);
+        status
+    }
+
+    /// Downloads, installs and restarts. Refused while the assistant is busy.
+    /// On Windows the installer exits the app itself and this never returns.
+    pub async fn install(app: &AppHandle) -> Result<(), String> {
+        let state = app.state::<UpdaterState>();
+        if !may_install(state.session_state()) {
+            return Err("The assistant is busy. Install when it is quiet.".to_string());
+        }
+        if state.busy.swap(true, Ordering::SeqCst) {
+            return Err("An update check or install is already running.".to_string());
+        }
+        let result = install_inner(app).await;
+        state.busy.store(false, Ordering::SeqCst);
+        result
+    }
+
+    async fn install_inner(app: &AppHandle) -> Result<(), String> {
+        let update = app
+            .updater()
+            .map_err(|e| e.to_string())?
+            .check()
+            .await
+            .map_err(|e| e.to_string())?
+            .ok_or_else(|| "No update is available any more.".to_string())?;
+        let version = update.version.clone();
+        let notes = update.body.clone();
+        publish(
+            app,
+            UpdateStatus::Downloading {
+                version: version.clone(),
+                percent: Some(0),
+            },
+        );
+
+        let progress_app = app.clone();
+        let progress_version = version.clone();
+        let mut downloaded: u64 = 0;
+        let mut last: Option<u8> = Some(0);
+        let result = update
+            .download_and_install(
+                move |chunk, total| {
+                    downloaded += chunk as u64;
+                    let percent = download_percent(downloaded, total);
+                    if percent != last {
+                        last = percent;
+                        publish(
+                            &progress_app,
+                            UpdateStatus::Downloading {
+                                version: progress_version.clone(),
+                                percent,
+                            },
+                        );
+                    }
+                },
+                || {},
+            )
+            .await;
+
+        match result {
+            Ok(()) => app.restart(),
+            Err(e) => {
+                let kind = classify(&e);
+                if matches!(kind, InstallError::Signature) {
+                    *app.state::<UpdaterState>().rejected.lock().unwrap() = Some(version.clone());
+                }
+                let message = e.to_string();
+                publish(app, status_after_install_error(&version, notes, kind));
+                Err(message)
+            }
+        }
+    }
+
+    fn classify(e: &tauri_plugin_updater::Error) -> InstallError {
+        use tauri_plugin_updater::Error as E;
+        match e {
+            E::Minisign(_)
+            | E::Base64(_)
+            | E::SignatureUtf8(_)
+            | E::SignedVersionMismatch { .. }
+            | E::MissingSignedVersion => InstallError::Signature,
+            other => InstallError::Other(other.to_string()),
+        }
+    }
+
+    /// The background schedule. Re-reads the setting before every check, so
+    /// turning it off or on needs no restart.
+    pub fn spawn_background_checks(app: AppHandle, agent_settings_path: PathBuf) {
+        tauri::async_runtime::spawn(async move {
+            let mut first = true;
+            loop {
+                tokio::time::sleep(next_check_delay(first)).await;
+                first = false;
+                let settings: crate::settings::AgentSettings =
+                    crate::settings::load(&agent_settings_path).unwrap_or_default();
+                if crate::settings::resolve_auto_update_check(settings.auto_update_check) {
+                    check_now(&app).await;
+                }
+            }
+        });
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
