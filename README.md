@@ -1,9 +1,8 @@
 [![License: PolyForm Internal Use OR Noncommercial](https://img.shields.io/badge/License-PolyForm%20Internal%20Use%20OR%20Noncommercial-blue.svg)](LICENSE.md)
 [![Version](https://img.shields.io/github/v/release/mycorx/user-interface-agents?filter=uai-app-*&display_name=tag&label=Version&color=green)](https://github.com/mycorx/user-interface-agents/releases)
-[![Rust](https://img.shields.io/badge/Rust-1.85%2B-orange.svg)](https://www.rust-lang.org/)
+[![MSRV](https://img.shields.io/badge/MSRV-1.85-orange.svg)](https://www.rust-lang.org/)
 [![Svelte](https://img.shields.io/badge/Svelte-5-red.svg)](https://svelte.dev/)
 [![Tauri](https://img.shields.io/badge/Tauri-2-blue.svg)](https://tauri.app/)
-[![TypeScript](https://img.shields.io/badge/TypeScript-6-blue.svg)](https://www.typescriptlang.org/)
 
 <div align="center">
   <img src="docs/uia-logo.png" alt="UIA Logo" width="200" />
