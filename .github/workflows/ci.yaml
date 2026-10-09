@@ -17,10 +17,8 @@ jobs:
   # checks "Expected" forever and the PR cannot merge, whereas a job skipped by
   # `if:` counts as passing. `ci-ok` at the bottom is the one required check.
   #
-  # "Code" is every `code_paths` entry in .github/release-components.json (the
-  # same definition the release labels use) plus what CI itself runs or checks.
-  # Editing the registry is itself a trigger, so a PR cannot narrow the filter
-  # and skip the jobs in the same change.
+  # What counts as code is defined in scripts/ci_changes.py: every `code_paths`
+  # entry in .github/release-components.json plus what CI itself runs or checks.
   #
   # workflow_dispatch and workflow_call (release.yaml, at the commit being
   # shipped) always run everything.
@@ -38,45 +36,8 @@ jobs:
       - id: filter
         env:
           EVENT: ${{ github.event_name }}
-        run: |
-          python3 - <<'PY'
-          import json, os, subprocess, sys
-          sys.path.insert(0, "scripts/release")
-          from paths import matches
+        run: python3 scripts/ci_changes.py --event "$EVENT"
 
-          # What CI runs or checks beyond the app's own code_paths.
-          EXTRA = [
-              ".github/workflows/**",
-              ".github/release-components.json",
-              "scripts/**",
-              "NOTICE.txt",
-              "LICENSES/**",
-              "uia.example.toml",
-          ]
-
-          def emit(code, why):
-              print(f"code={code}: {why}")
-              with open(os.environ["GITHUB_OUTPUT"], "a") as out:
-                  out.write(f"code={code}\n")
-
-          if os.environ["EVENT"] != "pull_request":
-              emit("true", f"{os.environ['EVENT']} always runs the full suite")
-              sys.exit(0)
-
-          with open(".github/release-components.json") as f:
-              registry = json.load(f)
-          patterns = EXTRA + [p for c in registry.values() for p in c["code_paths"]]
-          files = subprocess.run(
-              ["git", "diff", "--name-only", "HEAD^1", "HEAD"],
-              check=True, capture_output=True, text=True,
-          ).stdout.splitlines()
-          print("changed files:", *files, sep="\n  ")
-          hit = [f for f in files if any(matches(p, f) for p in patterns)]
-          if hit:
-              emit("true", f"{hit[0]} is a code path")
-          else:
-              emit("false", "no code, script or workflow changes")
-          PY
   test-ubuntu:
     needs: changes
     if: needs.changes.outputs.code == 'true'
