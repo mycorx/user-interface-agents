@@ -17,6 +17,7 @@ pub mod settings;
 pub mod smoke;
 pub mod time;
 pub mod time_executor;
+pub mod updater;
 pub mod wsl;
 
 /// The IPC payload contract: the HUD only ever renders the string Rust

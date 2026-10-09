@@ -55,6 +55,9 @@ pub const TEXT_TURN_SUPPORT_EVENT: &str = "uia://text-turn-support";
 /// already has its own copy of what the user typed, so this is not a gap.
 pub const TURN_EVENT: &str = "uia://turn";
 
+/// [`crate::updater::UpdateStatus`], on every change.
+pub const UPDATE_EVENT: &str = "uia://update";
+
 /// ~30 Hz, the rate the stage asks for. Capture runs at 50 Hz (20 ms frames),
 /// so the meter is deliberately slower than the source: a level bar redrawn
 /// faster than a display refreshes costs IPC round trips and buys nothing.
@@ -332,6 +335,11 @@ mod tests {
             text_turn_support_payload(&TextTurnSupport::Unsupported("speak instead".into())),
             serde_json::json!({ "support": "unsupported", "reason": "speak instead" })
         );
+    }
+
+    #[test]
+    fn the_update_event_name_is_namespaced_like_the_others() {
+        assert_eq!(UPDATE_EVENT, "uia://update");
     }
 
     #[test]
