@@ -195,8 +195,13 @@ jobs:
       - name: Build and attach to the draft release
         if: ${{ !inputs.dry_run }}
         uses: tauri-apps/tauri-action@1deb371b0cd8bd54025b384f1cd735e725c4060f # action-v1.0.0
+        # The updater key (docs/RELEASE.md), on the build steps only. Set on
+        # dry runs too, so a broken or missing key fails the dry run rather
+        # than the real release.
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          TAURI_SIGNING_PRIVATE_KEY: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY }}
+          TAURI_SIGNING_PRIVATE_KEY_PASSWORD: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY_PASSWORD }}
         with:
           # Not the repository root: tauri.conf.json lives beside the crate,
           # and its `frontendDist` is resolved relative to itself.
@@ -207,11 +212,24 @@ jobs:
           # inside the job that produces the binaries we ship (docs/RELEASE.md).
           args: --bundles deb
           releaseId: ${{ needs.create-release.outputs.release_id }}
+          # The feed is assembled once, by `updater-manifest`, after both
+          # builds: tauri-action's own latest.json is read-modify-write on the
+          # release, and two parallel jobs would drop each other's platform.
+          includeUpdaterJson: false
 
       - name: Build without releasing
         if: ${{ inputs.dry_run }}
         working-directory: crates/uia-app
+        # The updater key; see the step above.
+        env:
+          TAURI_SIGNING_PRIVATE_KEY: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY }}
+          TAURI_SIGNING_PRIVATE_KEY_PASSWORD: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY_PASSWORD }}
         run: pnpm exec tauri build --bundles deb
+
+      # A missing key or a build without updater artifacts produces no .sig;
+      # fail here, on a dry run too, not later in `updater-manifest`.
+      - name: Check the updater signature was produced
+        run: ls target/release/bundle/deb/*.deb.sig
 
       - name: Record shipped binary size
         run: |
@@ -224,7 +242,9 @@ jobs:
       - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
         with:
           name: uia-linux
-          path: target/release/bundle/deb/*.deb
+          path: |
+            target/release/bundle/deb/*.deb
+            target/release/bundle/deb/*.deb.sig
           if-no-files-found: error
 
   windows:
@@ -252,23 +272,48 @@ jobs:
       - name: Build and attach to the draft release
         if: ${{ !inputs.dry_run }}
         uses: tauri-apps/tauri-action@1deb371b0cd8bd54025b384f1cd735e725c4060f # action-v1.0.0
+        # The updater key (docs/RELEASE.md), on the build steps only. Set on
+        # dry runs too, so a broken or missing key fails the dry run rather
+        # than the real release.
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          TAURI_SIGNING_PRIVATE_KEY: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY }}
+          TAURI_SIGNING_PRIVATE_KEY_PASSWORD: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY_PASSWORD }}
         with:
           projectPath: crates/uia-app
           tauriScript: pnpm exec tauri
           args: --bundles msi
           releaseId: ${{ needs.create-release.outputs.release_id }}
+          # The feed is assembled once, by `updater-manifest`, after both
+          # builds: tauri-action's own latest.json is read-modify-write on the
+          # release, and two parallel jobs would drop each other's platform.
+          includeUpdaterJson: false
 
       - name: Build without releasing
         if: ${{ inputs.dry_run }}
         working-directory: crates/uia-app
+        # The updater key; see the step above.
+        env:
+          TAURI_SIGNING_PRIVATE_KEY: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY }}
+          TAURI_SIGNING_PRIVATE_KEY_PASSWORD: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY_PASSWORD }}
         run: pnpm exec tauri build --bundles msi
+
+      # A missing key or a build without updater artifacts produces no .sig;
+      # fail here, on a dry run too, not later in `updater-manifest`.
+      - name: Check the updater signature was produced
+        shell: pwsh
+        run: |
+          if (-not (Get-ChildItem target/release/bundle/msi/*.msi.sig -ErrorAction SilentlyContinue)) {
+            Write-Error "no target/release/bundle/msi/*.msi.sig was produced"
+            exit 1
+          }
 
       - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
         with:
           name: uia-windows
-          path: target/release/bundle/msi/*.msi
+          path: |
+            target/release/bundle/msi/*.msi
+            target/release/bundle/msi/*.msi.sig
           if-no-files-found: error
 
   # A clean-machine check of the installer that was just built: install it,
@@ -311,10 +356,59 @@ jobs:
           $msi = (Get-ChildItem installer/*.msi | Select-Object -First 1).FullName
           ./scripts/smoke/windows.ps1 -Msi $msi -Version $env:VERSION
 
+  # Builds latest.json -- the feed every installed app checks -- from the
+  # draft's installers and their .sig files, in one write, and attaches it.
+  # `publish` waits for it, so a release never goes live without a valid feed.
+  updater-manifest:
+    if: ${{ !inputs.dry_run }}
+    needs: [plan, create-release, linux, windows]
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - name: Build latest.json
+        env:
+          GH_TOKEN: ${{ github.token }}
+          RELEASE_ID: ${{ needs.create-release.outputs.release_id }}
+          TAG: ${{ needs.plan.outputs.target_tag }}
+          VERSION: ${{ needs.plan.outputs.target_version }}
+        run: >
+          python3 scripts/release updater-manifest
+          --release-id "$RELEASE_ID" --tag "$TAG" --version "$VERSION"
+          --require windows --require linux
+          --out "$RUNNER_TEMP/latest.json"
+      - name: Attach latest.json to the draft
+        uses: actions/github-script@3a2844b7e9c422d3c10d287c895573f7108da1b3 # v9.0.0
+        env:
+          RELEASE_ID: ${{ needs.create-release.outputs.release_id }}
+          MANIFEST: ${{ runner.temp }}/latest.json
+        with:
+          script: |
+            const fs = require('fs')
+            const { owner, repo } = context.repo
+            const release_id = Number(process.env.RELEASE_ID)
+            // Idempotent: a re-run replaces the feed instead of failing on
+            // the name already being taken.
+            const assets = await github.paginate(github.rest.repos.listReleaseAssets, {
+              owner, repo, release_id, per_page: 100,
+            })
+            for (const asset of assets.filter((a) => a.name === 'latest.json')) {
+              await github.rest.repos.deleteReleaseAsset({ owner, repo, asset_id: asset.id })
+            }
+            const data = fs.readFileSync(process.env.MANIFEST)
+            await github.rest.repos.uploadReleaseAsset({
+              owner, repo, release_id, name: 'latest.json', data,
+              headers: { 'content-type': 'application/json', 'content-length': data.length },
+            })
+            core.info('Attached latest.json')
+
   # The only job that makes anything public, and only when every gate passed.
   publish:
     if: ${{ !inputs.dry_run }}
-    needs: [plan, create-release, tests, smoke-linux, smoke-windows]
+    needs: [plan, create-release, tests, smoke-linux, smoke-windows, updater-manifest]
     runs-on: ubuntu-latest
     permissions:
       contents: write
@@ -379,7 +473,8 @@ jobs:
   #      app-specific password for APPLE_ID, not the account password.
   #   3. Uncomment `smoke-macos` below as well, and add both `macos` and
   #      `smoke-macos` to `publish.needs`, so a failed macOS build or smoke test
-  #      keeps the release a draft like the other platforms.
+  #      keeps the release a draft like the other platforms, and add `macos` to
+  #      `updater-manifest.needs` and `--require macos` to its command.
   #   4. Do a dry run (workflow_dispatch) and check the `uia-macos` artifact
   #      on a second Mac before tagging.
   #
@@ -419,8 +514,13 @@ jobs:
   #     - name: Build and attach to the draft release
   #       if: ${{ !inputs.dry_run }}
   #       uses: tauri-apps/tauri-action@1deb371b0cd8bd54025b384f1cd735e725c4060f # action-v1.0.0
+  #       # The updater key (docs/RELEASE.md), on the build steps only. Set on
+  #       # dry runs too, so a broken or missing key fails the dry run rather
+  #       # than the real release.
   #       env:
   #         GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+  #         TAURI_SIGNING_PRIVATE_KEY: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY }}
+  #         TAURI_SIGNING_PRIVATE_KEY_PASSWORD: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY_PASSWORD }}
   #       with:
   #         projectPath: crates/uia-app
   #         tauriScript: pnpm exec tauri
@@ -428,10 +528,18 @@ jobs:
   #         # scripts/build-macos-package.sh names locally.
   #         args: --target universal-apple-darwin --bundles app,dmg
   #         releaseId: ${{ needs.create-release.outputs.release_id }}
+  #         # The feed is assembled once, by `updater-manifest`, after all
+  #         # builds: tauri-action's own latest.json is read-modify-write on the
+  #         # release, and parallel jobs would drop each other's platform.
+  #         includeUpdaterJson: false
   #
   #     - name: Build without releasing
   #       if: ${{ inputs.dry_run }}
   #       working-directory: crates/uia-app
+  #       # The updater key; see the step above.
+  #       env:
+  #         TAURI_SIGNING_PRIVATE_KEY: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY }}
+  #         TAURI_SIGNING_PRIVATE_KEY_PASSWORD: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY_PASSWORD }}
   #       run: pnpm exec tauri build --target universal-apple-darwin --bundles app,dmg
   #
   #     # Fails the run rather than shipping an app that opens to silence or
@@ -448,7 +556,10 @@ jobs:
   #     - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
   #       with:
   #         name: uia-macos
-  #         path: target/universal-apple-darwin/release/bundle/dmg/*.dmg
+  #         path: |
+  #           target/universal-apple-darwin/release/bundle/dmg/*.dmg
+  #           target/universal-apple-darwin/release/bundle/macos/*.app.tar.gz
+  #           target/universal-apple-darwin/release/bundle/macos/*.app.tar.gz.sig
   #         if-no-files-found: error
   #
   # Installs the .dmg's app the way a user does and proves it starts

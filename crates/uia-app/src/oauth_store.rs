@@ -162,10 +162,10 @@ impl CredentialStore for KeyringCredentialStore {
         // caller expects. A missing refresh entry is not an error — a token
         // response with no refresh token is a valid state `rmcp` already
         // handles.
-        if let Some(refresh) = self.load_chunked(&self.refresh_account) {
-            if let Some(token_response) = credentials.token_response.as_mut() {
-                token_response.set_refresh_token(Some(RefreshToken::new(refresh)));
-            }
+        if let Some(refresh) = self.load_chunked(&self.refresh_account)
+            && let Some(token_response) = credentials.token_response.as_mut()
+        {
+            token_response.set_refresh_token(Some(RefreshToken::new(refresh)));
         }
         Ok(Some(credentials))
     }

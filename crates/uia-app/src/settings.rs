@@ -93,6 +93,10 @@ pub struct AgentSettings {
     /// loading rather than being rejected.
     #[serde(default)]
     pub home_location: Option<String>,
+    /// Whether the app checks for updates in the background. `None` (never
+    /// touched) means on; the manual "Check now" works either way.
+    #[serde(default)]
+    pub auto_update_check: Option<bool>,
 }
 
 /// `uia-agent.json`, same sibling-of-`uia.toml` convention as
@@ -491,6 +495,10 @@ pub fn resolve_memory_enabled(
     persisted.unwrap_or(configured == crate::config::MemoryBackend::Local)
 }
 
+pub fn resolve_auto_update_check(persisted: Option<bool>) -> bool {
+    persisted.unwrap_or(true)
+}
+
 pub fn resolve_audio_settings(
     configured: &AudioSection,
     persisted: Option<AudioSettings>,
@@ -820,6 +828,7 @@ mod tests {
                 quit_on_close: Some(false),
                 memory_enabled: Some(false),
                 home_location: Some("Hobart".into()),
+                auto_update_check: None,
             },
         )
         .unwrap();
@@ -834,6 +843,7 @@ mod tests {
                 quit_on_close: Some(false),
                 memory_enabled: Some(false),
                 home_location: Some("Hobart".into()),
+                auto_update_check: None,
             })
         );
     }
@@ -862,6 +872,19 @@ mod tests {
                 ..Default::default()
             })
         );
+    }
+
+    #[test]
+    fn automatic_update_checks_default_to_on() {
+        assert!(resolve_auto_update_check(None));
+        assert!(resolve_auto_update_check(Some(true)));
+        assert!(!resolve_auto_update_check(Some(false)));
+    }
+
+    #[test]
+    fn an_agent_sidecar_written_before_auto_update_check_still_loads() {
+        let loaded: AgentSettings = serde_json::from_str(r#"{"name":"Ada"}"#).unwrap();
+        assert_eq!(loaded.auto_update_check, None);
     }
 
     #[test]

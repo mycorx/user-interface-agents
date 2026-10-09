@@ -35,6 +35,7 @@ use uia_app::settings::{
     self, agent_settings_path_for, audio_settings_path_for, foundry_settings_path_for,
     model_settings_path_for, settings_path_for, ui_settings_path_for,
 };
+use uia_app::updater::{self, CheckTrigger, UpdateStatus, UpdaterState};
 use uia_core::activation::{Activation, ActivationEvent, ChannelActivation};
 use uia_core::session::SessionControl;
 
@@ -432,6 +433,7 @@ fn main() {
         .plugin(tauri_plugin_global_shortcut::Builder::new().build())
         .plugin(tauri_plugin_process::init())
         .plugin(tauri_plugin_dialog::init())
+        .plugin(tauri_plugin_updater::Builder::new().build())
         .plugin(tauri_plugin_autostart::init(
             tauri_plugin_autostart::MacosLauncher::LaunchAgent,
             None,
@@ -453,6 +455,7 @@ fn main() {
         .manage(McpLocalServersDir(mcp_local_servers_dir.clone()))
         .manage(McpHealthState(mcp_health.clone()))
         .manage(ConversationStorePath(memory_path.clone()))
+        .manage(UpdaterState::default())
         .invoke_handler(tauri::generate_handler![
             set_engine,
             get_engine,
@@ -496,7 +499,10 @@ fn main() {
             preview_mcp_remote_server,
             add_mcp_remote_server,
             set_mcp_remote_server_enabled,
-            remove_mcp_remote_server
+            remove_mcp_remote_server,
+            get_update_status,
+            check_for_update,
+            install_update
         ])
         .setup(move |app| {
             let handle = app.handle().clone();
@@ -540,12 +546,15 @@ fn main() {
             let show_item = MenuItemBuilder::with_id("show", "Show").build(app)?;
             let hide_item = MenuItemBuilder::with_id("hide", "Hide").build(app)?;
             let settings_item = MenuItemBuilder::with_id("settings", "Settings…").build(app)?;
+            let update_item =
+                MenuItemBuilder::with_id("check-updates", "Check for updates…").build(app)?;
             let quit_item = MenuItemBuilder::with_id("quit", "Quit").build(app)?;
             let tray_menu = MenuBuilder::new(app)
                 .item(&show_item)
                 .item(&hide_item)
                 .separator()
                 .item(&settings_item)
+                .item(&update_item)
                 .separator()
                 .item(&quit_item)
                 .build()?;
@@ -583,6 +592,20 @@ fn main() {
                     }
                     return;
                 }
+                if id == "check-updates" {
+                    // Opens Settings, where the result is shown: an
+                    // "up to date" answer has nowhere else to appear.
+                    if let Some(hud) = app.get_webview_window(HUD_WINDOW) {
+                        let _ = hud.show();
+                        let _ = hud.set_focus();
+                        let _ = hud.emit(OPEN_SETTINGS_EVENT, ());
+                    }
+                    let check_app = app.clone();
+                    tauri::async_runtime::spawn(async move {
+                        updater::check_now(&check_app, CheckTrigger::Manual).await;
+                    });
+                    return;
+                }
                 if let Some(ev) = activation_event_for_menu_id(id) {
                     let _ = tray_tx.try_send(ev);
                 }
@@ -613,14 +636,18 @@ fn main() {
                 let _ = hud.set_always_on_top(always_on_top);
                 let hud_to_hide = hud.clone();
                 hud.on_window_event(move |event| {
-                    if let tauri::WindowEvent::CloseRequested { api, .. } = event {
-                        if !quit_on_close {
-                            api.prevent_close();
-                            let _ = hud_to_hide.hide();
-                        }
+                    if let tauri::WindowEvent::CloseRequested { api, .. } = event
+                        && !quit_on_close
+                    {
+                        api.prevent_close();
+                        let _ = hud_to_hide.hide();
                     }
                 });
             }
+
+            // Update checks: 30 s after launch, then every 6 h, each one
+            // gated on the agent settings' `auto_update_check`.
+            updater::spawn_background_checks(handle.clone(), agent_settings_path_for(&config_path));
 
             // Mirror the connection gate onto the webview. Its own `watch` is
             // the source of truth; this only republishes it, so the UI can
@@ -786,7 +813,37 @@ fn main() {
 }
 
 fn emit_state(app: &AppHandle, state: uia_core::session::State) {
+    app.state::<UpdaterState>().set_session_state(state);
     let _ = app.emit(STATE_EVENT, state_payload(state));
+}
+
+/// The running version plus the last update status, for a card that mounts
+/// after the last `uia://update` event fired (Tauri does not buffer events).
+#[derive(serde::Serialize)]
+struct UpdateSnapshot {
+    current_version: String,
+    status: UpdateStatus,
+}
+
+#[tauri::command]
+fn get_update_status(app: AppHandle, state: tauri::State<UpdaterState>) -> UpdateSnapshot {
+    UpdateSnapshot {
+        current_version: app.package_info().version.to_string(),
+        status: state.status(),
+    }
+}
+
+/// The manual check behind Settings' "Check now" and the tray item. Works
+/// whether or not automatic checks are on.
+#[tauri::command]
+async fn check_for_update(app: AppHandle) -> UpdateStatus {
+    updater::check_now(&app, CheckTrigger::Manual).await
+}
+
+/// Refused (Err) while the assistant is mid-turn; see `updater::may_install`.
+#[tauri::command]
+async fn install_update(app: AppHandle) -> Result<(), String> {
+    updater::install(&app).await
 }
 
 /// Persists the selector's choice for the *next* launch. Restart-to-switch

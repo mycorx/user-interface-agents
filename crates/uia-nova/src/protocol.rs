@@ -169,7 +169,9 @@ fn decode_pcm16(base64_pcm: &str) -> Result<Vec<i16>, EngineError> {
         .decode(base64_pcm)
         .map_err(|e| EngineError::Protocol(e.to_string()))?;
     Ok(bytes
-        .chunks_exact(2)
+        .as_chunks::<2>()
+        .0
+        .iter()
         .map(|c| i16::from_le_bytes([c[0], c[1]]))
         .collect())
 }

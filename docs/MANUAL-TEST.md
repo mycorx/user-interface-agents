@@ -337,6 +337,21 @@ barely hears the speakers — use a webcam or built-in mic for the echo checks.
       cancellation disabled via config`, and with speakers the assistant now
       does hear itself — confirming the toggle is not a no-op.
 
+## Updates
+
+This test is run once per OS with the first two releases that carry the updater,
+N and N+1. The `/latest/` endpoint only points at the newest published release,
+so only the latest can be tested as "available" by the check.
+
+- [ ] Install N from its release page, then publish release N+1.
+- [ ] Within about 30 seconds of launching N, the HUD shows "Update N+1 · Install and restart".
+- [ ] While the assistant is speaking, that button is disabled. It enables when the assistant is idle (Listening or Idle state).
+- [ ] Click "Install and restart", watch it download with progress, install and relaunch as N+1. Settings → General shows "Version N+1"; the status reads "Not checked yet" until the first check, so press "Check now" (or wait about 30 seconds) and it shows "Up to date (N+1)".
+- [ ] Linux only: cancelling the admin-password prompt (pkexec) leaves the app running with the update offer still shown.
+- [ ] With "Check for updates automatically" turned off in Settings → General → App behavior, relaunch N: the banner does not appear. But "Check now" finds N+1 and shows it.
+- [ ] Tray → "Check for updates…" opens Settings and shows the result ("Up to date", available, or an error).
+- [ ] With the app offline (network unavailable), "Check now" shows an error in Settings and nothing in the HUD.
+
 ## Known gaps to expect
 
 - **`crates/uia-app/icons/` is a placeholder icon set**, not a real logo —

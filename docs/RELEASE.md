@@ -35,7 +35,10 @@ the entitlement below, and the `APPLE_*` repository secrets (certificate,
 signing identity, notarization credentials). It builds one universal `.app` +
 `.dmg` on `macos-latest` and fails the run unless the result is signed,
 carries the microphone entitlement, passes Gatekeeper and is notarized. To
-switch it on, uncomment it and delete `macos-local-build-note`.
+switch it on, uncomment it and delete `macos-local-build-note`. Also add
+`macos` to `updater-manifest`'s `needs` and pass `--require macos` to its
+command, so the macOS update joins `latest.json` (see the "Before enabling"
+step 3 in the workflow comments).
 
 **Before a signed macOS release, do not forget the microphone entitlement.**
 `crates/uia-app/Info.plist` already carries `NSMicrophoneUsageDescription`, which
@@ -190,26 +193,67 @@ Neither published installer is code-signed, so:
 Signing Windows needs a purchased OV/EV certificate. Worth doing before any
 broad public distribution; not worth blocking the first releases on.
 
-## There is no auto-updater yet
+## Updates
 
-Deliberate, as of 2026-09-06: shipping the updater means generating a signing
-keypair, escrowing it, and baking a public key into every build. At zero users
-that ceremony buys nothing, so updates are manual — download the new installer
-from the Releases page and run it.
+### How an update reaches users
 
-**This has a deadline.** An app built without the updater has no public key
-compiled in and never checks for updates, so it can never be *migrated* onto an
-update channel later — everyone already running a build has to reinstall once,
-by hand, after being told to. That cost is nil today and grows with every
-install. Add the updater before the repository goes public (~2026-10-05) or
-before there is a real install base, whichever comes first.
+The app checks for updates at `https://github.com/mycorx/user-interface-agents/releases/latest/download/latest.json`
+automatically: 30 seconds after launch, then every 6 hours, unless the user has
+disabled automatic checking in Settings → General → App behavior. The user can
+also force a check with "Check now" in Settings, or from the tray's "Check for
+updates…" menu item (which opens Settings).
 
-When that happens, the keypair is not rotatable in any ordinary sense: every
-installed client trusts exactly the key baked into its binary, so losing the
-private key strands the entire fleet on whatever version it has. GitHub Actions
-secrets are write-only and cannot be read back, so the copy in
-`TAURI_SIGNING_PRIVATE_KEY` is not a backup. Escrow a second copy in AWS
-Secrets Manager (`ap-southeast-2`) at the same time you generate it:
+When an update is available, the HUD displays a banner: "Update *X* · Install
+and restart" with a "×" (Later) button. The install button is only active when
+the session is Idle or Listening — it is disabled while the assistant is Speaking
+or in any other state. Once clicked, the update downloads with a progress
+indicator, then installs. On Windows, the MSI installer handles the exit and
+restart. On Linux, `pkexec` prompts for the admin password before installation.
+
+### The feed: `latest.json`
+
+The `.github/workflows/release.yaml` workflow builds `latest.json` from the
+signed installer artifacts attached to the draft release. The `updater-manifest`
+job runs `python3 scripts/release updater-manifest` to generate this file, then
+attaches it to the draft. The `publish` job waits for `updater-manifest` to
+complete before it runs — this ensures the feed is ready when the release is
+published.
+
+### Publish: when every install gets access
+
+`publish` is the moment a release reaches every installed copy of the app.
+Once a release is published, `/latest/` points to it and every app checking for
+updates will see it.
+
+To withdraw a bad release, delete it from the GitHub Releases page or move it
+back to draft status. The `/latest/` endpoint then falls back to the previous
+published release. Installs that have already downloaded and installed the
+withdrawn release remain on that version. Fix forward with a new version.
+
+### The signing key
+
+The updater verifies every downloaded installer using a public key baked into
+the app at build time. That public key is in `crates/uia-app/tauri.conf.json`
+under `plugins.updater.pubkey` (currently `F3E43EB66DE69A6C`).
+
+**Generate the keypair once, before the first release with the updater:**
+
+```bash
+pnpm exec tauri signer generate -w ~/.tauri/uia.key
+```
+
+The command prompts for a passphrase and saves the keypair to `~/.tauri/uia.key`.
+Create two repository secrets: `TAURI_SIGNING_PRIVATE_KEY` (the full contents of
+`~/.tauri/uia.key`) and `TAURI_SIGNING_PRIVATE_KEY_PASSWORD` (the passphrase).
+The release workflow reads these secrets automatically.
+
+**Store both the private key and passphrase securely.** The keypair is not
+rotatable in any ordinary sense: every installed client trusts exactly the key
+compiled into its binary. Losing the private key strands every install on
+whatever version it has. GitHub Actions secrets are write-only and cannot be
+read back, so the copy in `TAURI_SIGNING_PRIVATE_KEY` is not a backup. Escrow
+a second copy in AWS Secrets Manager (`ap-southeast-2`) at the same time you
+generate it:
 
 ```bash
 # The file:// form makes the CLI read the key off disk, so the private key
@@ -226,6 +270,22 @@ AWS-managed encryption is fine and keeps idle cost at about US$0.40/secret/month
 no rotation schedule, for the reason above. It goes in the non-production
 AWS account only because that is the one that exists — move it to the
 production account once that is stood up.
+
+The release workflow uses the secrets `TAURI_SIGNING_PRIVATE_KEY` and
+`TAURI_SIGNING_PRIVATE_KEY_PASSWORD` to sign installers in both the `linux` and
+`windows` jobs, including on dry runs. A dry run proves the key and passphrase
+work in CI and that the installers are signed (the `uia-linux` and `uia-windows`
+artifacts contain `.sig` files).
+
+### Local builds
+
+The local packaging scripts (`scripts/build-macos-package.sh` and
+`scripts/build-windows-package.ps1`) turn off updater artifacts (feed
+generation and installer signing) unless `TAURI_SIGNING_PRIVATE_KEY` is set in
+the environment. With `createUpdaterArtifacts` on, the bundler fails outright
+when it has no private key to sign with, so without this a local build would
+need the release key; only builds with the private key set (the release
+workflow) produce signed installers.
 
 ## Linux builds refuse to run under WSL
 

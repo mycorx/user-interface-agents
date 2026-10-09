@@ -43,7 +43,19 @@ Write-Host "==> Building Tauri bundle (msi)" -ForegroundColor Cyan
 $startedAt = (Get-Date).AddSeconds(-1)
 Push-Location crates/uia-app
 try {
-    Invoke-Checked { pnpm exec tauri build } "tauri build"
+    # createUpdaterArtifacts (tauri.conf.json) makes the bundler sign an updater
+    # bundle, and it fails without the release key. A local build is not an
+    # update, so turn the artifacts off unless the key is in the environment.
+    # The override goes in a file because `--config` takes a path as well as a
+    # JSON string, and a path survives PowerShell's native-argument quoting
+    # (which differs between 5.1 and 7.3+, and for pnpm.cmd vs pnpm.exe).
+    if ($env:TAURI_SIGNING_PRIVATE_KEY) {
+        Invoke-Checked { pnpm exec tauri build } "tauri build"
+    } else {
+        $noUpdaterConfig = Join-Path ([System.IO.Path]::GetTempPath()) "uia-no-updater-artifacts.json"
+        Set-Content -Path $noUpdaterConfig -Value '{"bundle":{"createUpdaterArtifacts":false}}' -Encoding ascii
+        Invoke-Checked { pnpm exec tauri build --config $noUpdaterConfig } "tauri build"
+    }
 }
 finally {
     Pop-Location

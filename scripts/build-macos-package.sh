@@ -276,6 +276,10 @@ touch "$MARKER"
 sleep 1   # mtimes can land in the same tick as the marker
 
 tauri_args=(build --bundles app,dmg)
+# createUpdaterArtifacts (tauri.conf.json) makes the bundler sign an updater
+# bundle, and it fails without the release key. A local build is not an update,
+# so turn the artifacts off unless the key is in the environment.
+[ -n "${TAURI_SIGNING_PRIVATE_KEY:-}" ] || tauri_args+=(--config '{"bundle":{"createUpdaterArtifacts":false}}')
 [ -n "$TARGET" ] && tauri_args+=(--target "$TARGET")
 (cd crates/uia-app && pnpm exec tauri "${tauri_args[@]}")
 

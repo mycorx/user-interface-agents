@@ -1,7 +1,9 @@
 <script lang="ts">
   import { invoke } from '@tauri-apps/api/core';
+  import { listen } from '@tauri-apps/api/event';
   import { getCurrentWindow } from '@tauri-apps/api/window';
   import SettingsPersonas from './SettingsPersonas.svelte';
+  import { describeUpdate, type UpdateSnapshot, type UpdateStatus } from './update';
 
   const MAX_PERSONAS = 6;
 
@@ -15,6 +17,7 @@
     quit_on_close: boolean | null;
     memory_enabled: boolean | null;
     home_location: string | null;
+    auto_update_check: boolean | null;
   };
 
   // Restart-to-switch fields per FD5 (name, persona) fire this on save, same
@@ -34,6 +37,7 @@
   let startAtLogin = $state(false);
   let personasOpen = $state(false);
   let homeLocation = $state('');
+  let autoUpdateCheck = $state(true);
 
   // Snapshot of what's actually persisted, refreshed on load and after every
   // successful save - the identity Save button is greyed out until name
@@ -62,6 +66,7 @@
       memoryEnabled = settings.memory_enabled ?? true;
       homeLocation = settings.home_location ?? '';
       savedHomeLocation = homeLocation;
+      autoUpdateCheck = settings.auto_update_check ?? true;
     })
     .catch((e) => console.error('get_agent_settings invoke() failed:', e));
 
@@ -78,11 +83,43 @@
       quit_on_close: quitOnClose,
       memory_enabled: memoryEnabled,
       home_location: homeLocation.trim() === '' ? null : homeLocation.trim(),
+      auto_update_check: autoUpdateCheck,
     };
   }
 
   async function persistAgentSettings() {
     await invoke('set_agent_settings', { settings: currentAgentSettings() });
+  }
+
+  async function toggleAutoUpdateCheck() {
+    lifecycleError = null;
+    try {
+      await persistAgentSettings();
+    } catch (e) {
+      lifecycleError = String(e);
+      console.error('set_agent_settings (auto_update_check) failed:', e);
+      autoUpdateCheck = !autoUpdateCheck;
+    }
+  }
+
+  let currentVersion = $state('');
+  let update = $state<UpdateStatus>({ status: 'idle' });
+  invoke<UpdateSnapshot>('get_update_status')
+    .then((snapshot) => {
+      currentVersion = snapshot.current_version;
+      update = snapshot.status;
+    })
+    .catch((e) => console.error('get_update_status invoke() failed:', e));
+  listen<UpdateStatus>('uia://update', (event) => {
+    update = event.payload;
+  }).catch((e) => console.error('uia://update listen() failed:', e));
+
+  async function checkNow() {
+    try {
+      update = await invoke<UpdateStatus>('check_for_update');
+    } catch (e) {
+      update = { status: 'failed', message: String(e) };
+    }
   }
 
   async function saveIdentity() {
@@ -260,6 +297,25 @@
     {#if startAtLoginError}
       <p class="field-error">{startAtLoginError}</p>
     {/if}
+
+    <div class="field">
+      <label class="checkbox-label">
+        <input type="checkbox" bind:checked={autoUpdateCheck} onchange={toggleAutoUpdateCheck} />
+        Check for updates automatically
+      </label>
+      <p class="hint">Applies immediately. "Check now" works either way.</p>
+      <p class="hint">
+        Version {currentVersion} · {describeUpdate(update)}
+        <button
+          type="button"
+          class="choice"
+          onclick={checkNow}
+          disabled={update.status === 'checking' || update.status === 'downloading'}
+        >
+          Check now
+        </button>
+      </p>
+    </div>
   </section>
 {/if}
 
@@ -328,6 +384,7 @@
     border-color: var(--accent, #6ea8fe);
   }
 
+  .choice:disabled,
   .save-row button:disabled {
     opacity: 0.6;
     cursor: default;

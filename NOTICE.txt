@@ -17,7 +17,7 @@ any dependency change.
 Rust crates
 ===========
 
-794 packages, grouped by declared SPDX license expression.
+806 packages, grouped by declared SPDX license expression.
 
 MIT OR Apache-2.0
 -----------------
@@ -26,6 +26,7 @@ MIT OR Apache-2.0
   aes                               0.8.4
   android_system_properties         0.1.6
   anyhow                            1.0.104
+  arbitrary                         1.5.0
   arc-swap                          1.9.2
   asn1-rs                           0.6.2
   asn1-rs                           0.7.2
@@ -78,6 +79,7 @@ MIT OR Apache-2.0
   dbus-secret-service               4.1.0
   der-parser                        10.0.0
   deranged                          0.5.8
+  derive_arbitrary                  1.5.0
   digest                            0.10.7
   digest                            0.11.3
   directories                       6.0.0
@@ -173,6 +175,7 @@ MIT OR Apache-2.0
   opaque-debug                      0.3.1
   openssl-probe                     0.2.1
   ordered-stream                    0.2.0
+  osakit                            0.3.1
   parking_lot                       0.12.5
   parking_lot_core                  0.9.12
   pastey                            0.2.3
@@ -266,8 +269,11 @@ MIT OR Apache-2.0
   syn                               1.0.109
   syn                               2.0.119
   syn                               3.0.4
+  system-configuration              0.7.0
+  system-configuration-sys          0.6.0
   system-deps                       6.2.2
   tao-macros                        0.1.4
+  tar                               0.4.46
   tempfile                          3.27.0
   tendril                           0.5.1
   thiserror                         1.0.69
@@ -364,6 +370,7 @@ MIT OR Apache-2.0
   x11rb-protocol                    0.13.2
   x509-parser                       0.16.0
   x509-parser                       0.18.1
+  xattr                             1.6.1
   yasna                             0.6.0
 
 MIT
@@ -438,6 +445,7 @@ MIT
   libredox               0.1.21
   memoffset              0.9.1
   mime_guess             2.0.5
+  minisign-verify        0.2.5
   mio                    1.2.2
   munge                  0.4.7
   munge_macro            0.4.7
@@ -529,6 +537,7 @@ MIT
   zbus_macros            5.13.2
   zbus_names             3.0.0
   zbus_names             4.3.1
+  zip                    4.6.1
   zip                    7.2.0
   zmij                   1.0.23
   zvariant               4.2.0
@@ -617,6 +626,7 @@ Apache-2.0 OR MIT
   tauri-plugin-opener           2.5.4
   tauri-plugin-process          2.3.1
   tauri-plugin-single-instance  2.4.3
+  tauri-plugin-updater          2.12.0
   tauri-runtime                 2.11.3
   tauri-runtime-wry             2.11.4
   tauri-utils                   2.9.3
@@ -636,6 +646,7 @@ MIT/Apache-2.0
   curve25519-dalek-derive       0.1.1
   der-parser                    9.0.0
   ff                            0.13.1
+  filetime                      0.2.29
   foreign-types                 0.5.0
   foreign-types-macros          0.2.4
   foreign-types-shared          0.3.1
@@ -730,6 +741,7 @@ Zlib OR Apache-2.0 OR MIT
   objc2-core-text           0.3.2
   objc2-exception-helper    0.1.1
   objc2-io-surface          0.3.2
+  objc2-osa-kit             0.3.2
   objc2-quartz-core         0.3.2
   objc2-ui-kit              0.3.2
   objc2-user-notifications  0.3.2
