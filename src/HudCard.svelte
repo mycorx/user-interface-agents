@@ -1,6 +1,7 @@
 <script lang="ts">
   import { invoke, convertFileSrc } from '@tauri-apps/api/core';
   import { listen } from '@tauri-apps/api/event';
+  import { describeUpdate, QUIET_STATES, type UpdateSnapshot, type UpdateStatus } from './update';
   import { getCurrentWindow } from '@tauri-apps/api/window';
 
   // S7. Replaces Hud.svelte inside the card deck: the HUD's own chrome
@@ -52,6 +53,10 @@
   // as `true` it flashed "Listening" for a frame against a muted session.
   let captureEnabled = $state(false);
   let lastError = $state('');
+  let update = $state<UpdateStatus>({ status: 'idle' });
+  let updateDismissed = $state(false);
+  let updateError = $state('');
+  const quiet = $derived(QUIET_STATES.includes(status));
   // The active persona's avatar - display-only in the full HUD, never
   // editable from here (Personas owns editing). Read once on mount; a
   // persona swap mid-session does not repaint this, same as the single
@@ -180,6 +185,25 @@
       textTurnReason = event.payload.reason;
     }
   ).catch((e) => console.error('uia://text-turn-support listen() failed:', e));
+
+  invoke<UpdateSnapshot>('get_update_status')
+    .then((snapshot) => {
+      update = snapshot.status;
+    })
+    .catch((e) => console.error('get_update_status invoke() failed:', e));
+  listen<UpdateStatus>('uia://update', (event) => {
+    update = event.payload;
+  }).catch((e) => console.error('uia://update listen() failed:', e));
+
+  async function installUpdate() {
+    updateError = '';
+    try {
+      await invoke('install_update');
+    } catch (e) {
+      updateError = String(e);
+      console.error('install_update invoke() failed:', e);
+    }
+  }
 
   // --- Waveform ----------------------------------------------------------
   // One flowing ribbon rather than nine bars. Layered curves share an
@@ -561,6 +585,27 @@
       >
     {:else if textTurnUnsupported && textTurnReason}
       <p class="hud-error" title={textTurnReason}>{textTurnReason}</p>
+    {:else if update.status === 'available' && !updateDismissed}
+      <span class="hud-update">
+        <button
+          type="button"
+          class="hud-update-install"
+          disabled={!quiet}
+          title={quiet
+            ? updateError || update.error || describeUpdate(update)
+            : 'Available when the assistant is quiet'}
+          onclick={installUpdate}>Update {update.version} · Install and restart</button
+        >
+        <button
+          type="button"
+          class="hud-update-later"
+          aria-label="Later"
+          title="Later"
+          onclick={() => (updateDismissed = true)}>×</button
+        >
+      </span>
+    {:else if update.status === 'downloading'}
+      <p class="hud-update" title={describeUpdate(update)}>{describeUpdate(update)}</p>
     {/if}
 
     <span class="spacer" data-tauri-drag-region></span>
@@ -1359,6 +1404,52 @@
     white-space: nowrap;
     font-size: 11px;
     color: #e8949a;
+  }
+
+  /* Shares the error's slot in the top row, so the card's footprint is
+     unchanged: one line, ellipsis when the chips leave too little room. */
+  .hud-update {
+    flex: 1;
+    min-width: 0;
+    margin: 0;
+    display: flex;
+    align-items: baseline;
+    gap: 6px;
+    overflow: hidden;
+    white-space: nowrap;
+    text-overflow: ellipsis;
+    font-size: 11px;
+    color: var(--accent, #6ea8fe);
+  }
+
+  .hud-update-install,
+  .hud-update-later {
+    appearance: none;
+    border: none;
+    background: none;
+    padding: 0;
+    margin: 0;
+    cursor: pointer;
+    font-family: inherit;
+    font-size: inherit;
+    color: var(--accent, #6ea8fe);
+  }
+
+  .hud-update-install {
+    min-width: 0;
+    overflow: hidden;
+    text-overflow: ellipsis;
+    white-space: nowrap;
+    text-align: left;
+  }
+
+  .hud-update-later {
+    flex: none;
+  }
+
+  .hud-update-install:disabled {
+    opacity: 0.5;
+    cursor: default;
   }
 
   /* FD7: reduced motion is a baseline accessibility default, not a setting.
