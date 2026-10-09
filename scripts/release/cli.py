@@ -6,9 +6,10 @@ import json
 import os
 import subprocess
 import sys
+from datetime import datetime, timezone
 from pathlib import Path
 
-from . import checks, labels as labels_mod, notes, plan as plan_mod, sync
+from . import checks, labels as labels_mod, notes, plan as plan_mod, sync, updater
 from .registry import REGISTRY_PATH, RegistryError, load_registry, read_versions, write_versions
 
 
@@ -279,6 +280,31 @@ def cmd_notes(a) -> int:
 # --- wiring ------------------------------------------------------------------
 
 
+def cmd_updater_manifest(a) -> int:
+    release = json.loads(_gh_api(f"repos/{a.repo}/releases/{a.release_id}"))
+    names = [asset["name"] for asset in release["assets"]]
+    signatures = {
+        asset["name"]: _gh_api(
+            f"repos/{a.repo}/releases/assets/{asset['id']}", "-H", "Accept: application/octet-stream"
+        )
+        for asset in release["assets"]
+        if asset["name"].endswith(".sig")
+    }
+    manifest = updater.build_manifest(
+        version=a.version,
+        notes=release.get("body") or "",
+        pub_date=datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ"),
+        tag=a.tag,
+        repo=a.repo,
+        asset_names=names,
+        signatures=signatures,
+        require=set(a.require),
+    )
+    Path(a.out).write_text(json.dumps(manifest, indent=2) + "\n")
+    print(f"latest.json: {', '.join(sorted(manifest['platforms']))}")
+    return 0
+
+
 def _parser() -> argparse.ArgumentParser:
     p = argparse.ArgumentParser(prog="release")
     sub = p.add_subparsers(dest="command", required=True)
@@ -335,6 +361,14 @@ def _parser() -> argparse.ArgumentParser:
     s.add_argument("--baseline", default="")
     s.add_argument("--target", required=True)
     s.set_defaults(fn=cmd_notes)
+    s = sub.add_parser("updater-manifest")
+    s.add_argument("--repo", default=os.environ.get("GITHUB_REPOSITORY", ""))
+    s.add_argument("--release-id", required=True)
+    s.add_argument("--tag", required=True)
+    s.add_argument("--version", required=True)
+    s.add_argument("--require", action="append", default=[], choices=sorted(updater.PLATFORMS))
+    s.add_argument("--out", required=True)
+    s.set_defaults(fn=cmd_updater_manifest)
     return p
 
 
