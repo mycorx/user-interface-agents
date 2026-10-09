@@ -7,9 +7,12 @@ Releases page and running it, and nobody is told one exists. `docs/RELEASE.md`
 already sets the deadline. A build without the updater has no public key
 compiled in and never checks for updates. So it can never be moved onto an
 update channel later, and everyone running it has to reinstall once, by hand,
-after being told to. That cost is nil until the first published release and
-grows with every install. No release tag exists yet, so `0.1.0` can ship with
-the updater and no install will ever need migrating.
+after being told to.
+
+The releases published so far (`uai-app-0.1.0`, `uai-app-0.1.1`) shipped
+without the updater, but nobody has installed them (confirmed 2026-10-09). So
+they are ignored. The first release that carries the updater is treated as
+the baseline, and no install needs migrating.
 
 ## Decisions (agreed 2026-10-07)
 
@@ -77,7 +80,9 @@ the updater and no install will ever need migrating.
 
 GitHub's `/releases/latest/` never resolves to a draft or a prerelease. That
 *is* the stable-only channel, with no extra logic. A release is offered to
-every install the moment a human publishes it, and not before.
+every install the moment the `release` workflow's `publish` job flips it from
+draft to published (`make_latest: true`), and not before. Every gate (tests,
+installer smoke tests, the update feed) has passed by then.
 
 ### Setting
 
@@ -119,45 +124,71 @@ current version.
 
 ### Workflow
 
+The `release` workflow is run by hand from `main`:
+
+```
+plan -> verify-target -> tests -> create-release (draft)
+     -> linux / windows (parallel)
+     -> smoke-linux / smoke-windows
+     -> publish
+```
+
+- `plan` picks the newest unreleased `uai-app-X.Y.Z` tag and outputs
+  `target_version`. That is the bare `X.Y.Z` from `version.json`, which is
+  also what the app reports as its own version.
+- A `dry_run` input builds and tests without creating a release.
+
+The changes:
+
 - **Build jobs** (`linux`, `windows`, and the commented `macos`):
-  - receive the two signing secrets as environment variables
+  - receive the two signing secrets as environment variables, on dry runs
+    too, so the key is exercised before any real release
   - set tauri-action's `includeUpdaterJson: false`
   - attach only the installer and its `.sig`
-  - on dry runs (`workflow_dispatch`), sign as well and upload the `.sig`
-    with the artifact, so the key is exercised before any tag
+  - also add the `.sig` to the uploaded Actions artifact (`uia-linux`,
+    `uia-windows`)
 - **New `updater-manifest` job:**
-  - tag pushes only
-  - `needs: [create-release, linux, windows]`
+  - skipped on dry runs
+  - `needs: [plan, create-release, linux, windows]`
+  - runs in parallel with the smoke tests
   - reads the draft's assets and builds `latest.json`:
-    - `version`, `notes` and `pub_date`
+    - `version` (`plan.outputs.target_version`), `notes` (the draft's body)
+      and `pub_date`
     - per platform: `url` and `signature` (the `.sig` file's contents) for
-      `windows-x86_64-msi`, `linux-x86_64-deb`, and `darwin-aarch64` /
+      `windows-x86_64-msi` and `linux-x86_64-deb`, plus `darwin-aarch64` /
       `darwin-x86_64` (one universal `.app.tar.gz`) once macOS assets exist
-  - uploads it in one write
+  - uploads it to the draft in one write
+- **`publish` gains `updater-manifest` in its `needs`.** A release therefore
+  never goes live without a valid feed. The commented macOS instructions
+  (step 3) also add `macos` to `updater-manifest.needs`.
 - **Why a separate job:**
   - tauri-action's own `latest.json` handling is read–modify–write on the
     release.
-  - The `linux` and `windows` jobs run in parallel, so the second writer
-    could drop the first one's platform — the same race `create-release`
-    exists to avoid.
-- **The manifest job fails the run if:**
+  - `linux` and `windows` run in parallel, so the second writer could drop
+    the first one's platform — the same race `create-release` exists to
+    avoid.
+- **The manifest step fails the run** (keeping the release a draft) if:
+  - an expected installer is missing
   - an installer has no `.sig`, because one unsigned entry makes every
     client reject the update
-  - the version is a prerelease or `v`-prefixed
+  - the version is not plain `X.Y.Z` semver
 - **Assembly logic:**
-  - lives in `scripts/updater_manifest.py`, so the GitHub step is only glue
-  - has fixture tests in `scripts/tests/updater-manifest/`, run in
-    `version-gate` like the existing release-version tests
-- CI (`ci.yaml`) never runs `tauri build`, so it needs neither the key nor
-  any override.
+  - is a new `updater-manifest` subcommand of the existing `scripts/release`
+    CLI (beside `plan`, `notes` and `sync`), so the workflow step is only
+    glue
+  - its unit tests go in `scripts/tests/release/`, which `ci.yaml` already
+    runs
+- CI never runs `tauri build`, so it needs neither the key nor any override.
 
 ### Documentation
 
 - `docs/RELEASE.md`: replace "There is no auto-updater yet" with:
   - how an update reaches users
   - the key steps, and that the key cannot be rotated
-  - the fact that publishing a draft is the moment it goes live to every
-    install
+  - that the `publish` job is the moment a release goes live to every
+    install, so a bad release is withdrawn by deleting or re-drafting it
+    rather than by waiting
+  - the macOS enablement steps: `macos` also joins `updater-manifest.needs`
 - `docs/MANUAL-TEST.md`: add an "Updates" section (below).
 
 ## Failure handling
@@ -185,16 +216,19 @@ current version.
   - the `UpdateStatus` → payload mapping
   - the `auto_update_check` default
   - `uia://update` is covered by `check-ipc-event-names.sh`
-- **Python fixture tests for `updater_manifest.py`:**
+- **Python unit tests for `scripts/release updater-manifest`** (in
+  `scripts/tests/release/`):
   - Windows and Linux
   - Windows, Linux and macOS
+  - a missing installer fails
   - a missing `.sig` fails
-  - a prerelease or `v`-prefixed version is rejected
-- **Manual, once per OS before the first public release** (needs two
-  published stable versions, because `/latest/` skips prereleases):
-  1. Install `0.1.0`, then publish `0.1.1`.
+  - a version that is not plain `X.Y.Z` is rejected
+- **Manual, once per OS, with the first two releases that carry the updater**
+  (call them N and N+1). This needs two published releases, because
+  `/latest/` only ever points at the newest published one:
+  1. Install N from its release, then release N+1.
   2. The banner appears within about 30 s.
-  3. "Install and restart" relaunches as `0.1.1`.
+  3. "Install and restart" relaunches as N+1.
   4. With the toggle off, no banner appears, but "Check now" still finds the
      update.
   5. While the assistant is speaking, the install button is disabled.
