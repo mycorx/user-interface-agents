@@ -1,0 +1,15 @@
+# Everything is owned by the dev team.
+*                                  @mycorx/mycorx-dev-team
+
+# The release machinery. A PR run uses its own copy of the workflow files, so
+# review here is what stops a change from weakening release-check or the
+# release pipeline. Listed separately so these paths can be narrowed to fewer
+# owners later. Do not add version.json or the generated manifests here: the
+# release bot edits them in nearly every PR, which would force a code owner
+# review on all of them.
+/.github/workflows/                @mycorx/mycorx-dev-team
+/.github/release-components.json   @mycorx/mycorx-dev-team
+/.github/renovate.json5            @mycorx/mycorx-dev-team
+/.github/CODEOWNERS                @mycorx/mycorx-dev-team
+/scripts/release/                  @mycorx/mycorx-dev-team
+/scripts/smoke/                    @mycorx/mycorx-dev-team
