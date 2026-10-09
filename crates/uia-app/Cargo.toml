@@ -124,7 +124,8 @@ tauri-plugin-single-instance = { version = "2.4.3", optional = true, features = 
 tauri-plugin-opener = { version = "2.5.4", optional = true }
 # Checks the GitHub release feed (latest.json), verifies the minisign
 # signature against the public key in tauri.conf.json, and installs.
-tauri-plugin-updater = { version = "2", optional = true }
+# >=2.10 for .deb updates; <2.13 because 2.13 needs Rust 1.90 (workspace MSRV 1.85).
+tauri-plugin-updater = { version = ">=2.10, <2.13", optional = true }
 
 # Makes Windows-native echo cancellation the default on Windows, with no
 # `--features` flag for anyone to remember — including `pnpm run tauri dev` and
