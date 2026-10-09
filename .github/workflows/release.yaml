@@ -91,8 +91,11 @@ jobs:
   # themselves: tauri-action's getOrCreateRelease is a read-then-create with no
   # locking, and two parallel jobs would each create one, leaving two drafts for
   # one version.
+  #
+  # It waits for `tests`, and the builds wait for it, so a red test run costs no
+  # build minutes and leaves no draft release behind.
   create-release:
-    needs: [plan, verify-target]
+    needs: [plan, verify-target, tests]
     runs-on: ubuntu-latest
     permissions:
       contents: write

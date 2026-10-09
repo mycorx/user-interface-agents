@@ -84,8 +84,9 @@ audience.
 5. **Promote when you want to ship.** Actions → **release** → Run workflow. There
    is no version to enter: it finds the latest published release, takes the
    newest tag after it, and ships that. Tags in between are skipped, but their
-   PRs are in the release notes. It builds, runs the full CI suite at that
-   commit, smoke-tests both installers on clean machines, then publishes.
+   PRs are in the release notes. It runs the full CI suite at that commit
+   first, then builds, smoke-tests both installers on clean machines, and
+   publishes.
 
 `version.json` is the only file anyone edits to change a version; `tauri.conf.json`,
 `Cargo.toml` and `Cargo.lock` are generated from it by `scripts/release`.
@@ -111,7 +112,7 @@ and ride along with the next release.
 Run **release** with `dry_run` ticked. A dry run needs an *unreleased* tag (one
 newer than the latest published release; with nothing to promote, `plan` fails)
 and must be dispatched **from `main`** (the workflow refuses any other branch).
-It plans, builds, tests and smoke-tests the
+It plans, tests, builds and smoke-tests the
 same target, uploads the installers as Actions artifacts (`uia-linux`,
 `uia-windows`), and creates no release. Use it to hand a tester a build and to
 rehearse a release.
