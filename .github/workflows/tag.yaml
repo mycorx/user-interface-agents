@@ -1,0 +1,33 @@
+name: tag
+
+# Every merge to main whose version.json names a version with no tag gets one,
+# on the merge commit. Nothing is built or released here; promoting a tag is the
+# manual `release` workflow's job.
+#
+# A merge that did not change the version (a `none` PR) finds its tag already
+# there and does nothing, so this is safe to re-run.
+on:
+  push:
+    branches: [main]
+
+permissions:
+  contents: write
+
+# Two quick merges queue rather than race for the same version.
+concurrency:
+  group: tag
+  cancel-in-progress: false
+
+jobs:
+  tag:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          # Full history and all tags: "does this version already have a tag"
+          # and the refuse-to-guess guard both read the existing tags.
+          fetch-depth: 0
+      - name: Tag the merge commit
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: python3 scripts/release tag --sha "$GITHUB_SHA"

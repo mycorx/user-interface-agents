@@ -1,0 +1,25 @@
+{
+  "uai-app": {
+    "tag": "uai-app-{version}",
+    "label": "uai-app",
+    "synced": [
+      { "kind": "tauri-conf", "path": "crates/uia-app/tauri.conf.json" },
+      { "kind": "cargo-toml", "path": "crates/uia-app/Cargo.toml" },
+      { "kind": "cargo-lock", "path": "Cargo.lock" }
+    ],
+    "code_paths": [
+      "crates/**",
+      "src/**",
+      "Cargo.toml",
+      "Cargo.lock",
+      "package.json",
+      "pnpm-lock.yaml",
+      "vite.config.ts",
+      "svelte.config.js",
+      "index.html",
+      "tsconfig.json",
+      "pnpm-workspace.yaml"
+    ],
+    "ignore_paths": ["docs/**", "**/*.md", ".github/**", "scripts/**"]
+  }
+}

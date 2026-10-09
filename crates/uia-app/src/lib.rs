@@ -14,6 +14,7 @@ pub mod personas;
 pub mod secrets;
 pub mod session;
 pub mod settings;
+pub mod smoke;
 pub mod time;
 pub mod time_executor;
 pub mod wsl;

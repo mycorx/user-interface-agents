@@ -31,6 +31,11 @@
   // the same way `pnpm install` would.
   "postUpdateOptions": ["pnpmDedupe"],
 
+  // release-bump pushes a version commit to Renovate's PR branches. Without
+  // this, Renovate treats the branch as hand-edited and stops rebasing it.
+  // Must match the email in .github/workflows/release-bump.yaml.
+  "gitIgnoredAuthors": ["339497082+automated-release[bot]@users.noreply.github.com"],
+
   "packageRules": [
     {
       // TypeScript 7's native/tsgo compiler drops the CJS `typescript.sys`
@@ -67,21 +72,46 @@
       "platformAutomerge": false, // false to let renovate bot merge the PR instead of the GitHub UI automerge
       "automergeStrategy": "squash",
     },
+    // Release labels (docs/RELEASE.md). The label rules below must stay
+    // DISJOINT: `addLabels` accumulates across every matching rule, and a PR
+    // with two semver labels (or none) fails release-check.
+    //
+    // Policy: only a MAJOR cargo/npm update cuts an app version, and only a
+    // patch. Everything else ships with the next release without cutting one.
+    //
+    // Coverage, update type x manager (cargo/npm = "deps", others = "other"):
+    //   deps  + major                                   -> rule 1 (patch)
+    //   deps  + minor/patch/pin/digest/pinDigest/
+    //           lockFileMaintenance/rollback/
+    //           replacement/bump                        -> rule 2 (none)
+    //   other + any update type (incl. major)           -> rule 3 (none)
     {
-      // we consider dependency minor and patch updates as app patch updates
-      "description": "Label minor and patch updates",
-      "matchUpdateTypes": ["minor", "patch"],
-      "addLabels": ["semver:patch"],
-    },
-    {
-      "description": "Label pin, digest and lock file maintenance updates",
-      "matchUpdateTypes": ["pin", "digest", "pinDigest", "lockFileMaintenance"],
-      "addLabels": ["semver:none"],
-    },
-    {
-      "description": "Label major updates",
+      "description": "Major cargo/npm updates cut a patch version of the app",
+      "matchManagers": ["cargo", "npm"],
       "matchUpdateTypes": ["major"],
-      "addLabels": ["semver:major"],
+      "addLabels": ["semver:uai-app:patch"],
+    },
+    {
+      "description": "Every other cargo/npm update type cuts no version",
+      "matchManagers": ["cargo", "npm"],
+      "matchUpdateTypes": [
+        "minor", "patch", "pin", "digest", "pinDigest", "lockFileMaintenance",
+        "rollback", "replacement", "bump",
+      ],
+      "addLabels": ["semver:uai-app:none"],
+    },
+    {
+      // Catch-all for every other manager (github-actions, docker, ...) and
+      // every update type, majors included. Workflow pins live under
+      // .github/**, which ships nothing.
+      "description": "Updates from any other manager cut no version",
+      "matchManagers": ["!cargo", "!npm"],
+      "addLabels": ["semver:uai-app:none"],
+    },
+    {
+      // No label here: this only changes how majors are handled.
+      "description": "Major updates are never automerged and wait for Monday",
+      "matchUpdateTypes": ["major"],
       "automerge": false,
       "schedule": ["before 8am on monday"],
     },

@@ -44,7 +44,7 @@ set -euo pipefail
 NODE_VERSION="24.21.0"                       # CI uses Node 24
 NODE_SHA256_ARM64="bed7eea5325e1108f32ce5228ddd6a5f0f08a499ee42aa7442aea583702f6057"
 NODE_SHA256_X64="1462cb3b3046b815cf8ea436d3da450ec1a9f11dac7e5a46b0ada5305d7e8097"
-PYTHON_VERSION="3.14"                        # gen-notice and release-version need tomllib (3.11+)
+PYTHON_VERSION="3.14"                        # gen-notice needs tomllib (3.11+); scripts/release is 3.9 + stdlib only
 RUST_CHANNEL="stable"                        # CI uses dtolnay/rust-toolchain@stable
 # pnpm is not pinned here: Corepack reads `packageManager` from package.json.
 # ------------------------------------------------------------------------------
@@ -211,15 +211,11 @@ run_tests() {
   ./scripts/check-webrtc-lockfile-pins.sh
   ./scripts/check-ipc-event-names.sh
   ./scripts/check-copyright-headers.sh
-  ./scripts/tests/release-version/run-release-version-tests.sh
+  ./scripts/tests/release/run-release-tests.sh
   ./scripts/tests/gen-notice/run-gen-notice-tests.sh
 
-  # Both manifests must agree, exactly as the release workflow's version gate
-  # demands of a tag. Using the tauri version as the "tag" checks the two files
-  # against each other.
-  local version
-  version="$(python3 -c 'import json; print(json.load(open("crates/uia-app/tauri.conf.json"))["version"])')"
-  ./scripts/check-release-version.sh "$version"
+  # version.json, tauri.conf.json, Cargo.toml and Cargo.lock must agree.
+  python3 scripts/release sync --check
 
   step "Rust: fmt, clippy, tests"
   cargo fmt --check

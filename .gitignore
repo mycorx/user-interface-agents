@@ -72,3 +72,5 @@ docs/superpowers/private/
 crates/uia-app/gen/schemas/macOS-schema.json
 # Same file, written by a Linux build.
 crates/uia-app/gen/schemas/linux-schema.json
+
+__pycache__/

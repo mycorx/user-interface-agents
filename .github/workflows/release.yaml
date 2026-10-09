@@ -1,129 +1,176 @@
 name: release
 
-# Two ways in, deliberately different:
+# Promotes the newest unreleased tag to a published GitHub Release.
 #
-#   * pushing a semver tag creates a DRAFT GitHub Release, builds the installers
-#     for each platform in parallel, and attaches them to it. A human then
-#     publishes it. Draft rather than published because a tag is cheap to push
-#     by accident and a published release is not cheap to retract.
-#   * `workflow_dispatch` is a dry run: the same builds, uploaded as Actions
-#     artifacts, touching no release. This is how you hand a tester a build
-#     without committing to a version number.
+# Run it by hand (Actions -> release -> Run workflow). It takes no version:
+# the `tag` workflow already tagged every merge that bumped the version, and
+# this finds the latest PUBLISHED release, takes the newest tag after it, and
+# ships that. The tags in between are skipped; their PRs still appear in the
+# release notes.
+#
+# Order: plan -> build + test + smoke -> publish. The release stays a draft
+# until the full test suite and both installer smoke tests pass.
+#
+# `dry_run` builds and tests the same target but creates no release; the
+# installers land as Actions artifacts, which is how a tester gets a build.
 on:
-  push:
-    # Deliberately broader than the convention. `[0-9]*` is every tag the
-    # convention allows; `v[0-9]*` is the mistake people actually make, and it
-    # is matched ON PURPOSE so that `version-gate` can reject it out loud.
-    #
-    # A tag filter that misses is SILENT -- no run, no failure, no release,
-    # nothing to look at. That is how `0.1.0` was pushed against a `v*` filter
-    # and produced no release and no error. So the filter is kept simple enough
-    # that it cannot subtly fail to match, and all real validation lives in
-    # `version-gate`, which is tested.
-    tags: ["[0-9]*", "v[0-9]*"]
   workflow_dispatch:
+    inputs:
+      component:
+        description: Which component to release
+        type: choice
+        options: [uai-app]
+        default: uai-app
+      dry_run:
+        description: Build and test only; create no release
+        type: boolean
+        default: false
 
-# Read-only by default; only `release` widens it, and only to what attaching
-# assets to a release actually needs.
+# Read-only by default; only the jobs that touch the release widen it.
 permissions:
   contents: read
 
-# A retagged release should supersede the run it replaces rather than race it
-# for the same draft.
+# Queued, never cancelled: cancelling a run between "draft created" and
+# "published" would strand a draft.
 concurrency:
-  group: release-${{ github.ref }}
-  cancel-in-progress: true
+  group: release
+  cancel-in-progress: false
 
 jobs:
-  # Fails in seconds, before either build job allocates a runner, so a
-  # mistyped tag is caught before a long build starts.
-  version-gate:
+  # Decides what ships. Fails here, in seconds, when there is nothing newer
+  # than the last published release, before any runner builds anything.
+  plan:
+    runs-on: ubuntu-latest
+    outputs:
+      target_tag: ${{ steps.plan.outputs.target_tag }}
+      target_sha: ${{ steps.plan.outputs.target_sha }}
+      target_version: ${{ steps.plan.outputs.target_version }}
+      baseline_tag: ${{ steps.plan.outputs.baseline_tag }}
+    steps:
+      - name: Run from main
+        if: github.ref != 'refs/heads/main'
+        run: |
+          echo "::error::Run this workflow from main, not ${GITHUB_REF_NAME}"
+          exit 1
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          fetch-depth: 0
+      - id: plan
+        env:
+          GH_TOKEN: ${{ github.token }}
+          COMPONENT: ${{ inputs.component }}
+        run: python3 scripts/release plan --component "$COMPONENT"
+
+  # The tag must say what the manifests say. Replaces the old tag-vs-manifest
+  # gate: the tag is derived from version.json, so this catches only a tag that
+  # was created by hand on a commit whose manifests disagree.
+  verify-target:
+    needs: plan
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
-      - run: ./scripts/tests/release-version/run-release-version-tests.sh
-      # A dispatch run has no tag to check against, so the gate is the tag
-      # push's alone. The step is conditional rather than the job: a skipped
-      # job counts as unsuccessful to `needs`, which would strand both builds.
-      - name: The tag must match both manifests
-        if: startsWith(github.ref, 'refs/tags/')
-        run: ./scripts/check-release-version.sh "${GITHUB_REF_NAME}"
+        with:
+          ref: ${{ needs.plan.outputs.target_sha }}
+      - env:
+          COMPONENT: ${{ inputs.component }}
+          VERSION: ${{ needs.plan.outputs.target_version }}
+        run: python3 scripts/release sync --check --component "$COMPONENT" --expect-version "$VERSION"
+
+  # The full CI suite, at the commit being shipped rather than at main's head.
+  tests:
+    needs: [plan, verify-target]
+    # The test suite must not inherit a write token.
+    permissions:
+      contents: read
+    uses: ./.github/workflows/ci.yaml
+    with:
+      ref: ${{ needs.plan.outputs.target_sha }}
 
   # The draft is created exactly once, here, so that `linux` and `windows` can
-  # then run in PARALLEL and do nothing but upload into it.
-  #
-  # They cannot safely create it themselves. tauri-action's own
-  # `getOrCreateRelease` is a read-then-create with no locking, and for a
-  # DRAFT it cannot even look the release up by tag -- a draft has no git tag
-  # yet, so the action pages through every release hunting for a tag match.
-  # Two parallel jobs would both find nothing and both create, and GitHub does
-  # not reject the second one precisely because no tag exists to collide. The
-  # result is two drafts for one version, one holding the .deb and one the
-  # .msi.
-  #
-  # Serialising the builds also fixed that, but at the cost of ~12 minutes and
-  # of `windows` being skipped outright whenever `linux` failed -- which is
-  # exactly what happened on run 34038639910, where a missing xdg-utils on the
-  # Linux runner meant the MSI was never built or tested at all.
+  # run in PARALLEL and only upload into it. They cannot safely create it
+  # themselves: tauri-action's getOrCreateRelease is a read-then-create with no
+  # locking, and two parallel jobs would each create one, leaving two drafts for
+  # one version.
   create-release:
-    needs: version-gate
+    needs: [plan, verify-target]
     runs-on: ubuntu-latest
     permissions:
       contents: write
+      # `scripts/release notes` reads the PRs behind each commit.
+      pull-requests: read
     outputs:
       release_id: ${{ steps.draft.outputs.result }}
     steps:
-      # A dispatch run has no tag and creates no release; the builds below
-      # already gate their upload steps on the same condition, so the empty
-      # output is never read. The step is conditional rather than the job,
-      # because a skipped job counts as unsuccessful to `needs`.
+      # Steps are conditional rather than the job: a skipped job counts as
+      # unsuccessful to `needs`, which would strand every build.
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        if: ${{ !inputs.dry_run }}
+        with:
+          persist-credentials: false
+          fetch-depth: 0
+      - name: Build the release notes
+        if: ${{ !inputs.dry_run }}
+        env:
+          GH_TOKEN: ${{ github.token }}
+          COMPONENT: ${{ inputs.component }}
+          BASELINE: ${{ needs.plan.outputs.baseline_tag }}
+          TARGET: ${{ needs.plan.outputs.target_tag }}
+        run: >
+          python3 scripts/release notes
+          --component "$COMPONENT" --baseline "$BASELINE" --target "$TARGET"
+          > "$RUNNER_TEMP/notes.md"
       - name: Create the draft release
         id: draft
-        if: startsWith(github.ref, 'refs/tags/')
+        if: ${{ !inputs.dry_run }}
         uses: actions/github-script@3a2844b7e9c422d3c10d287c895573f7108da1b3 # v9.0.0
         env:
-          # Passed as an environment variable rather than interpolated into
-          # the script body, which would be a code injection point.
-          TAG: ${{ github.ref_name }}
+          # Passed as environment variables rather than interpolated into the
+          # script body, which would be a code injection point.
+          TAG: ${{ needs.plan.outputs.target_tag }}
+          VERSION: ${{ needs.plan.outputs.target_version }}
+          COMPONENT: ${{ inputs.component }}
+          NOTES_FILE: ${{ runner.temp }}/notes.md
         with:
           result-encoding: string
           script: |
-            const tag = process.env.TAG
+            const fs = require('fs')
             const { owner, repo } = context.repo
+            const body = fs.readFileSync(process.env.NOTES_FILE, 'utf8')
+            const tag = process.env.TAG
 
-            // Idempotent, so re-running a failed workflow reuses its draft
-            // instead of leaving a second one behind. There is no
-            // getReleaseByTag for drafts -- see the note above -- so this
-            // pages the list.
+            // Idempotent, so re-running a failed release reuses its draft.
+            // There is no getReleaseByTag for drafts, so this pages the list.
             const releases = await github.paginate(github.rest.repos.listReleases, {
               owner, repo, per_page: 100,
             })
             const existing = releases.find((r) => r.tag_name === tag && r.draft)
             if (existing) {
-              core.info(`Reusing existing draft release ${existing.id} for ${tag}`)
+              await github.rest.repos.updateRelease({ owner, repo, release_id: existing.id, body })
+              core.info(`Reusing draft release ${existing.id} for ${tag}`)
               return String(existing.id)
             }
 
             const { data } = await github.rest.repos.createRelease({
               owner, repo,
               tag_name: tag,
-              name: `uia ${tag}`,
+              name: `${process.env.COMPONENT} ${process.env.VERSION}`,
               draft: true,
-              // Any tag carrying a suffix (0.2.0-rc.1) is a prerelease.
-              prerelease: tag.includes('-'),
-              target_commitish: context.sha,
-              generate_release_notes: true,
+              prerelease: false,
+              body,
             })
             core.info(`Created draft release ${data.id} for ${tag}`)
             return String(data.id)
 
   linux:
-    needs: [version-gate, create-release]
+    needs: [plan, verify-target, create-release]
     runs-on: ubuntu-latest
     permissions:
       contents: write
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+          ref: ${{ needs.plan.outputs.target_sha }}
       - uses: dtolnay/rust-toolchain@6bed0761d98439e5a578e2877258200ad565ba87 # stable
       - uses: pnpm/action-setup@ea17c68df8912ef543352723c149a84f56e3d413 # v6.1.0
       - uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7.0.0
@@ -143,7 +190,7 @@ jobs:
       - run: pnpm install --frozen-lockfile
 
       - name: Build and attach to the draft release
-        if: startsWith(github.ref, 'refs/tags/')
+        if: ${{ !inputs.dry_run }}
         uses: tauri-apps/tauri-action@1deb371b0cd8bd54025b384f1cd735e725c4060f # action-v1.0.0
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
@@ -151,57 +198,43 @@ jobs:
           # Not the repository root: tauri.conf.json lives beside the crate,
           # and its `frontendDist` is resolved relative to itself.
           projectPath: crates/uia-app
-          # Exactly the invocation scripts/build-windows-package.ps1 uses
-          # locally, so CI and a developer's machine run the same command.
           tauriScript: pnpm exec tauri
-          # Linux ships as a .deb only. AppImage was dropped deliberately:
-          # its bundler downloads and executes *unpinned* content at build
-          # time -- linuxdeploy from a rolling tag, linuxdeploy-plugin-appimage
-          # from the literal `continuous` tag, and linuxdeploy-plugin-gtk.sh
-          # from `master` -- inside the job that produces the binaries we
-          # ship. Every other step in this workflow is pinned to a commit SHA,
-          # and that one exception is not worth a format nothing asks for:
-          # nothing in the README offers an AppImage, and tauri.conf.json
-          # declares only `msi`.
-          #
-          # The cost is real and accepted: the .deb depends on the
-          # webkit2gtk-4.1 runtime, so Ubuntu 22.04 and non-Debian distros
-          # (Fedora, Arch, openSUSE) now have no Linux artifact. Add
-          # `appimage` back -- ideally with the bundler tools mirrored or
-          # pinned -- the day one of them is a real audience.
+          # Linux ships as a .deb only. AppImage was dropped deliberately: its
+          # bundler downloads and executes *unpinned* content at build time,
+          # inside the job that produces the binaries we ship (docs/RELEASE.md).
           args: --bundles deb
           releaseId: ${{ needs.create-release.outputs.release_id }}
 
       - name: Build without releasing
-        if: ${{ !startsWith(github.ref, 'refs/tags/') }}
+        if: ${{ inputs.dry_run }}
         working-directory: crates/uia-app
         run: pnpm exec tauri build --bundles deb
 
-      # Either build step above links the real shipped binary, so this needs
-      # no `if`. Replaces the +1.95 MiB figure C5/T6 measured by hand against
-      # a release *test* binary -- this tracks the actual artifact on every
-      # release run instead of one point-in-time comparison.
       - name: Record shipped binary size
         run: |
           size=$(stat -c%s target/release/uia)
           echo "### Shipped binary size" >> "$GITHUB_STEP_SUMMARY"
           echo "\`target/release/uia\`: ${size} bytes" >> "$GITHUB_STEP_SUMMARY"
 
+      # Uploaded on every run, not just dry runs: the smoke job installs this
+      # exact file rather than downloading it back from the draft.
       - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
-        if: ${{ !startsWith(github.ref, 'refs/tags/') }}
         with:
           name: uia-linux
           path: target/release/bundle/deb/*.deb
           if-no-files-found: error
 
   windows:
-    needs: [version-gate, create-release]
+    needs: [plan, verify-target, create-release]
     # An MSI cannot be produced on a Linux runner: WiX only runs on Windows.
     runs-on: windows-latest
     permissions:
       contents: write
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+          ref: ${{ needs.plan.outputs.target_sha }}
       - uses: dtolnay/rust-toolchain@6bed0761d98439e5a578e2877258200ad565ba87 # stable
       - uses: pnpm/action-setup@ea17c68df8912ef543352723c149a84f56e3d413 # v6.1.0
       - uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7.0.0
@@ -214,7 +247,7 @@ jobs:
       - run: pnpm install --frozen-lockfile
 
       - name: Build and attach to the draft release
-        if: startsWith(github.ref, 'refs/tags/')
+        if: ${{ !inputs.dry_run }}
         uses: tauri-apps/tauri-action@1deb371b0cd8bd54025b384f1cd735e725c4060f # action-v1.0.0
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
@@ -225,29 +258,91 @@ jobs:
           releaseId: ${{ needs.create-release.outputs.release_id }}
 
       - name: Build without releasing
-        if: ${{ !startsWith(github.ref, 'refs/tags/') }}
+        if: ${{ inputs.dry_run }}
         working-directory: crates/uia-app
         run: pnpm exec tauri build --bundles msi
+
       - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
-        if: ${{ !startsWith(github.ref, 'refs/tags/') }}
         with:
           name: uia-windows
           path: target/release/bundle/msi/*.msi
           if-no-files-found: error
 
+  # A clean-machine check of the installer that was just built: install it,
+  # confirm the version, start the binary, uninstall. See scripts/smoke/.
+  smoke-linux:
+    needs: [plan, linux]
+    runs-on: ubuntu-26.04
+    # A bare image, not the runner: the runner has far more installed than a
+    # user's machine, which would hide a missing dependency.
+    container:
+      image: ubuntu:26.04
+      options: --user root
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          ref: ${{ needs.plan.outputs.target_sha }}
+      - uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2
+        with:
+          name: uia-linux
+          path: installer
+      - env:
+          VERSION: ${{ needs.plan.outputs.target_version }}
+        run: bash scripts/smoke/linux.sh installer/*.deb "$VERSION"
+
+  smoke-windows:
+    needs: [plan, windows]
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          ref: ${{ needs.plan.outputs.target_sha }}
+      - uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2
+        with:
+          name: uia-windows
+          path: installer
+      - env:
+          VERSION: ${{ needs.plan.outputs.target_version }}
+        shell: pwsh
+        run: |
+          $msi = (Get-ChildItem installer/*.msi | Select-Object -First 1).FullName
+          ./scripts/smoke/windows.ps1 -Msi $msi -Version $env:VERSION
+
+  # The only job that makes anything public, and only when every gate passed.
+  publish:
+    if: ${{ !inputs.dry_run }}
+    needs: [plan, create-release, tests, smoke-linux, smoke-windows]
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/github-script@3a2844b7e9c422d3c10d287c895573f7108da1b3 # v9.0.0
+        env:
+          RELEASE_ID: ${{ needs.create-release.outputs.release_id }}
+        with:
+          script: |
+            const { owner, repo } = context.repo
+            await github.rest.repos.updateRelease({
+              owner, repo,
+              release_id: Number(process.env.RELEASE_ID),
+              draft: false,
+              make_latest: 'true',
+            })
+            core.info(`Published release ${process.env.RELEASE_ID}`)
+
   # TEMPORARY -- delete this job when the `macos` job below is uncommented.
   #
   # There is no Apple Developer ID certificate yet, and an unsigned .app
-  # downloaded from a release is quarantined by Gatekeeper and will not open
-  # by double-clicking (docs/RELEASE.md). So nothing is built or attached
-  # here; the job only leaves a visible note on the run that macOS users
-  # build locally. It runs on Linux, not macOS, because it compiles nothing
-  # and needs no macOS tooling.
+  # downloaded from a release is quarantined by Gatekeeper and will not open by
+  # double-clicking (docs/RELEASE.md). So nothing is built or attached here; the
+  # job only leaves a visible note on the run that macOS users build locally.
   macos-local-build-note:
-    needs: version-gate
+    needs: plan
     runs-on: ubuntu-latest
     steps:
       - name: Point macOS users at the local build
+        env:
+          TAG: ${{ needs.plan.outputs.target_tag }}
         run: |
           echo "::notice title=No macOS artifact::macOS is not built by this workflow until a Developer ID certificate exists. Build locally with ./scripts/build-macos-package.sh (see docs/RELEASE.md)."
           {
@@ -255,7 +350,7 @@ jobs:
             echo
             echo "This release has no macOS artifact: an unsigned \`.app\` downloaded"
             echo "from GitHub is blocked by Gatekeeper. On a Mac, from a checkout of"
-            echo "\`${GITHUB_REF_NAME}\`:"
+            echo "\`${TAG}\`:"
             echo
             echo '```bash'
             echo "./scripts/build-macos-package.sh            # tests, then .app + .dmg (native arch)"
@@ -279,11 +374,14 @@ jobs:
   #      base64-encoded (`base64 -i cert.p12 | pbcopy`); the Tauri bundler
   #      imports it into a temporary keychain itself. APPLE_PASSWORD is an
   #      app-specific password for APPLE_ID, not the account password.
-  #   3. Do a dry run (workflow_dispatch) and check the `uia-macos` artifact
+  #   3. Uncomment `smoke-macos` below as well, and add both `macos` and
+  #      `smoke-macos` to `publish.needs`, so a failed macOS build or smoke test
+  #      keeps the release a draft like the other platforms.
+  #   4. Do a dry run (workflow_dispatch) and check the `uia-macos` artifact
   #      on a second Mac before tagging.
   #
   # macos:
-  #   needs: [version-gate, create-release]
+  #   needs: [plan, verify-target, create-release]
   #   # GitHub-hosted, Apple silicon. One universal binary covers both Intel
   #   # and Apple silicon Macs, so one job is enough.
   #   runs-on: macos-latest
@@ -300,6 +398,8 @@ jobs:
   #     APPLE_TEAM_ID: ${{ secrets.APPLE_TEAM_ID }}
   #   steps:
   #     - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+  #       with:
+  #         ref: ${{ needs.plan.outputs.target_sha }}
   #     - uses: dtolnay/rust-toolchain@6bed0761d98439e5a578e2877258200ad565ba87 # stable
   #       with:
   #         targets: aarch64-apple-darwin,x86_64-apple-darwin
@@ -314,7 +414,7 @@ jobs:
   #     - run: pnpm install --frozen-lockfile
   #
   #     - name: Build and attach to the draft release
-  #       if: startsWith(github.ref, 'refs/tags/')
+  #       if: ${{ !inputs.dry_run }}
   #       uses: tauri-apps/tauri-action@1deb371b0cd8bd54025b384f1cd735e725c4060f # action-v1.0.0
   #       env:
   #         GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
@@ -327,7 +427,7 @@ jobs:
   #         releaseId: ${{ needs.create-release.outputs.release_id }}
   #
   #     - name: Build without releasing
-  #       if: ${{ !startsWith(github.ref, 'refs/tags/') }}
+  #       if: ${{ inputs.dry_run }}
   #       working-directory: crates/uia-app
   #       run: pnpm exec tauri build --target universal-apple-darwin --bundles app,dmg
   #
@@ -341,9 +441,27 @@ jobs:
   #         spctl --assess --type execute --verbose "$app"
   #         xcrun stapler validate "$app"
   #
+  #     # Always uploaded (not only on dry runs) because `smoke-macos` installs it.
   #     - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
-  #       if: ${{ !startsWith(github.ref, 'refs/tags/') }}
   #       with:
   #         name: uia-macos
   #         path: target/universal-apple-darwin/release/bundle/dmg/*.dmg
   #         if-no-files-found: error
+  #
+  # Installs the .dmg's app the way a user does and proves it starts
+  # (scripts/smoke/macos.sh). Uncomment together with `macos` above.
+  #
+  # smoke-macos:
+  #   needs: [plan, macos]
+  #   runs-on: macos-latest
+  #   steps:
+  #     - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+  #       with:
+  #         ref: ${{ needs.plan.outputs.target_sha }}
+  #     - uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2
+  #       with:
+  #         name: uia-macos
+  #         path: installer
+  #     - env:
+  #         VERSION: ${{ needs.plan.outputs.target_version }}
+  #       run: bash scripts/smoke/macos.sh installer/*.dmg "$VERSION"

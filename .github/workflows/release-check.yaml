@@ -1,0 +1,47 @@
+name: release-check
+
+# The required status for every PR: is it labelled, is the version bumped to
+# match, do the manifests agree, and is the description filled in.
+#
+# Like cla.yaml, this runs the BASE branch's scripts and registry over the PR's
+# files and never the reverse. A `pull_request` run checks out the merge
+# commit by default, which would let a PR supply the very code that judges it.
+on:
+  pull_request:
+    # `edited` re-runs it when the description is fixed; labeled/unlabeled when
+    # the label is changed. Without them a fix would not clear a red check.
+    types: [opened, synchronize, reopened, labeled, unlabeled, edited]
+
+permissions:
+  contents: read
+  pull-requests: read
+
+concurrency:
+  group: release-check-${{ github.event.pull_request.number }}
+  cancel-in-progress: true
+
+jobs:
+  check:
+    name: release-check
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          # The tip of the base branch, not the SHA the PR was opened against:
+          # a PR left open while main moved must be judged against main now.
+          ref: ${{ github.event.pull_request.base.ref }}
+          path: base
+          persist-credentials: false
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          ref: ${{ github.event.pull_request.head.sha }}
+          repository: ${{ github.event.pull_request.head.repo.full_name }}
+          path: head
+          persist-credentials: false
+      - name: Check the PR
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: >
+          python3 base/scripts/release check-pr
+          --root head --base-root base
+          --event "$GITHUB_EVENT_PATH"
