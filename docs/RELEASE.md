@@ -282,9 +282,10 @@ artifacts contain `.sig` files).
 The local packaging scripts (`scripts/build-macos-package.sh` and
 `scripts/build-windows-package.ps1`) turn off updater artifacts (feed
 generation and installer signing) unless `TAURI_SIGNING_PRIVATE_KEY` is set in
-the environment. This keeps local development builds simple and avoids signing
-overhead on every build; only CI-run builds with the private key set produce
-signed installers.
+the environment. With `createUpdaterArtifacts` on, the bundler fails outright
+when it has no private key to sign with, so without this a local build would
+need the release key; only builds with the private key set (the release
+workflow) produce signed installers.
 
 ## Linux builds refuse to run under WSL
 

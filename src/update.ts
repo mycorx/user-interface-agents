@@ -1,3 +1,6 @@
+// Copyright (c) 2026 MycorX (Daniel, Sole Trader). All rights reserved.
+// PolyForm Internal Use 1.0.0 OR PolyForm Noncommercial 1.0.0 — see LICENSE.md.
+
 // Mirrors `uia_app::updater::UpdateStatus` (serde tag "status",
 // snake_case). Duplicated across the IPC boundary like the settings types.
 export type UpdateStatus =
