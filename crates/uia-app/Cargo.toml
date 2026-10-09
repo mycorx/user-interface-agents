@@ -101,18 +101,18 @@ toml = "1.1.4"
 # `desktop`-only): cheap enough to leave available workspace-wide, even
 # though `deliver` (its only user) stays `#[cfg(feature = "desktop")]`.
 url = "2.5.8"
-tauri = { version = "2.11.5", optional = true, features = ["tray-icon", "protocol-asset", "macos-private-api"] }
-tauri-plugin-global-shortcut = { version = "2.3.2", optional = true }
-tauri-plugin-process = { version = "2.3.1", optional = true }
-tauri-plugin-dialog = { version = "2.7.2", optional = true }
-tauri-plugin-autostart = { version = "2.5.1", optional = true }
+tauri = { version = "2.12.2", optional = true, features = ["tray-icon", "protocol-asset", "macos-private-api"] }
+tauri-plugin-global-shortcut = { version = "2.4.0", optional = true }
+tauri-plugin-process = { version = "2.4.0", optional = true }
+tauri-plugin-dialog = { version = "2.8.1", optional = true }
+tauri-plugin-autostart = { version = "2.7.0", optional = true }
 # `deep-link` needs `single-instance`'s `deep-link` feature and vice versa
 # only in spirit -- see `oauth_flow.rs`'s header comment for why both are
 # needed together: on Linux/Windows a deep link starts a NEW process with
 # the URL in argv, and `single-instance` is what forwards that argv into the
 # already-running one where the PKCE verifier actually lives.
-tauri-plugin-deep-link = { version = "2.4.9", optional = true }
-tauri-plugin-single-instance = { version = "2.4.3", optional = true, features = [
+tauri-plugin-deep-link = { version = "2.6.1", optional = true }
+tauri-plugin-single-instance = { version = "2.5.2", optional = true, features = [
     "deep-link",
 ] }
 # Opens `authorize_url` (the identity provider's hosted login page) in the user's actual default
@@ -121,11 +121,11 @@ tauri-plugin-single-instance = { version = "2.4.3", optional = true, features = 
 # and keeping the credential entry surface out of any webview this app
 # controls is the whole point of the redirect-based OAuth flow the plan
 # picked over an embedded login form.
-tauri-plugin-opener = { version = "2.5.4", optional = true }
+tauri-plugin-opener = { version = "2.7.0", optional = true }
 # Checks the GitHub release feed (latest.json), verifies the minisign
 # signature against the public key in tauri.conf.json, and installs.
 # 2.10 is the first release that installs .deb updates.
-tauri-plugin-updater = { version = "2.10", optional = true }
+tauri-plugin-updater = { version = "2.13", optional = true }
 
 # Makes Windows-native echo cancellation the default on Windows, with no
 # `--features` flag for anyone to remember — including `pnpm run tauri dev` and
@@ -201,4 +201,4 @@ axum = "0.8.9"
 oauth2 = "5.0.0"
 
 [build-dependencies]
-tauri-build = { version = "2", optional = true , features = [] }
+tauri-build = { version = "2.7.1", optional = true , features = [] }
