@@ -213,6 +213,8 @@ def cmd_tag(a) -> int:
 def cmd_plan(a) -> int:
     registry = load_registry(Path(a.root) / REGISTRY_PATH)
     comp = _component(registry, a.component)
+    if a.head_sha:
+        return _plan_for_head(a, comp)
     tags = {}
     for tag in _git(a.root, "tag", "--list").split():
         if comp.version_from_tag(tag) is not None:
@@ -252,6 +254,26 @@ def cmd_plan(a) -> int:
         f"- baseline (latest published): `{p.baseline or 'none'}`\n"
         f"- promoting: **`{p.target}`** (`{p.target_sha[:7]}`)\n"
         f"- tags this ships: {', '.join(f'`{t}`' for t in p.candidates)}"
+    )
+    return 0
+
+
+def _plan_for_head(a, comp) -> int:
+    """A dry run from a branch: its own commit and version, no tags, no GitHub."""
+    p = plan_mod.make_head_plan(comp, _version_of(read_versions(a.root), comp.name), a.head_sha)
+    print(json.dumps({
+        "component": p.component, "baseline": p.baseline, "target": p.target,
+        "version": p.target_version, "sha": p.target_sha, "candidates": [],
+    }, indent=2))
+    _out("target_tag", p.target)
+    _out("target_sha", p.target_sha)
+    _out("target_version", p.target_version)
+    _out("baseline_tag", "")
+    _out("candidates", "")
+    _summary(
+        f"### Dry-run plan: {p.component}\n\n"
+        f"- building the branch commit `{p.target_sha[:7]}` at version **{p.target_version}**\n"
+        "- no tag or release is created"
     )
     return 0
 
@@ -352,6 +374,7 @@ def _parser() -> argparse.ArgumentParser:
     s.add_argument("--repo", default=os.environ.get("GITHUB_REPOSITORY", ""))
     s.add_argument("--main-ref", default="origin/main")
     s.add_argument("--published-tags-file", help="tests only: skip the GitHub API")
+    s.add_argument("--head-sha", help="dry run from a branch: build this commit at its own version")
     s.set_defaults(fn=cmd_plan)
 
     s = sub.add_parser("notes")

@@ -112,13 +112,26 @@ and ride along with the next release.
 
 ## Dry runs
 
-Run **release** with `dry_run` ticked. A dry run needs an *unreleased* tag (one
-newer than the latest published release; with nothing to promote, `plan` fails)
-and must be dispatched **from `main`** (the workflow refuses any other branch).
-It plans, tests, builds and smoke-tests the
-same target, uploads the installers as Actions artifacts (`uia-linux`,
-`uia-windows`), and creates no release. Use it to hand a tester a build and to
-rehearse a release.
+Run **release** with `dry_run` ticked. It tests, builds and smoke-tests, uploads
+the installers as Actions artifacts (`uia-linux`, `uia-windows`, with their
+`.sig` files), and creates no release.
+
+- **From a branch** (Actions → release → *Use workflow from*: your branch): it
+  builds **that branch's own commit** at the version in its `version.json`, with
+  no tag needed. Use it to prove a change to the build, the dependencies or the
+  workflow before it merges. The branch's manifests must agree with its
+  `version.json` (the release bot keeps them in sync on a PR).
+- **From `main`:** it promotes the newest *unreleased* tag, exactly as a real
+  release would (with nothing to promote, `plan` fails). Use it to rehearse a
+  release or hand a tester a build.
+
+A dry run signs with a **throwaway key** generated inside the job, never the real
+updater key, so it needs no environment and a branch can run it. It proves the
+bundler signs and writes the `.sig` files and that the installers pass the smoke
+tests; it does not prove the real key and passphrase work in CI. The first real
+run proves that, and it only creates a draft, so a wrong passphrase fails before
+anything is public. A real release (no `dry_run`) is refused from any branch but
+`main`.
 
 ## First-time setup (one admin, once)
 
@@ -159,7 +172,19 @@ rehearse a release.
 4. **Branch protection on `main`:** require the `release-check` status, require
    branches to be up to date, require review. Do this *after* the first merge
    that contains these workflows, or nothing can merge.
-5. **Renovate** (`.github/renovate.json5`) must already carry the `semver:uai-app:*`
+5. **Environments** (Settings → Environments). A branch's workflow YAML runs
+   before anyone reviews it, so secrets and the publish step are guarded by
+   environments whose deployment branch is restricted to `main`:
+   - `draft-release`: deployment branch `main`. Holds the secrets
+     `TAURI_SIGNING_PRIVATE_KEY` and `TAURI_SIGNING_PRIVATE_KEY_PASSWORD`, used
+     by the `linux` and `windows` jobs of a real run. **Delete the
+     repository-level copies of those two secrets** once they are in the
+     environment: a repository secret is readable from any branch's workflow.
+     No required reviewers: a real run is started by hand and `publish` has its
+     own gate, and reviewers here would mean one approval per build job.
+   - `public-release`: deployment branch `main`, with required reviewers. Gates
+     `publish`, the only job that makes a release public.
+6. **Renovate** (`.github/renovate.json5`) must already carry the `semver:uai-app:*`
    labels and `gitIgnoredAuthors` (this repo's config does). Delete the old
    `semver:patch`, `semver:none` and `semver:major` labels so open Renovate PRs
    pick up the new ones.
@@ -174,10 +199,13 @@ Recommended hardening:
 - **Protect the release machinery.** CODEOWNERS or a ruleset requiring review
   does **not** stop a PR from editing its own workflow file: a `pull_request`
   run uses the PR's workflow YAML *before* anyone reviews it, so a PR can
-  weaken `release-check` for itself. The real controls are: a `release` GitHub
-  environment restricted to the `main` branch, with required reviewers, on the
-  `create-release` and `publish` jobs; the release App not on any bypass list;
-  and write access given only to trusted people.
+  weaken `release-check` for itself. The real controls are: the `draft-release`
+  and `public-release` environments restricted to the `main` branch (see
+  first-time setup), with required reviewers on `public-release`; the signing
+  key held only as an environment secret; the release App not on any bypass
+  list; and write access given only to trusted people. The `Real releases run
+  from main` step in `release.yaml` only stops mistakes: a branch can edit its
+  own copy of it, which is why the secrets must not be reachable from a branch.
 - **Keep the App minimal.** The release GitHub App must not be on any ruleset or
   branch-protection bypass list, and needs only *Contents: write* and
   *Pull requests: read*.
@@ -243,9 +271,10 @@ pnpm exec tauri signer generate -w ~/.tauri/uia.key
 ```
 
 The command prompts for a passphrase and saves the keypair to `~/.tauri/uia.key`.
-Create two repository secrets: `TAURI_SIGNING_PRIVATE_KEY` (the full contents of
+Create two secrets **in the `draft-release` environment** (not as repository
+secrets; see first-time setup): `TAURI_SIGNING_PRIVATE_KEY` (the full contents of
 `~/.tauri/uia.key`) and `TAURI_SIGNING_PRIVATE_KEY_PASSWORD` (the passphrase).
-The release workflow reads these secrets automatically.
+The release workflow reads these secrets automatically in a real run.
 
 **Store both the private key and passphrase securely.** The keypair is not
 rotatable in any ordinary sense: every installed client trusts exactly the key
@@ -272,10 +301,10 @@ AWS account only because that is the one that exists — move it to the
 production account once that is stood up.
 
 The release workflow uses the secrets `TAURI_SIGNING_PRIVATE_KEY` and
-`TAURI_SIGNING_PRIVATE_KEY_PASSWORD` to sign installers in both the `linux` and
-`windows` jobs, including on dry runs. A dry run proves the key and passphrase
-work in CI and that the installers are signed (the `uia-linux` and `uia-windows`
-artifacts contain `.sig` files).
+`TAURI_SIGNING_PRIVATE_KEY_PASSWORD` to sign installers in the `linux` and
+`windows` jobs of a real run, through the `draft-release` environment. A dry run
+signs with a throwaway key instead (see *Dry runs*), so the real key is never
+reachable from a branch.
 
 ### Local builds
 

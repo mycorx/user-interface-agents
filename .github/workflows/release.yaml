@@ -11,8 +11,17 @@ name: release
 # Order: plan -> build + test + smoke -> publish. The release stays a draft
 # until the full test suite and both installer smoke tests pass.
 #
-# `dry_run` builds and tests the same target but creates no release; the
-# installers land as Actions artifacts, which is how a tester gets a build.
+# `dry_run` builds and tests but creates no release; the installers land as
+# Actions artifacts, which is how a tester gets a build. A dry run may start
+# from ANY branch and then builds that branch's own commit (not main's newest
+# tag), so a change to the build can be proven before it merges. It signs with
+# a throwaway key and never touches the real one.
+#
+# A real release must start from main. Its two gates are GitHub Environments:
+#   draft-release   holds the updater signing key; deployable from main only.
+#                   Used by the build jobs, so the key is unreachable from a
+#                   branch.
+#   public-release  gates `publish`, the only job that makes anything public.
 on:
   workflow_dispatch:
     inputs:
@@ -47,10 +56,12 @@ jobs:
       target_version: ${{ steps.plan.outputs.target_version }}
       baseline_tag: ${{ steps.plan.outputs.baseline_tag }}
     steps:
-      - name: Run from main
-        if: github.ref != 'refs/heads/main'
+      # Only a dry run may start from a branch. A real release builds and
+      # publishes with this branch's workflow and tooling, so it must be main's.
+      - name: Real releases run from main
+        if: ${{ github.ref != 'refs/heads/main' && !inputs.dry_run }}
         run: |
-          echo "::error::Run this workflow from main, not ${GITHUB_REF_NAME}"
+          echo "::error::A real release must run from main, not ${GITHUB_REF_NAME}. Tick dry_run to test a branch."
           exit 1
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
@@ -59,7 +70,14 @@ jobs:
         env:
           GH_TOKEN: ${{ github.token }}
           COMPONENT: ${{ inputs.component }}
-        run: python3 scripts/release plan --component "$COMPONENT"
+          DRY_RUN: ${{ inputs.dry_run }}
+        run: |
+          if [ "$DRY_RUN" = "true" ] && [ "$GITHUB_REF" != "refs/heads/main" ]; then
+            # A branch dry run builds the branch itself, at its own version.
+            python3 scripts/release plan --component "$COMPONENT" --head-sha "$GITHUB_SHA"
+          else
+            python3 scripts/release plan --component "$COMPONENT"
+          fi
 
   # The tag must say what the manifests say. Replaces the old tag-vs-manifest
   # gate: the tag is derived from version.json, so this catches only a tag that
@@ -94,7 +112,11 @@ jobs:
   #
   # It waits for `tests`, and the builds wait for it, so a red test run costs no
   # build minutes and leaves no draft release behind.
+  #
+  # A dry run skips the job outright: it makes no release, so a green tick here
+  # would claim something that never happened.
   create-release:
+    if: ${{ !inputs.dry_run }}
     needs: [plan, verify-target, tests]
     runs-on: ubuntu-latest
     permissions:
@@ -104,15 +126,11 @@ jobs:
     outputs:
       release_id: ${{ steps.draft.outputs.result }}
     steps:
-      # Steps are conditional rather than the job: a skipped job counts as
-      # unsuccessful to `needs`, which would strand every build.
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
-        if: ${{ !inputs.dry_run }}
         with:
           persist-credentials: false
           fetch-depth: 0
       - name: Build the release notes
-        if: ${{ !inputs.dry_run }}
         env:
           GH_TOKEN: ${{ github.token }}
           COMPONENT: ${{ inputs.component }}
@@ -124,7 +142,6 @@ jobs:
           > "$RUNNER_TEMP/notes.md"
       - name: Create the draft release
         id: draft
-        if: ${{ !inputs.dry_run }}
         uses: actions/github-script@3a2844b7e9c422d3c10d287c895573f7108da1b3 # v9.0.0
         env:
           # Passed as environment variables rather than interpolated into the
@@ -165,8 +182,14 @@ jobs:
             return String(data.id)
 
   linux:
-    needs: [plan, verify-target, create-release]
+    # `create-release` is skipped on a dry run, which would skip the build with
+    # it. `tests` is named so a red test run still stops the builds.
+    if: ${{ !cancelled() && needs.tests.result == 'success' && (inputs.dry_run || needs.create-release.result == 'success') }}
+    needs: [plan, verify-target, tests, create-release]
     runs-on: ubuntu-latest
+    # Real runs use the `draft-release` environment (main only), which holds the
+    # updater key. A dry run uses no environment, so it can start from a branch.
+    environment: ${{ !inputs.dry_run && 'draft-release' || '' }}
     permissions:
       contents: write
     steps:
@@ -195,9 +218,8 @@ jobs:
       - name: Build and attach to the draft release
         if: ${{ !inputs.dry_run }}
         uses: tauri-apps/tauri-action@1deb371b0cd8bd54025b384f1cd735e725c4060f # action-v1.0.0
-        # The updater key (docs/RELEASE.md), on the build steps only. Set on
-        # dry runs too, so a broken or missing key fails the dry run rather
-        # than the real release.
+        # The updater key (docs/RELEASE.md), from the `draft-release`
+        # environment, on this step only.
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
           TAURI_SIGNING_PRIVATE_KEY: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY }}
@@ -217,13 +239,20 @@ jobs:
           # release, and two parallel jobs would drop each other's platform.
           includeUpdaterJson: false
 
+      # A dry run never sees the real updater key: it lives in the
+      # `draft-release` environment, which only main can use. Signing with a
+      # throwaway key still proves the bundler signs and writes the .sig.
+      - name: Throwaway signing key (dry run)
+        if: ${{ inputs.dry_run }}
+        working-directory: crates/uia-app
+        run: |
+          pnpm exec tauri signer generate --ci --password dry-run --write-keys "$RUNNER_TEMP/dry-run.key"
+          echo "TAURI_SIGNING_PRIVATE_KEY=$(cat "$RUNNER_TEMP/dry-run.key")" >> "$GITHUB_ENV"
+          echo "TAURI_SIGNING_PRIVATE_KEY_PASSWORD=dry-run" >> "$GITHUB_ENV"
+
       - name: Build without releasing
         if: ${{ inputs.dry_run }}
         working-directory: crates/uia-app
-        # The updater key; see the step above.
-        env:
-          TAURI_SIGNING_PRIVATE_KEY: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY }}
-          TAURI_SIGNING_PRIVATE_KEY_PASSWORD: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY_PASSWORD }}
         run: pnpm exec tauri build --bundles deb
 
       # A missing key or a build without updater artifacts produces no .sig;
@@ -248,9 +277,15 @@ jobs:
           if-no-files-found: error
 
   windows:
-    needs: [plan, verify-target, create-release]
+    # `create-release` is skipped on a dry run, which would skip the build with
+    # it. `tests` is named so a red test run still stops the builds.
+    if: ${{ !cancelled() && needs.tests.result == 'success' && (inputs.dry_run || needs.create-release.result == 'success') }}
+    needs: [plan, verify-target, tests, create-release]
     # An MSI cannot be produced on a Linux runner: WiX only runs on Windows.
     runs-on: windows-latest
+    # Real runs use the `draft-release` environment (main only), which holds the
+    # updater key. A dry run uses no environment, so it can start from a branch.
+    environment: ${{ !inputs.dry_run && 'draft-release' || '' }}
     permissions:
       contents: write
     steps:
@@ -272,9 +307,8 @@ jobs:
       - name: Build and attach to the draft release
         if: ${{ !inputs.dry_run }}
         uses: tauri-apps/tauri-action@1deb371b0cd8bd54025b384f1cd735e725c4060f # action-v1.0.0
-        # The updater key (docs/RELEASE.md), on the build steps only. Set on
-        # dry runs too, so a broken or missing key fails the dry run rather
-        # than the real release.
+        # The updater key (docs/RELEASE.md), from the `draft-release`
+        # environment, on this step only.
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
           TAURI_SIGNING_PRIVATE_KEY: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY }}
@@ -289,13 +323,19 @@ jobs:
           # release, and two parallel jobs would drop each other's platform.
           includeUpdaterJson: false
 
+      # See the Linux job: a dry run signs with a throwaway key.
+      - name: Throwaway signing key (dry run)
+        if: ${{ inputs.dry_run }}
+        working-directory: crates/uia-app
+        shell: pwsh
+        run: |
+          pnpm exec tauri signer generate --ci --password dry-run --write-keys "$env:RUNNER_TEMP/dry-run.key"
+          "TAURI_SIGNING_PRIVATE_KEY=$(Get-Content -Raw "$env:RUNNER_TEMP/dry-run.key")" | Out-File -FilePath $env:GITHUB_ENV -Append -Encoding utf8
+          "TAURI_SIGNING_PRIVATE_KEY_PASSWORD=dry-run" | Out-File -FilePath $env:GITHUB_ENV -Append -Encoding utf8
+
       - name: Build without releasing
         if: ${{ inputs.dry_run }}
         working-directory: crates/uia-app
-        # The updater key; see the step above.
-        env:
-          TAURI_SIGNING_PRIVATE_KEY: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY }}
-          TAURI_SIGNING_PRIVATE_KEY_PASSWORD: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY_PASSWORD }}
         run: pnpm exec tauri build --bundles msi
 
       # A missing key or a build without updater artifacts produces no .sig;
@@ -476,11 +516,17 @@ jobs:
   #      `smoke-macos` to `publish.needs`, so a failed macOS build or smoke test
   #      keeps the release a draft like the other platforms, and add `macos` to
   #      `updater-manifest.needs` and `--require macos` to its command.
-  #   4. Do a dry run (workflow_dispatch) and check the `uia-macos` artifact
+  #   4. Put the APPLE_* secrets in the `draft-release` environment, not the
+  #      repository, and give this job the same `environment:` line as `linux`
+  #      and `windows`; for a dry run it also needs a throwaway signing key
+  #      step like theirs.
+  #   5. Do a dry run (workflow_dispatch) and check the `uia-macos` artifact
   #      on a second Mac before tagging.
   #
   # macos:
-  #   needs: [plan, verify-target, create-release]
+  #   # Same `if:` and `needs:` as `linux`: `create-release` is skipped on a dry run.
+  #   if: ${{ !cancelled() && needs.tests.result == 'success' && (inputs.dry_run || needs.create-release.result == 'success') }}
+  #   needs: [plan, verify-target, tests, create-release]
   #   # GitHub-hosted, Apple silicon. One universal binary covers both Intel
   #   # and Apple silicon Macs, so one job is enough.
   #   runs-on: macos-latest

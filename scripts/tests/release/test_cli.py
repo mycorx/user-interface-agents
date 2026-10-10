@@ -22,6 +22,25 @@ def write(path, text):
     return str(path)
 
 
+class SuiteIsolationTests(unittest.TestCase):
+    """The commands under test write to GITHUB_STEP_SUMMARY and GITHUB_OUTPUT.
+
+    GitHub Actions sets both for every step, so a suite that inherits them posts
+    its fixture plans ("promoting uai-app-0.1.2") into the real job summary.
+    run-release-tests.sh unsets them; this fails if the suite is run some other
+    way inside Actions.
+    """
+
+    def test_the_suite_cannot_write_to_the_job_summary_or_outputs(self):
+        import os
+
+        # Not assertNotIn(name, os.environ): its failure message prints the whole
+        # environment, which in CI means every variable, secrets included.
+        for name in ("GITHUB_STEP_SUMMARY", "GITHUB_OUTPUT", "GITHUB_ENV", "GITHUB_PATH"):
+            if name in os.environ:
+                self.fail(f"{name} is set: the tests would write into the real job")
+
+
 class PrCommandTests(unittest.TestCase):
     def setUp(self):
         self.base = make_repo("0.1.1")
@@ -259,6 +278,15 @@ class GitCommandTests(unittest.TestCase):
         self.assertEqual(code, 0)
         plan = json.loads(out)
         self.assertEqual((plan["baseline"], plan["target"]), ("uai-app-0.1.1", "uai-app-0.1.2"))
+
+    def test_plan_for_a_branch_head_uses_that_commit_and_its_version(self):
+        # No --published-tags-file and no network: a branch dry run must not
+        # ask GitHub what is published, or look at tags at all.
+        code, out, _ = run("plan", "--root", str(self.root), "--component", "uai-app",
+                           "--head-sha", "abc123")
+        self.assertEqual(code, 0)
+        plan = json.loads(out)
+        self.assertEqual((plan["sha"], plan["version"], plan["target"]), ("abc123", "0.1.2", ""))
 
     def test_plan_with_nothing_new_fails(self):
         pub = write(Path(tempfile.mkdtemp()) / "pub", "uai-app-0.1.2\n")

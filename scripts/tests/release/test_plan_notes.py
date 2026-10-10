@@ -50,6 +50,27 @@ class PlanTests(unittest.TestCase):
             plan.make_plan(self.comp, self.tags, {"uai-app-0.1.1"}, self.yes, lambda sha: False)
 
 
+class HeadPlanTests(unittest.TestCase):
+    """A dry run from a branch builds that branch, not main's newest tag."""
+
+    def setUp(self):
+        self.comp = load_registry_from(make_repo())["uai-app"]
+
+    def test_ships_the_given_commit_at_the_given_version(self):
+        p = plan.make_head_plan(self.comp, "0.1.3", "abc123")
+        self.assertEqual((p.target_sha, p.target_version), ("abc123", "0.1.3"))
+
+    def test_has_no_tag_and_no_baseline(self):
+        # Nothing is tagged or published by a dry run, so nothing may name one.
+        p = plan.make_head_plan(self.comp, "0.1.3", "abc123")
+        self.assertEqual((p.target, p.baseline, p.candidates), ("", None, ()))
+
+    def test_rejects_a_version_that_is_not_plain_semver(self):
+        for bad in ("v0.1.3", "0.1.3-rc.1", "uai-app-0.1.3"):
+            with self.assertRaises(ValueError):
+                plan.make_head_plan(self.comp, bad, "abc123")
+
+
 class TagTests(unittest.TestCase):
     def setUp(self):
         self.registry = load_registry_from(make_repo())
