@@ -647,21 +647,21 @@ MIT/Apache-2.0
   json-patch                    4.2.0
   minimal-lexical               0.2.1
   rtc                           0.20.2
-  rtc-datachannel               0.20.5
-  rtc-dtls                      0.20.5
-  rtc-ice                       0.20.5
-  rtc-interceptor               0.20.5
-  rtc-interceptor-derive        0.20.5
-  rtc-mdns                      0.20.5
-  rtc-media                     0.20.5
-  rtc-rtcp                      0.20.5
-  rtc-rtp                       0.20.5
-  rtc-sctp                      0.20.5
-  rtc-sdp                       0.20.5
-  rtc-shared                    0.20.5
-  rtc-srtp                      0.20.5
-  rtc-stun                      0.20.5
-  rtc-turn                      0.20.5
+  rtc-datachannel               0.20.3
+  rtc-dtls                      0.20.3
+  rtc-ice                       0.20.3
+  rtc-interceptor               0.20.3
+  rtc-interceptor-derive        0.20.3
+  rtc-mdns                      0.20.3
+  rtc-media                     0.20.3
+  rtc-rtcp                      0.20.3
+  rtc-rtp                       0.20.3
+  rtc-sctp                      0.20.3
+  rtc-sdp                       0.20.3
+  rtc-shared                    0.20.3
+  rtc-srtp                      0.20.3
+  rtc-stun                      0.20.3
+  rtc-turn                      0.20.3
   rusticata-macros              4.1.0
   sansio                        1.0.1
   serde_urlencoded              0.7.1
