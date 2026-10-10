@@ -15,7 +15,9 @@ serde_json.workspace = true
 tokio.workspace = true
 base64 = "0.23"
 aws-config = "1.12.0"
-aws-sdk-bedrockruntime = "1.148.0"
+# Defaults minus the legacy `rustls` feature, which pulls in hyper 0.14 /
+# rustls 0.21 (vulnerable h2 and rustls-webpki) alongside the modern client.
+aws-sdk-bedrockruntime = { version = "1.148.0", default-features = false, features = ["default-https-client", "rt-tokio"] }
 tokio-stream = "0.1"
 
 [dev-dependencies]
