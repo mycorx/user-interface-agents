@@ -51,7 +51,10 @@ fn extract_to(source: &Path, staging: &Path) -> Result<(), BundleError> {
         let mut entry = archive
             .by_index(i)
             .map_err(|e| BundleError::Archive(e.to_string()))?;
-        let raw = entry.name().to_string();
+        let raw = entry
+            .name()
+            .map_err(|e| BundleError::Archive(e.to_string()))?
+            .into_owned();
         let out = safe_entry_path(staging, &raw)?;
 
         if entry.is_dir() {
@@ -204,7 +207,7 @@ mod tests {
         std::fs::remove_file(&path).ok();
         let file = std::fs::File::create(&path).unwrap();
         let mut zip = zip::ZipWriter::new(file);
-        let opts: zip::write::FileOptions<'_, ()> =
+        let opts: zip::write::FileOptions<'_, '_, ()> =
             zip::write::FileOptions::default().compression_method(zip::CompressionMethod::Deflated);
 
         zip.start_file("manifest.json", opts).unwrap();
@@ -266,7 +269,7 @@ mod tests {
             std::env::temp_dir().join(format!("uia-mcpb-src-{}-exec.mcpb", std::process::id()));
         {
             let mut zip = zip::ZipWriter::new(std::fs::File::create(&src).unwrap());
-            let plain: zip::write::FileOptions<'_, ()> = zip::write::FileOptions::default();
+            let plain: zip::write::FileOptions<'_, '_, ()> = zip::write::FileOptions::default();
             zip.start_file("manifest.json", plain).unwrap();
             zip.write_all(GOOD_MANIFEST.as_bytes()).unwrap();
             zip.start_file("server/clock", plain.unix_permissions(0o755))
@@ -296,7 +299,7 @@ mod tests {
             std::env::temp_dir().join(format!("uia-mcpb-src-{}-{label}.mcpb", std::process::id()));
         {
             let mut zip = zip::ZipWriter::new(std::fs::File::create(&src).unwrap());
-            let plain: zip::write::FileOptions<'_, ()> = zip::write::FileOptions::default();
+            let plain: zip::write::FileOptions<'_, '_, ()> = zip::write::FileOptions::default();
             zip.start_file("manifest.json", plain).unwrap();
             zip.write_all(GOOD_MANIFEST.as_bytes()).unwrap();
             zip.start_file("server/clock", plain.unix_permissions(mode))
@@ -470,7 +473,7 @@ mod tests {
         std::fs::remove_file(&path).ok();
         {
             let mut zip = zip::ZipWriter::new(std::fs::File::create(&path).unwrap());
-            let opts: zip::write::FileOptions<'_, ()> = zip::write::FileOptions::default();
+            let opts: zip::write::FileOptions<'_, '_, ()> = zip::write::FileOptions::default();
             zip.start_file("readme.txt", opts).unwrap();
             zip.write_all(b"nothing here").unwrap();
             zip.finish().unwrap();

@@ -1,6 +1,6 @@
 [package]
 name = "uia-app"
-version = "0.1.5"
+version = "0.1.6"
 edition.workspace = true
 rust-version.workspace = true
 authors.workspace = true
@@ -32,8 +32,6 @@ desktop = [
     "dep:tauri-plugin-opener",
     "dep:tauri-plugin-updater",
     "dep:tauri-build",
-    "keyring/sync-secret-service",
-    "keyring/crypto-rust",
 ]
 # Capture-side echo cancellation (S15's `uia-audio::aec`), off by default
 # for the same reason it is off in `uia-audio`: it links a bundled C++
@@ -81,7 +79,7 @@ serde.workspace = true
 serde_json.workspace = true
 thiserror.workspace = true
 tokio.workspace = true
-toml = "1.1.4"
+toml = "1.1.8"
 # `oauth_flow::DeepLinkListener::deliver` routes each incoming callback
 # through `uia_mcp::callback::PendingAuthorizations::route` first (rmcp's own
 # parser and validation, exposed as a plain `rmcp`-free `Routed` struct --
@@ -101,6 +99,15 @@ toml = "1.1.4"
 # `desktop`-only): cheap enough to leave available workspace-wide, even
 # though `deliver` (its only user) stays `#[cfg(feature = "desktop")]`.
 url = "2.5.8"
+# `keyring` v4's default `v1` feature picks the platform store itself: Keychain
+# on macOS, Credential Manager on Windows, and Secret Service over pure-Rust
+# `zbus` on Linux (no system `libdbus-1`, so no `desktop` gating). There is no
+# mock fallback any more: with no store reachable, `Entry::new` errors and
+# `OsKeyring` degrades to the fallback chain. `OsKeyring` is called from inside
+# `tauri::async_runtime::spawn`; the Linux store blocks via zbus's `async-io`
+# executor, which is safe there. It would not be if anything turned on zbus's
+# `tokio` feature, whose `block_on` starts a nested tokio runtime.
+keyring = "4.2"
 tauri = { version = "2.12.2", optional = true, features = ["tray-icon", "protocol-asset", "macos-private-api"] }
 tauri-plugin-global-shortcut = { version = "2.4.0", optional = true }
 tauri-plugin-process = { version = "2.4.0", optional = true }
@@ -146,50 +153,16 @@ tauri-plugin-updater = { version = "2.13", optional = true }
 [target.'cfg(windows)'.dependencies]
 uia-audio = { path = "../uia-audio", features = ["wasapi-aec"] }
 
-# `keyring` v3.x ships with NO default features - with none enabled it
-# silently falls back to an in-memory "mock" store that never persists
-# anything, so the per-target platform backend below must be enabled
-# explicitly or the entire OS-keystore tier is a silent no-op on every
-# platform. `sync-secret-service` (not the async variant) is required on
-# Linux: `OsKeyring` is called from inside `tauri::async_runtime::spawn`
-# (an already-running tokio worker thread) in both `build_session` and
-# `migrate_plaintext_credentials_into_keystore`, and keyring's async
-# secret-service backend blocks on its own runtime internally, which is a
-# panic risk from inside a runtime that is already running. `crypto-rust`
-# is `sync-secret-service`'s required companion feature (pure-Rust crypto
-# for the D-Bus Secret Service session, avoiding an OpenSSL dependency).
-[target.'cfg(target_os = "windows")'.dependencies]
-keyring = { version = "3.6", features = ["windows-native"] }
-
 [target.'cfg(target_os = "macos")'.dependencies]
-keyring = { version = "3.6", features = ["apple-native"] }
 # macOS-native echo cancellation by default, for the same reasons and by the
 # same mechanism as the Windows stanza above.
 uia-audio = { path = "../uia-audio", features = ["coreaudio-aec"] }
 
-# On Linux, `sync-secret-service` (see the note above) pulls in the
-# `dbus-secret-service` crate, whose `libdbus-sys` dependency links the
-# SYSTEM `libdbus-1` library via a pkg-config build script. `libdbus-1-dev`
-# is not installed in this WSL2 sandbox and cannot be installed without root
-# (confirmed: bare `cargo build -p uia-app` fails with "The system
-# library `dbus-1` ... was not found"). So the real D-Bus backend is folded
-# into the `desktop` feature above -- already off by default for the exact
-# same class of reason (a real desktop dependency needing a system toolchain
-# this sandbox lacks) -- rather than being a new always-on Linux dependency.
-# `keyring` itself stays a mandatory (non-optional) dependency here so
-# `OsKeyring` always compiles on Linux; with `desktop` off it simply builds
-# with no backend features enabled, which is keyring v3's own harmless
-# in-memory mock (see the note above) -- fine for a non-desktop build target,
-# since the real desktop Linux build (built elsewhere with GTK/WebKit +
-# libdbus-1-dev present) is what actually needs the real backend.
-[target.'cfg(target_os = "linux")'.dependencies]
-keyring = { version = "3.6" }
-
 [dev-dependencies]
 # The A/B harness synthesises real speech with OpenAI TTS: `server_vad`
 # classifies speech, and a synthetic tone is never classified as any (S16).
-reqwest = { version = "0.12", default-features = false, features = ["json", "rustls-tls", "multipart"] }
-tokio = { version = "1.53.1", features = ["full", "test-util"] }
+reqwest = { version = "0.13", default-features = false, features = ["json", "rustls", "multipart"] }
+tokio = { version = "1.53.2", features = ["full", "test-util"] }
 # A local axum server standing in for the MCP endpoint under test, same
 # pattern as `uia-mcp/src/client.rs`'s redirect test - answers a 401 with a
 # `WWW-Authenticate` challenge so `preview_remote`'s OAuth branch has

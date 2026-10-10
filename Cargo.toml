@@ -30,7 +30,7 @@ publish = false
 
 [workspace.dependencies]
 async-trait = "0.1.92"
-thiserror = "2.0.20"
-tokio = { version = "1.53.1", features = ["sync", "time", "macros", "rt"] }
+thiserror = "2.0.21"
+tokio = { version = "1.53.2", features = ["sync", "time", "macros", "rt"] }
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
