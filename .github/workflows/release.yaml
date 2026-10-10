@@ -237,7 +237,7 @@ jobs:
           # The feed is assembled once, by `updater-manifest`, after both
           # builds: tauri-action's own latest.json is read-modify-write on the
           # release, and two parallel jobs would drop each other's platform.
-          includeUpdaterJson: false
+          uploadUpdaterJson: false
 
       # A dry run never sees the real updater key: it lives in the
       # `draft-release` environment, which only main can use. Signing with a
@@ -321,7 +321,7 @@ jobs:
           # The feed is assembled once, by `updater-manifest`, after both
           # builds: tauri-action's own latest.json is read-modify-write on the
           # release, and two parallel jobs would drop each other's platform.
-          includeUpdaterJson: false
+          uploadUpdaterJson: false
 
       # See the Linux job: a dry run signs with a throwaway key.
       - name: Throwaway signing key (dry run)
@@ -578,7 +578,7 @@ jobs:
   #         # The feed is assembled once, by `updater-manifest`, after all
   #         # builds: tauri-action's own latest.json is read-modify-write on the
   #         # release, and parallel jobs would drop each other's platform.
-  #         includeUpdaterJson: false
+  #         uploadUpdaterJson: false
   #
   #     - name: Build without releasing
   #       if: ${{ inputs.dry_run }}
