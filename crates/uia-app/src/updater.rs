@@ -18,6 +18,9 @@ use uia_core::session::State;
 pub const FIRST_CHECK_DELAY: Duration = Duration::from_secs(30);
 pub const CHECK_INTERVAL: Duration = Duration::from_secs(6 * 60 * 60);
 pub const SIGNATURE_FAILURE: &str = "Update failed signature check";
+/// Leads every failed check's message, so a raw transport error reads as
+/// what it is rather than as a status.
+pub const CHECK_FAILED_PREFIX: &str = "Couldn't check for updates";
 /// How often a downloaded update re-reads the session state while it waits
 /// for the assistant to go quiet before installing.
 pub const INSTALL_GATE_POLL: Duration = Duration::from_millis(250);
@@ -45,6 +48,12 @@ pub enum UpdateStatus {
         version: String,
         percent: Option<u8>,
     },
+    /// The release feed has no build for this OS (for now, macOS). Expected
+    /// rather than a failure, so it is not shown as one.
+    NotPublished {
+        current: String,
+        platform: String,
+    },
     Failed {
         message: String,
     },
@@ -56,6 +65,8 @@ pub enum CheckOutcome {
         version: String,
         notes: Option<String>,
     },
+    /// The feed answered but lists no build for this platform.
+    NoBuildForPlatform,
     Error(String),
 }
 
@@ -74,6 +85,17 @@ pub enum InstallError {
     /// The download did not match the public key compiled into this build.
     Signature,
     Other(String),
+}
+
+/// The OS name the Settings line shows, e.g. "No updates are published for
+/// macOS yet".
+pub fn platform_name() -> &'static str {
+    match std::env::consts::OS {
+        "macos" => "macOS",
+        "windows" => "Windows",
+        "linux" => "Linux",
+        other => other,
+    }
 }
 
 pub fn next_check_delay(first: bool) -> Duration {
@@ -110,7 +132,13 @@ pub fn status_after_check(
             notes,
             error: None,
         },
-        CheckOutcome::Error(message) => UpdateStatus::Failed { message },
+        CheckOutcome::NoBuildForPlatform => UpdateStatus::NotPublished {
+            current: current.to_string(),
+            platform: platform_name().to_string(),
+        },
+        CheckOutcome::Error(message) => UpdateStatus::Failed {
+            message: format!("{CHECK_FAILED_PREFIX}: {message}"),
+        },
     }
 }
 
@@ -120,8 +148,8 @@ pub fn shows_checking(previous: &UpdateStatus, trigger: CheckTrigger) -> bool {
     !(trigger == CheckTrigger::Scheduled && matches!(previous, UpdateStatus::Available { .. }))
 }
 
-/// [`status_after_check`], except that a scheduled check that errors leaves
-/// an existing offer in place instead of replacing it with `Failed`.
+/// [`status_after_check`], except that a scheduled check that errors (or
+/// finds no build for this platform) leaves an existing offer in place.
 pub fn status_after_triggered_check(
     previous: &UpdateStatus,
     trigger: CheckTrigger,
@@ -131,7 +159,10 @@ pub fn status_after_triggered_check(
 ) -> UpdateStatus {
     if trigger == CheckTrigger::Scheduled
         && matches!(previous, UpdateStatus::Available { .. })
-        && matches!(outcome, CheckOutcome::Error(_))
+        && matches!(
+            outcome,
+            CheckOutcome::Error(_) | CheckOutcome::NoBuildForPlatform
+        )
     {
         return previous.clone();
     }
@@ -251,7 +282,7 @@ mod desktop {
                     notes: update.body,
                 },
                 Ok(None) => CheckOutcome::NoUpdate,
-                Err(e) => CheckOutcome::Error(e.to_string()),
+                Err(e) => check_error(e),
             },
         };
         let current = app.package_info().version.to_string();
@@ -376,6 +407,15 @@ mod desktop {
         e.to_string()
     }
 
+    /// A feed with no entry for this platform is an answer, not a failure.
+    fn check_error(e: tauri_plugin_updater::Error) -> CheckOutcome {
+        use tauri_plugin_updater::Error as E;
+        match e {
+            E::TargetNotFound(_) | E::TargetsNotFound(_) => CheckOutcome::NoBuildForPlatform,
+            other => CheckOutcome::Error(other.to_string()),
+        }
+    }
+
     fn classify(e: &tauri_plugin_updater::Error) -> InstallError {
         use tauri_plugin_updater::Error as E;
         match e {
@@ -457,8 +497,57 @@ mod tests {
         assert_eq!(
             status_after_check(CheckOutcome::Error("offline".into()), "0.2.0", None),
             UpdateStatus::Failed {
-                message: "offline".into()
+                message: "Couldn't check for updates: offline".into()
             }
+        );
+    }
+
+    #[test]
+    fn a_feed_without_this_platform_is_not_a_failure() {
+        assert_eq!(
+            status_after_check(CheckOutcome::NoBuildForPlatform, "0.2.0", None),
+            UpdateStatus::NotPublished {
+                current: "0.2.0".into(),
+                platform: platform_name().into()
+            }
+        );
+        // A scheduled check never replaces an offer with it.
+        assert_eq!(
+            status_after_triggered_check(
+                &offer(),
+                CheckTrigger::Scheduled,
+                CheckOutcome::NoBuildForPlatform,
+                "0.2.0",
+                None
+            ),
+            offer()
+        );
+    }
+
+    #[test]
+    fn the_platform_name_is_the_one_people_use() {
+        let expected = if cfg!(target_os = "macos") {
+            "macOS"
+        } else if cfg!(windows) {
+            "Windows"
+        } else if cfg!(target_os = "linux") {
+            "Linux"
+        } else {
+            std::env::consts::OS
+        };
+        assert_eq!(platform_name(), expected);
+    }
+
+    #[test]
+    fn not_published_serialises_for_the_frontend() {
+        let json = serde_json::to_value(UpdateStatus::NotPublished {
+            current: "0.2.0".into(),
+            platform: "macOS".into(),
+        })
+        .unwrap();
+        assert_eq!(
+            json,
+            serde_json::json!({"status": "not_published", "current": "0.2.0", "platform": "macOS"})
         );
     }
 
@@ -541,7 +630,7 @@ mod tests {
         assert_eq!(
             status_after_triggered_check(&offer(), CheckTrigger::Manual, error(), "0.2.0", None),
             UpdateStatus::Failed {
-                message: "offline".into()
+                message: "Couldn't check for updates: offline".into()
             }
         );
         // With no offer on screen a scheduled failure is reported as before.
@@ -554,7 +643,7 @@ mod tests {
                 None
             ),
             UpdateStatus::Failed {
-                message: "offline".into()
+                message: "Couldn't check for updates: offline".into()
             }
         );
         // A successful scheduled check still replaces the offer.
