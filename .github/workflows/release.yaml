@@ -410,6 +410,7 @@ jobs:
     if: ${{ !inputs.dry_run }}
     needs: [plan, create-release, tests, smoke-linux, smoke-windows, updater-manifest]
     runs-on: ubuntu-latest
+    environment: public-release
     permissions:
       contents: write
     steps:
