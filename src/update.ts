@@ -9,6 +9,7 @@ export type UpdateStatus =
   | { status: 'up_to_date'; current: string }
   | { status: 'available'; version: string; notes: string | null; error: string | null }
   | { status: 'downloading'; version: string; percent: number | null }
+  | { status: 'not_published'; current: string; platform: string }
   | { status: 'failed'; message: string };
 
 export type UpdateSnapshot = { current_version: string; status: UpdateStatus };
@@ -31,6 +32,8 @@ export function describeUpdate(s: UpdateStatus): string {
         : `${s.version} available`;
     case 'downloading':
       return s.percent === null ? `Downloading ${s.version}…` : `Downloading ${s.version}… ${s.percent}%`;
+    case 'not_published':
+      return `No updates are published for ${s.platform} yet`;
     case 'failed':
       return s.message;
   }

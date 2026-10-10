@@ -115,12 +115,38 @@
   }).catch((e) => console.error('uia://update listen() failed:', e));
 
   async function checkNow() {
+    installError = '';
     try {
       update = await invoke<UpdateStatus>('check_for_update');
     } catch (e) {
       update = { status: 'failed', message: String(e) };
     }
   }
+
+  // An offer turns the button into the install, so Settings never shows two
+  // update buttons side by side. Rust refuses while the assistant is busy and
+  // says so; that message is shown in place of the status.
+  let installError = $state('');
+  async function installNow() {
+    installError = '';
+    try {
+      await invoke('install_update');
+    } catch (e) {
+      installError = String(e);
+      console.error('install_update invoke() failed:', e);
+    }
+  }
+
+  let updateBusy = $derived(update.status === 'checking' || update.status === 'downloading');
+  let updateButtonLabel = $derived(
+    update.status === 'checking'
+      ? 'Checking…'
+      : update.status === 'downloading'
+        ? 'Downloading…'
+        : update.status === 'available'
+          ? `Install ${update.version}`
+          : 'Check now'
+  );
 
   async function saveIdentity() {
     identitySaveState = 'saving';
@@ -304,17 +330,23 @@
         Check for updates automatically
       </label>
       <p class="hint">Applies immediately. "Check now" works either way.</p>
-      <p class="hint">
-        Version {currentVersion} · {describeUpdate(update)}
+      <div class="update-row">
+        <div class="update-status">
+          <p class="update-version">Version {currentVersion}</p>
+          <p class="hint" class:update-failed={update.status === 'failed' || installError}>
+            {installError || describeUpdate(update)}
+          </p>
+        </div>
         <button
           type="button"
           class="choice"
-          onclick={checkNow}
-          disabled={update.status === 'checking' || update.status === 'downloading'}
+          class:primary={update.status === 'available'}
+          onclick={update.status === 'available' ? installNow : checkNow}
+          disabled={updateBusy}
         >
-          Check now
+          {updateButtonLabel}
         </button>
-      </p>
+      </div>
     </div>
   </section>
 {/if}
@@ -406,6 +438,46 @@
     margin: 6px 0 0;
     font-size: 12px;
     color: #8890a0;
+  }
+
+  /* Status on the left takes the free width and wraps; the button keeps its
+     own column, so a long status never moves it or splits its line. */
+  .update-row {
+    display: flex;
+    align-items: center;
+    gap: 16px;
+    margin-top: 12px;
+  }
+
+  .update-status {
+    flex: 1;
+    min-width: 0;
+  }
+
+  .update-version {
+    margin: 0;
+    font-size: 13px;
+  }
+
+  .update-status .hint {
+    margin-top: 2px;
+    overflow-wrap: anywhere;
+  }
+
+  /* `.field-error`'s colour: a failed check or install is an error here. */
+  .update-failed {
+    color: #d9534f;
+  }
+
+  .update-row .choice {
+    flex: none;
+    white-space: nowrap;
+  }
+
+  .choice.primary {
+    background: var(--accent, #6ea8fe);
+    color: #0c0e12;
+    border-color: var(--accent, #6ea8fe);
   }
 
   .save-row {
