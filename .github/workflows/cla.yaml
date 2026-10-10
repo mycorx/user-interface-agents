@@ -31,6 +31,7 @@ jobs:
       # reason.
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
+          persist-credentials: false
           ref: ${{ github.base_ref }}
       # The commit list comes from the API rather than from the checkout: the
       # base branch does not contain the pull request's commits, and this is
@@ -68,6 +69,7 @@ jobs:
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
+          persist-credentials: true
           ref: ${{ github.event.pull_request.base.ref }}
       - name: Fetch the pull request's commits
         env:

@@ -42,6 +42,7 @@ jobs:
           persist-credentials: false
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
+          persist-credentials: true
           # The branch, not the SHA: push needs a ref, and the latest tip is
           # what must be bumped. The token also lets `git push` through.
           ref: ${{ github.event.pull_request.head.ref }}
