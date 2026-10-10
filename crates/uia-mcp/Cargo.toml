@@ -15,9 +15,12 @@ tokio = { workspace = true, features = ["io-std", "io-util", "process"] }
 serde.workspace = true
 serde_json.workspace = true
 rmcp = { version = "3.5.1", features = ["client", "auth", "transport-child-process", "transport-streamable-http-client-reqwest"] }
-zip = { version = "7.2.0", default-features = false, features = ["deflate"] }
+zip = { version = "9.0.0", default-features = false, features = ["deflate"] }
 http = "1.5.0"
 futures = "0.3.34"
+# Must be the version `rmcp` itself uses: its streamable-HTTP client trait
+# names `sse_stream::Sse` and `sse_stream::Error` in its signatures, so a newer
+# `sse-stream` here is a different, incompatible type. Move it with `rmcp`.
 sse-stream = "0.2.6"
 # `rustls` here is also the SOLE source of reqwest 0.13's TLS backend: rmcp's
 # `transport-streamable-http-client-reqwest` feature enables only reqwest's
