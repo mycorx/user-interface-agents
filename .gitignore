@@ -42,6 +42,9 @@ uia-conversation.jsonl.tmp
 # Isolated worktrees for staged implementation work (superpowers SDD).
 .worktrees/
 
+# Claude specific configuration folders
+.claude
+
 # Developing tools' local resources. docs/superpowers/ holds the specs, plans
 # and findings behind the design decisions. They are kept locally but are not
 # published with the repository.
