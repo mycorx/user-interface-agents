@@ -81,7 +81,7 @@ serde.workspace = true
 serde_json.workspace = true
 thiserror.workspace = true
 tokio.workspace = true
-toml = "1.1.4"
+toml = "1.1.8"
 # `oauth_flow::DeepLinkListener::deliver` routes each incoming callback
 # through `uia_mcp::callback::PendingAuthorizations::route` first (rmcp's own
 # parser and validation, exposed as a plain `rmcp`-free `Routed` struct --
@@ -189,7 +189,7 @@ keyring = { version = "3.6" }
 # The A/B harness synthesises real speech with OpenAI TTS: `server_vad`
 # classifies speech, and a synthetic tone is never classified as any (S16).
 reqwest = { version = "0.12", default-features = false, features = ["json", "rustls-tls", "multipart"] }
-tokio = { version = "1.53.1", features = ["full", "test-util"] }
+tokio = { version = "1.53.2", features = ["full", "test-util"] }
 # A local axum server standing in for the MCP endpoint under test, same
 # pattern as `uia-mcp/src/client.rs`'s redirect test - answers a 401 with a
 # `WWW-Authenticate` challenge so `preview_remote`'s OAuth branch has

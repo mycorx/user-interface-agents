@@ -28,7 +28,7 @@ rand = "0.9"
 bytes = "1"
 
 [dev-dependencies]
-tokio = { version = "1.53.1", features = ["full", "test-util"] }
+tokio = { version = "1.53.2", features = ["full", "test-util"] }
 # The live audio test synthesises real speech to send, because OpenAI's server
 # VAD will not treat a synthetic tone as speech. Integration tests do not
 # inherit the crate's own dependencies, so these are repeated here.
