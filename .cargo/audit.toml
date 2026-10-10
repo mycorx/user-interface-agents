@@ -1,0 +1,14 @@
+# cargo-audit configuration. Every ignore needs a reason and an exit condition.
+
+[advisories]
+ignore = [
+    # proc-macro-error is unmaintained. Compile-time only: it runs inside
+    # gtk-rs 0.18's macros (glib-macros, gtk3-macros) and nothing of it ships.
+    # Remove when Tauri moves its Linux backend off GTK3 (gtk-rs 0.18).
+    "RUSTSEC-2024-0370",
+    # glib 0.18: unsound Iterator impls on glib::VariantStrIter. Linux only,
+    # pulled in by Tauri's GTK3 stack (gtk, webkit2gtk, wry, tao, muda); our
+    # code never uses glib directly. gtk-rs 0.18 is the final GTK3 release, so
+    # no fix exists for Tauri 2. Remove when Tauri moves to GTK4.
+    "RUSTSEC-2024-0429",
+]
