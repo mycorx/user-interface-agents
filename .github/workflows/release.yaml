@@ -112,7 +112,11 @@ jobs:
   #
   # It waits for `tests`, and the builds wait for it, so a red test run costs no
   # build minutes and leaves no draft release behind.
+  #
+  # A dry run skips the job outright: it makes no release, so a green tick here
+  # would claim something that never happened.
   create-release:
+    if: ${{ !inputs.dry_run }}
     needs: [plan, verify-target, tests]
     runs-on: ubuntu-latest
     permissions:
@@ -122,15 +126,11 @@ jobs:
     outputs:
       release_id: ${{ steps.draft.outputs.result }}
     steps:
-      # Steps are conditional rather than the job: a skipped job counts as
-      # unsuccessful to `needs`, which would strand every build.
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
-        if: ${{ !inputs.dry_run }}
         with:
           persist-credentials: false
           fetch-depth: 0
       - name: Build the release notes
-        if: ${{ !inputs.dry_run }}
         env:
           GH_TOKEN: ${{ github.token }}
           COMPONENT: ${{ inputs.component }}
@@ -142,7 +142,6 @@ jobs:
           > "$RUNNER_TEMP/notes.md"
       - name: Create the draft release
         id: draft
-        if: ${{ !inputs.dry_run }}
         uses: actions/github-script@3a2844b7e9c422d3c10d287c895573f7108da1b3 # v9.0.0
         env:
           # Passed as environment variables rather than interpolated into the
@@ -183,7 +182,10 @@ jobs:
             return String(data.id)
 
   linux:
-    needs: [plan, verify-target, create-release]
+    # `create-release` is skipped on a dry run, which would skip the build with
+    # it. `tests` is named so a red test run still stops the builds.
+    if: ${{ !cancelled() && needs.tests.result == 'success' && (inputs.dry_run || needs.create-release.result == 'success') }}
+    needs: [plan, verify-target, tests, create-release]
     runs-on: ubuntu-latest
     # Real runs use the `draft-release` environment (main only), which holds the
     # updater key. A dry run uses no environment, so it can start from a branch.
@@ -275,7 +277,10 @@ jobs:
           if-no-files-found: error
 
   windows:
-    needs: [plan, verify-target, create-release]
+    # `create-release` is skipped on a dry run, which would skip the build with
+    # it. `tests` is named so a red test run still stops the builds.
+    if: ${{ !cancelled() && needs.tests.result == 'success' && (inputs.dry_run || needs.create-release.result == 'success') }}
+    needs: [plan, verify-target, tests, create-release]
     # An MSI cannot be produced on a Linux runner: WiX only runs on Windows.
     runs-on: windows-latest
     # Real runs use the `draft-release` environment (main only), which holds the
@@ -519,7 +524,9 @@ jobs:
   #      on a second Mac before tagging.
   #
   # macos:
-  #   needs: [plan, verify-target, create-release]
+  #   # Same `if:` and `needs:` as `linux`: `create-release` is skipped on a dry run.
+  #   if: ${{ !cancelled() && needs.tests.result == 'success' && (inputs.dry_run || needs.create-release.result == 'success') }}
+  #   needs: [plan, verify-target, tests, create-release]
   #   # GitHub-hosted, Apple silicon. One universal binary covers both Intel
   #   # and Apple silicon Macs, so one job is enough.
   #   runs-on: macos-latest
