@@ -260,6 +260,15 @@ class GitCommandTests(unittest.TestCase):
         plan = json.loads(out)
         self.assertEqual((plan["baseline"], plan["target"]), ("uai-app-0.1.1", "uai-app-0.1.2"))
 
+    def test_plan_for_a_branch_head_uses_that_commit_and_its_version(self):
+        # No --published-tags-file and no network: a branch dry run must not
+        # ask GitHub what is published, or look at tags at all.
+        code, out, _ = run("plan", "--root", str(self.root), "--component", "uai-app",
+                           "--head-sha", "abc123")
+        self.assertEqual(code, 0)
+        plan = json.loads(out)
+        self.assertEqual((plan["sha"], plan["version"], plan["target"]), ("abc123", "0.1.2", ""))
+
     def test_plan_with_nothing_new_fails(self):
         pub = write(Path(tempfile.mkdtemp()) / "pub", "uai-app-0.1.2\n")
         code, _, err = run("plan", "--root", str(self.root), "--component", "uai-app",

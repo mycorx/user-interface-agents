@@ -50,6 +50,17 @@ def make_plan(comp, tags: dict, published: set, is_ancestor: Callable, on_main: 
     return Plan(comp.name, baseline, target, versions[target], tags[target], tuple(candidates))
 
 
+def make_head_plan(comp, version: str, sha: str) -> Plan:
+    """The plan for a dry run from a branch: build that commit, at its own version.
+
+    `make_plan` promotes the newest unreleased tag on main, which would make a
+    dry run from a branch build main and prove nothing about the branch. A dry
+    run creates no release, so there is no tag, no baseline and no candidates.
+    """
+    semver.parse(version)
+    return Plan(comp.name, None, "", version, sha, ())
+
+
 def tags_to_create(registry, versions: dict, existing: set) -> list:
     """[(component, tag)] a merge to main must create for the versions in version.json."""
     out = []
