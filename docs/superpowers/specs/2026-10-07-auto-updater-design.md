@@ -9,7 +9,7 @@ compiled in and never checks for updates. So it can never be moved onto an
 update channel later, and everyone running it has to reinstall once, by hand,
 after being told to.
 
-The releases published so far (`uai-app-0.1.0`, `uai-app-0.1.1`) shipped
+The releases published so far (`uia-app-0.1.0`, `uia-app-0.1.1`) shipped
 without the updater, but nobody has installed them (confirmed 2026-10-09). So
 they are ignored. The first release that carries the updater is treated as
 the baseline, and no install needs migrating.
@@ -133,7 +133,7 @@ plan -> verify-target -> tests -> create-release (draft)
      -> publish
 ```
 
-- `plan` picks the newest unreleased `uai-app-X.Y.Z` tag and outputs
+- `plan` picks the newest unreleased `uia-app-X.Y.Z` tag and outputs
   `target_version`. That is the bare `X.Y.Z` from `version.json`, which is
   also what the app reports as its own version.
 - A `dry_run` input builds and tests without creating a release.

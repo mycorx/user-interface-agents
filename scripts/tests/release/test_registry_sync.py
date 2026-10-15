@@ -8,20 +8,20 @@ from release import sync
 
 class RegistryTests(unittest.TestCase):
     def setUp(self):
-        self.comp = load_registry_from(make_repo())["uai-app"]
+        self.comp = load_registry_from(make_repo())["uia-app"]
 
     def test_tag_round_trip(self):
-        self.assertEqual(self.comp.tag_for("1.2.3"), "uai-app-1.2.3")
-        self.assertEqual(self.comp.version_from_tag("uai-app-1.2.3"), "1.2.3")
+        self.assertEqual(self.comp.tag_for("1.2.3"), "uia-app-1.2.3")
+        self.assertEqual(self.comp.version_from_tag("uia-app-1.2.3"), "1.2.3")
 
     def test_foreign_and_malformed_tags_are_not_ours(self):
-        for tag in ("0.1.1", "uai-mobile-1.2.3", "uai-app-1.2", "uai-app-1.2.3-rc.1", "uai-app-"):
+        for tag in ("0.1.1", "uia-mobile-1.2.3", "uia-app-1.2", "uia-app-1.2.3-rc.1", "uia-app-"):
             self.assertIsNone(self.comp.version_from_tag(tag), tag)
 
     def test_tag_must_contain_version_once(self):
         root = make_repo()
         bad = json.loads(json.dumps(REGISTRY))
-        bad["uai-app"]["tag"] = "uai-app"
+        bad["uia-app"]["tag"] = "uia-app"
         (root / ".github/release-components.json").write_text(json.dumps(bad))
         with self.assertRaises(reg.RegistryError):
             load_registry_from(root)
@@ -29,14 +29,14 @@ class RegistryTests(unittest.TestCase):
     def test_duplicate_labels_are_rejected(self):
         root = make_repo()
         bad = json.loads(json.dumps(REGISTRY))
-        bad["other"] = json.loads(json.dumps(REGISTRY["uai-app"]))
+        bad["other"] = json.loads(json.dumps(REGISTRY["uia-app"]))
         (root / ".github/release-components.json").write_text(json.dumps(bad))
         with self.assertRaises(reg.RegistryError):
             load_registry_from(root)
 
     def test_versions_must_be_plain(self):
         root = make_repo()
-        (root / "version.json").write_text('{"uai-app": "1.2"}')
+        (root / "version.json").write_text('{"uia-app": "1.2"}')
         with self.assertRaises(reg.RegistryError):
             reg.read_versions(root)
 
@@ -44,7 +44,7 @@ class RegistryTests(unittest.TestCase):
 class SyncTests(unittest.TestCase):
     def setUp(self):
         self.root = make_repo("0.1.1")
-        self.comp = load_registry_from(self.root)["uai-app"]
+        self.comp = load_registry_from(self.root)["uia-app"]
 
     def versions(self):
         return {p: v for p, v in sync.read_synced(self.root, self.comp)}
