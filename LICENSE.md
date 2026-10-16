@@ -1,6 +1,6 @@
 # License
 
-Copyright © 2026 MycorX (Daniel, Sole Trader). All rights reserved.
+Copyright © 2026 MycorX. All rights reserved.
 
 U.I.A. is **source-available, not open source**. You choose one of two
 standard PolyForm licenses — whichever one describes you:
@@ -18,7 +18,7 @@ Both license files are the unmodified official texts from
 <https://polyformproject.org/licenses>. Where anything below disagrees with
 them, they win — this page is a reading guide, not a term.
 
-Required Notice: Copyright © 2026 MycorX (Daniel, Sole Trader)
+Required Notice: Copyright © 2026 MycorX
 
 ## In plain terms
 

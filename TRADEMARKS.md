@@ -3,7 +3,7 @@
 Version 1.1 — August 2026
 
 The MycorX and U.I.A. names, logos, icons, visual designs, and other brand
-assets are copyright © 2026 MycorX (Daniel, Sole Trader). All rights reserved.
+assets are copyright © 2026 MycorX. All rights reserved.
 
 ## These assets are not covered by the code license
 
