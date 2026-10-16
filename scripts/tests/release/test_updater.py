@@ -9,7 +9,7 @@ from unittest import mock
 from release import cli, updater
 
 REPO = "mycorx/user-interface-agents"
-TAG = "uai-app-0.2.0"
+TAG = "uia-app-0.2.0"
 MSI = "uia_0.2.0_x64_en-US.msi"
 DEB = "uia_0.2.0_amd64.deb"
 MAC = "uia_universal.app.tar.gz"
@@ -72,7 +72,7 @@ class BuildManifestTests(unittest.TestCase):
     def test_version_must_be_plain_semver(self):
         names = [MSI, MSI + ".sig", DEB, DEB + ".sig"]
         sigs = {n: "S" for n in names if n.endswith(".sig")}
-        for bad in ("v0.2.0", "0.2.0-rc.1", "uai-app-0.2.0"):
+        for bad in ("v0.2.0", "0.2.0-rc.1", "uia-app-0.2.0"):
             with self.assertRaises(ValueError):
                 build(names, sigs, version=bad)
 

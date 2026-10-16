@@ -1,7 +1,7 @@
 <!--
 Every section below is required; the `release-check` status fails without them.
 Comments like this one are stripped, so an untouched section counts as empty.
-Also add exactly one `semver:uai-app:<patch|minor|major|none>` label.
+Also add exactly one `semver:uia-app:<patch|minor|major|none>` label.
 -->
 
 ## Summary
@@ -11,7 +11,7 @@ Also add exactly one `semver:uai-app:<patch|minor|major|none>` label.
 ## Release note
 
 <!-- One sentence a user would understand, for the release notes. Write N/A
-only if the label is semver:uai-app:none. -->
+only if the label is semver:uia-app:none. -->
 
 ## Testing
 

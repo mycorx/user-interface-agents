@@ -26,7 +26,7 @@ class SuiteIsolationTests(unittest.TestCase):
     """The commands under test write to GITHUB_STEP_SUMMARY and GITHUB_OUTPUT.
 
     GitHub Actions sets both for every step, so a suite that inherits them posts
-    its fixture plans ("promoting uai-app-0.1.2") into the real job summary.
+    its fixture plans ("promoting uia-app-0.1.2") into the real job summary.
     run-release-tests.sh unsets them; this fails if the suite is run some other
     way inside Actions.
     """
@@ -49,7 +49,7 @@ class PrCommandTests(unittest.TestCase):
         self.files = write(tmp / "files", "crates/uia-app/src/lib.rs\n")
         self.body = write(tmp / "body", GOOD_BODY)
 
-    def args(self, cmd, label="semver:uai-app:patch", extra=()):
+    def args(self, cmd, label="semver:uia-app:patch", extra=()):
         return [cmd, "--root", str(self.head), "--base-root", str(self.base),
                 "--label", label, "--changed-files", self.files, "--author", "alice", *extra]
 
@@ -62,7 +62,7 @@ class PrCommandTests(unittest.TestCase):
         code, out, _ = run(*self.args("bump"))
         self.assertEqual(code, 0)
         self.assertIn("0.1.1 -> 0.1.2", out)
-        self.assertEqual(json.loads((self.head / "version.json").read_text()), {"uai-app": "0.1.2"})
+        self.assertEqual(json.loads((self.head / "version.json").read_text()), {"uia-app": "0.1.2"})
         self.assertIn('"version": "0.1.2"', (self.head / "crates/uia-app/tauri.conf.json").read_text())
         self.assertIn('version = "0.1.2"', (self.head / "crates/uia-app/Cargo.toml").read_text())
         code, out, _ = run(*self.args("check-pr", extra=["--body-file", self.body]))
@@ -75,10 +75,10 @@ class PrCommandTests(unittest.TestCase):
         self.assertIn("already correct", out)
 
     def test_relabelling_to_a_smaller_bump_resets_the_version(self):
-        run(*self.args("bump", label="semver:uai-app:minor"))
-        self.assertEqual(json.loads((self.head / "version.json").read_text()), {"uai-app": "0.2.0"})
-        run(*self.args("bump", label="semver:uai-app:patch"))
-        self.assertEqual(json.loads((self.head / "version.json").read_text()), {"uai-app": "0.1.2"})
+        run(*self.args("bump", label="semver:uia-app:minor"))
+        self.assertEqual(json.loads((self.head / "version.json").read_text()), {"uia-app": "0.2.0"})
+        run(*self.args("bump", label="semver:uia-app:patch"))
+        self.assertEqual(json.loads((self.head / "version.json").read_text()), {"uia-app": "0.1.2"})
 
     def test_a_renovate_rebase_that_drops_the_bump_is_bumped_again(self):
         run(*self.args("bump"))
@@ -90,10 +90,10 @@ class PrCommandTests(unittest.TestCase):
         self.assertEqual(run(*self.args("check-pr", extra=["--body-file", self.body]))[0], 0)
 
     def test_bump_with_bad_labels_changes_nothing_and_does_not_fail(self):
-        code, out, _ = run(*self.args("bump", label="semver:uai-app:none"))
+        code, out, _ = run(*self.args("bump", label="semver:uia-app:none"))
         self.assertEqual(code, 0)
         self.assertIn("not bumping", out)
-        self.assertEqual(json.loads((self.head / "version.json").read_text()), {"uai-app": "0.1.1"})
+        self.assertEqual(json.loads((self.head / "version.json").read_text()), {"uia-app": "0.1.1"})
 
     def test_manifest_drift_fails_check(self):
         run(*self.args("bump"))
@@ -116,7 +116,7 @@ class EventInputTests(unittest.TestCase):
         tmp = Path(tempfile.mkdtemp())
         event = write(tmp / "event.json", json.dumps({"pull_request": {
             "number": 7, "user": {"login": "alice"}, "body": GOOD_BODY,
-            "labels": [{"name": "bug"}, {"name": "semver:uai-app:patch"}],
+            "labels": [{"name": "bug"}, {"name": "semver:uia-app:patch"}],
         }}))
         files = write(tmp / "files", "crates/uia-app/src/lib.rs\n")
         argv = ["--root", str(head), "--base-root", str(base), "--event", event, "--changed-files", files]
@@ -136,14 +136,14 @@ class SyncCommandTests(unittest.TestCase):
         root = make_repo("0.1.1")
         self.assertEqual(run("sync", "--root", str(root), "--check")[0], 0)
         self.assertEqual(run("sync", "--root", str(root), "--check", "--expect-version", "0.1.2")[0], 1)
-        (root / "version.json").write_text('{"uai-app": "0.3.0"}')
+        (root / "version.json").write_text('{"uia-app": "0.3.0"}')
         self.assertEqual(run("sync", "--root", str(root), "--check")[0], 1)
         self.assertEqual(run("sync", "--root", str(root))[0], 0)
         self.assertEqual(run("sync", "--root", str(root), "--check")[0], 0)
 
     def test_current(self):
         root = make_repo("0.4.5")
-        self.assertEqual(run("current", "--root", str(root), "--component", "uai-app")[1].strip(), "0.4.5")
+        self.assertEqual(run("current", "--root", str(root), "--component", "uia-app")[1].strip(), "0.4.5")
 
     def test_unknown_component_is_a_clear_error(self):
         code, _, err = run("current", "--root", str(make_repo()), "--component", "nope")
@@ -165,7 +165,7 @@ class HardeningTests(unittest.TestCase):
 
     def args(self, cmd, extra=()):
         return [cmd, "--root", str(self.head), "--base-root", str(self.base),
-                "--label", "semver:uai-app:patch", "--changed-files", self.files,
+                "--label", "semver:uia-app:patch", "--changed-files", self.files,
                 "--author", "alice", *extra]
 
     def _symlink(self, rel):
@@ -182,7 +182,7 @@ class HardeningTests(unittest.TestCase):
         self.assertEqual(code, 2)
         self.assertIn("symlink", err)
         self.assertEqual(outside.read_text(), before)
-        self.assertEqual(json.loads((self.head / "version.json").read_text()), {"uai-app": "0.1.1"})
+        self.assertEqual(json.loads((self.head / "version.json").read_text()), {"uia-app": "0.1.1"})
 
     def test_check_pr_refuses_a_symlinked_manifest(self):
         self._symlink("Cargo.lock")
@@ -210,7 +210,7 @@ class HardeningTests(unittest.TestCase):
         (self.head / "crates/uia-app/tauri.conf.json").write_text("{}")
         code, _, err = run(*self.args("bump"))
         self.assertEqual(code, 2)
-        self.assertEqual(json.loads((self.head / "version.json").read_text()), {"uai-app": "0.1.1"})
+        self.assertEqual(json.loads((self.head / "version.json").read_text()), {"uia-app": "0.1.1"})
 
     def test_missing_changed_files_file_is_exit_2(self):
         argv = self.args("check-pr")
@@ -251,9 +251,9 @@ class HardeningTests(unittest.TestCase):
 
     def test_unknown_version_entry_has_a_real_message(self):
         (self.head / "version.json").write_text("{}")
-        code, _, err = run("current", "--root", str(self.head), "--component", "uai-app")
+        code, _, err = run("current", "--root", str(self.head), "--component", "uia-app")
         self.assertEqual(code, 2)
-        self.assertIn("version.json has no entry for uai-app", err)
+        self.assertIn("version.json has no entry for uia-app", err)
 
 
 class GitCommandTests(unittest.TestCase):
@@ -264,42 +264,42 @@ class GitCommandTests(unittest.TestCase):
         git(self.root, "config", "user.name", "t")
         git(self.root, "add", "-A")
         git(self.root, "commit", "-q", "-m", "one")
-        git(self.root, "tag", "uai-app-0.1.1")
+        git(self.root, "tag", "uia-app-0.1.1")
         (self.root / "x").write_text("x")
         git(self.root, "add", "-A")
         git(self.root, "commit", "-q", "-m", "two")
-        git(self.root, "tag", "uai-app-0.1.2")
+        git(self.root, "tag", "uia-app-0.1.2")
         git(self.root, "update-ref", "refs/remotes/origin/main", "HEAD")
-        self.published = write(Path(tempfile.mkdtemp()) / "pub", "uai-app-0.1.1\n")
+        self.published = write(Path(tempfile.mkdtemp()) / "pub", "uia-app-0.1.1\n")
 
     def test_plan_picks_the_newest_tag_after_the_baseline(self):
-        code, out, _ = run("plan", "--root", str(self.root), "--component", "uai-app",
+        code, out, _ = run("plan", "--root", str(self.root), "--component", "uia-app",
                            "--published-tags-file", self.published)
         self.assertEqual(code, 0)
         plan = json.loads(out)
-        self.assertEqual((plan["baseline"], plan["target"]), ("uai-app-0.1.1", "uai-app-0.1.2"))
+        self.assertEqual((plan["baseline"], plan["target"]), ("uia-app-0.1.1", "uia-app-0.1.2"))
 
     def test_plan_for_a_branch_head_uses_that_commit_and_its_version(self):
         # No --published-tags-file and no network: a branch dry run must not
         # ask GitHub what is published, or look at tags at all.
-        code, out, _ = run("plan", "--root", str(self.root), "--component", "uai-app",
+        code, out, _ = run("plan", "--root", str(self.root), "--component", "uia-app",
                            "--head-sha", "abc123")
         self.assertEqual(code, 0)
         plan = json.loads(out)
         self.assertEqual((plan["sha"], plan["version"], plan["target"]), ("abc123", "0.1.2", ""))
 
     def test_plan_with_nothing_new_fails(self):
-        pub = write(Path(tempfile.mkdtemp()) / "pub", "uai-app-0.1.2\n")
-        code, _, err = run("plan", "--root", str(self.root), "--component", "uai-app",
+        pub = write(Path(tempfile.mkdtemp()) / "pub", "uia-app-0.1.2\n")
+        code, _, err = run("plan", "--root", str(self.root), "--component", "uia-app",
                            "--published-tags-file", pub)
         self.assertEqual(code, 2)
         self.assertIn("nothing to release", err)
 
     def test_tag_dry_run_reports_the_missing_tag(self):
-        (self.root / "version.json").write_text('{"uai-app": "0.1.3"}')
+        (self.root / "version.json").write_text('{"uia-app": "0.1.3"}')
         code, out, _ = run("tag", "--root", str(self.root), "--sha", "abc", "--dry-run")
         self.assertEqual(code, 0)
-        self.assertIn("would tag abc as uai-app-0.1.3", out)
+        self.assertIn("would tag abc as uia-app-0.1.3", out)
 
     def test_tag_with_every_version_tagged_does_nothing(self):
         code, out, _ = run("tag", "--root", str(self.root), "--sha", "abc", "--dry-run")
@@ -314,14 +314,14 @@ class RenameTests(unittest.TestCase):
         tmp = Path(tempfile.mkdtemp())
         event = write(tmp / "event.json", json.dumps({"pull_request": {
             "number": 7, "user": {"login": "alice"}, "body": GOOD_BODY,
-            "labels": [{"name": "semver:uai-app:none"}]}}))
+            "labels": [{"name": "semver:uia-app:none"}]}}))
         argv = ["check-pr", "--root", str(head), "--base-root", str(base),
                 "--event", event, "--repo", "o/r"]
         # crates/... renamed into docs/...: the gh listing carries both paths.
         with mock.patch.object(cli, "_gh_api", return_value="docs/moved.md\tcrates/uia-app/src/lib.rs\n"):
             code, out, _ = run(*argv)
         self.assertEqual(code, 1)
-        self.assertIn("uai-app", out)
+        self.assertIn("uia-app", out)
         # The same PR without the rename is docs-only, so `none` passes.
         with mock.patch.object(cli, "_gh_api", return_value="docs/moved.md\t\n"):
             code, out, _ = run(*argv)

@@ -28,8 +28,8 @@ on:
       component:
         description: Which component to release
         type: choice
-        options: [uai-app]
-        default: uai-app
+        options: [uia-app]
+        default: uia-app
       dry_run:
         description: Build and test only; create no release
         type: boolean

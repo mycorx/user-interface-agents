@@ -14,7 +14,7 @@ tag, publish the draft) with:
 - Contributors do exactly one thing: put a `semver:<component>:<bump>` label
   on their PR.
 
-First component is `uai-app` (the Tauri desktop app). `uai-mobile` must be
+First component is `uia-app` (the Tauri desktop app). `uia-mobile` must be
 addable later without redesign.
 
 ## Decisions already made
@@ -36,7 +36,7 @@ There is no release PR.
 ### 1. `version.json`
 
 ```json
-{ "uai-app": "0.1.0" }
+{ "uia-app": "0.1.0" }
 ```
 
 The only file edited to change a version. Adding a component is adding a key.
@@ -45,9 +45,9 @@ The only file edited to change a version. Adding a component is adding a key.
 
 ```json
 {
-  "uai-app": {
-    "tag": "uai-app-{version}",
-    "label": "uai-app",
+  "uia-app": {
+    "tag": "uia-app-{version}",
+    "label": "uia-app",
     "synced": [
       { "kind": "tauri-conf", "path": "crates/uia-app/tauri.conf.json" },
       { "kind": "cargo-toml", "path": "crates/uia-app/Cargo.toml" },
@@ -61,12 +61,12 @@ The only file edited to change a version. Adding a component is adding a key.
 }
 ```
 
-- **Tags are component-prefixed: `uai-app-1.2.3`, `uai-mobile-0.4.0`.** The
-  prefix, not a suffix, because `1.2.3-uai-app` is valid semver for a
+- **Tags are component-prefixed: `uia-app-1.2.3`, `uia-mobile-0.4.0`.** The
+  prefix, not a suffix, because `1.2.3-uia-app` is valid semver for a
   *prerelease* of 1.2.3: it sorts below 1.2.3, and our own prerelease rule
   (`tag.includes('-')`) and GitHub's tooling would misread it. A prefix keeps
   the version a clean semver after the prefix is stripped, groups tags
-  alphabetically, and `git tag -l 'uai-app-*'` selects exactly one component's
+  alphabetically, and `git tag -l 'uia-app-*'` selects exactly one component's
   tags. This is also what release-please and changesets do.
 - `code_paths` / `ignore_paths` define "code changed" (confirmed).
 
@@ -154,16 +154,16 @@ conflict on it, and cost no extra runs.
 
 Changes in `renovate.json5`:
 
-- **Label names:** `semver:*` becomes `semver:uai-app:*`.
+- **Label names:** `semver:*` becomes `semver:uia-app:*`.
 - **One label per PR.** `addLabels` accumulates across every matching rule, so
   the rules must not overlap. Today the minor/patch rule also matches the
   `github-actions` manager. Make them disjoint:
-  - major **cargo/npm** updates → `semver:uai-app:patch` (not automerged, as
+  - major **cargo/npm** updates → `semver:uia-app:patch` (not automerged, as
     today);
   - every other cargo/npm update type (minor, patch, pin, digest, lockfile
-    maintenance, rollback, replacement, bump) → `semver:uai-app:none`;
+    maintenance, rollback, replacement, bump) → `semver:uia-app:none`;
   - every update from any other manager, majors included (e.g.
-    `github-actions`) → `semver:uai-app:none`. Majors of any manager are still
+    `github-actions`) → `semver:uia-app:none`. Majors of any manager are still
     not automerged.
 - **`gitIgnoredAuthors`** lists the release App's commit author. Renovate
   treats a branch with foreign commits as externally modified and stops
@@ -177,7 +177,7 @@ Changes in `renovate.json5`:
 desktop application with manual installs and no auto-updater, so cutting a
 version sooner does not get a fix to users sooner; the promotion cadence is the
 bottleneck, not the tagging. Vulnerability-alert PRs are labelled
-`semver:uai-app:none` like other non-major updates. If an urgent fix needs to
+`semver:uia-app:none` like other non-major updates. If an urgent fix needs to
 ship at once, a maintainer labels that PR `patch` by hand and runs `release`.
 
 In `release-check`:
@@ -203,7 +203,7 @@ do not trigger other workflows, which is intended.
 
 ### 6. Workflow: `release` (`workflow_dispatch`, no version input)
 
-Input: `component` (default `uai-app`) and `dry_run` (default false) — neither
+Input: `component` (default `uia-app`) and `dry_run` (default false) — neither
 is a version.
 
 The `plan` job's first step fails unless `github.ref == refs/heads/main`. A
@@ -292,21 +292,21 @@ The old tag-push trigger is removed.
 2. Branch protection on `main`: require `release-check`, require branches up to
    date, require review.
 3. If tag rulesets exist, allow the workflow to create tags.
-4. Create the labels `semver:uai-app:{patch,minor,major,none}`.
+4. Create the labels `semver:uia-app:{patch,minor,major,none}`.
 
 ## Migration
 
 - **One-time, manual, before the workflows are enabled** (nobody uses the app
   yet, so rewriting the first release is acceptable):
-  1. create tag `uai-app-0.1.1` on `fe3ef77`;
+  1. create tag `uia-app-0.1.1` on `fe3ef77`;
   2. move the published release onto it with
-     `gh release edit 0.1.1 --tag uai-app-0.1.1` (keeps its assets), then
+     `gh release edit 0.1.1 --tag uia-app-0.1.1` (keeps its assets), then
      delete the old `0.1.1` and `0.1.0` tags.
   Order matters: the `tag` workflow tags any `version.json` version that has no
-  tag, so if `version.json` says `0.1.1` while `uai-app-0.1.1` does not exist,
+  tag, so if `version.json` says `0.1.1` while `uia-app-0.1.1` does not exist,
   it would tag the current `main` HEAD as `0.1.1`.
-- Add `version.json` = `{"uai-app": "0.1.1"}`. The first automated tag will be
-  `uai-app-0.1.2` or higher. There is no legacy-tag handling in the code.
+- Add `version.json` = `{"uia-app": "0.1.1"}`. The first automated tag will be
+  `uia-app-0.1.2` or higher. There is no legacy-tag handling in the code.
 - Remove the tag-push trigger from `release.yaml`; update `docs/RELEASE.md`
   ("Cutting one" becomes "run the `release` workflow").
 - `ci.yaml`: add `workflow_call` with a `ref` input.
@@ -345,14 +345,14 @@ action is the commodity part: `actions/create-github-app-token` (bot token),
 
 Enforcing the template on issues, a conventional-commit title check,
 auto-promotion on a schedule, prerelease/RC flows, yanking a published
-release, signed installers, the auto-updater, `uai-mobile` build jobs (only the
+release, signed installers, the auto-updater, `uia-mobile` build jobs (only the
 registry and label scheme are made ready for it).
 
 ## Open questions
 
 All resolved:
 - globs confirmed;
-- tags are `uai-app-X.Y.Z` only, no legacy-tag support; the first release is retagged by hand (see Migration);
+- tags are `uia-app-X.Y.Z` only, no legacy-tag support; the first release is retagged by hand (see Migration);
 - the published release is `0.1.1`, so `version.json` starts there;
 - bot identity is a GitHub App, created manually by the org admin;
 - the smoke test uses installer metadata plus a `--smoke` early-exit flag.

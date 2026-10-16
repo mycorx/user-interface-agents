@@ -68,7 +68,7 @@ audience.
 
 ## How a change becomes a release
 
-1. **Label the PR.** Exactly one `semver:uai-app:<bump>` label, where `<bump>` is
+1. **Label the PR.** Exactly one `semver:uia-app:<bump>` label, where `<bump>` is
    `patch`, `minor`, `major`, or `none`.
    - Any change under the app's code paths (`crates/`, `src/`, `Cargo.*`,
      `package.json`, `pnpm-lock.yaml`, the Vite and Svelte configs) needs a real
@@ -83,7 +83,7 @@ audience.
    stale: the bot re-bumps on your next push or relabel. On a merge conflict in
    `version.json`, merge `main`, take `main`'s file, and run the bump again.
 4. **Merging tags it.** The `tag` workflow tags the merge commit
-   `uai-app-X.Y.Z` when the version is new. `none` PRs make no tag.
+   `uia-app-X.Y.Z` when the version is new. `none` PRs make no tag.
 5. **Promote when you want to ship.** Actions → **release** → Run workflow. There
    is no version to enter: it finds the latest published release, takes the
    newest tag after it, and ships that. Tags in between are skipped, but their
@@ -99,11 +99,11 @@ fix and a maintainer pushes it:
 
 ```bash
 python3 scripts/release bump --root . --base-root <checkout of main> \
-  --label semver:uai-app:patch --changed-files <file listing the PR's paths>
+  --label semver:uia-app:patch --changed-files <file listing the PR's paths>
 ```
 
-Tags are `uai-app-MAJOR.MINOR.PATCH`. A future component gets its own prefix
-(`uai-mobile-1.2.3`); a *suffix* such as `1.2.3-uai-app` would be a semver
+Tags are `uia-app-MAJOR.MINOR.PATCH`. A future component gets its own prefix
+(`uia-mobile-1.2.3`); a *suffix* such as `1.2.3-uia-app` would be a semver
 prerelease and is not used.
 
 Renovate: only a **major** cargo/npm update cuts a version (`patch`); minor and
@@ -143,7 +143,7 @@ anything is public. A real release (no `dry_run`) is refused from any branch but
    commit would never get its required checks. Bump commits are authored as
    `339497082+automated-release[bot]@users.noreply.github.com` (set in
    `release-bump.yaml` and listed in renovate's `gitIgnoredAuthors`).
-2. **Labels.** Create `semver:uai-app:patch|minor|major|none`.
+2. **Labels.** Create `semver:uia-app:patch|minor|major|none`.
    **Tag ruleset** (Settings → Rules → Rulesets, target: tags): restrict
    creations, updates and deletions, with the bypass list limited to admins and
    the `automated-release` App. The `tag` workflow creates tags with the App's
@@ -151,22 +151,22 @@ anything is public. A real release (no `dry_run`) is refused from any branch but
    *Restrict tag names* rule (must match) with:
 
    ```
-   ^uai-[a-z][a-z0-9]*(-[a-z][a-z0-9]*)*-(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)$
+   ^uia-[a-z][a-z0-9]*(-[a-z][a-z0-9]*)*-(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)$
    ```
 
-   That allows `uai-<component>-X.Y.Z` for any component and nothing else (no
+   That allows `uia-<component>-X.Y.Z` for any component and nothing else (no
    bare or suffixed versions). Add the App to this ruleset's bypass list only,
    not to branch rules. If `tag` fails with `HTTP 422`, the log now includes the
    rule that rejected it.
 3. **Retag the first release.** The `tag` workflow refuses to run for a component
-   with no `uai-app-*` tags (it would stamp the current `main` as the version in
-   `version.json`). Create `uai-app-0.1.1` on the commit of the published 0.1.1
+   with no `uia-app-*` tags (it would stamp the current `main` as the version in
+   `version.json`). Create `uia-app-0.1.1` on the commit of the published 0.1.1
    release and move the release to it:
 
    ```bash
    sha="$(git rev-list -n 1 0.1.1)"
-   gh api repos/{owner}/{repo}/git/refs -f ref=refs/tags/uai-app-0.1.1 -f sha="$sha"
-   gh release edit 0.1.1 --tag uai-app-0.1.1 --title "uai-app 0.1.1"   # --tag renames the release's tag and keeps its assets
+   gh api repos/{owner}/{repo}/git/refs -f ref=refs/tags/uia-app-0.1.1 -f sha="$sha"
+   gh release edit 0.1.1 --tag uia-app-0.1.1 --title "uia-app 0.1.1"   # --tag renames the release's tag and keeps its assets
    git push origin :refs/tags/0.1.1 :refs/tags/0.1.0
    ```
 4. **Branch protection on `main`:** require the `release-check` status, require
@@ -184,7 +184,7 @@ anything is public. A real release (no `dry_run`) is refused from any branch but
      own gate, and reviewers here would mean one approval per build job.
    - `public-release`: deployment branch `main`, with required reviewers. Gates
      `publish`, the only job that makes a release public.
-6. **Renovate** (`.github/renovate.json5`) must already carry the `semver:uai-app:*`
+6. **Renovate** (`.github/renovate.json5`) must already carry the `semver:uia-app:*`
    labels and `gitIgnoredAuthors` (this repo's config does). Delete the old
    `semver:patch`, `semver:none` and `semver:major` labels so open Renovate PRs
    pick up the new ones.
@@ -209,6 +209,33 @@ Recommended hardening:
 - **Keep the App minimal.** The release GitHub App must not be on any ruleset or
   branch-protection bypass list, and needs only *Contents: write* and
   *Pull requests: read*.
+
+## Renaming a component prefix
+
+Components were first released as `uai-app-*` and renamed to `uia-app-*`. A
+rename is a one-time migration, because `release-check` judges a PR against
+the base branch's registry and `plan` finds the last shipped version from the
+tags of published releases. In order:
+
+1. **Bridge PR**, labelled with the *old* `semver:<old>:none`: rename the
+   registry, labels, docs and tests, and give `version.json` both keys at the
+   same version, so the PR passes against the old registry. Don't merge yet.
+2. **GitHub, as an admin, before the merge:**
+   - Change the tag ruleset's name pattern to the new prefix.
+   - Create a new-prefix tag on the commit of every old tag.
+   - `gh release edit <old-tag> --tag <new-tag>` on every release, so `plan`
+     sees the new-prefix tags as published.
+   - Rewrite the asset URLs in each release's `latest.json` to the new tag and
+     re-upload it with `gh release upload --clobber`. Installed apps follow
+     those URLs, and they 404 once the release has moved. The signatures cover
+     the files, not the URLs, so they stay valid.
+3. **Merge the bridge PR.** Only then rename the labels with
+   `gh label edit <old> --name <new>`, which keeps them on open PRs; renaming
+   earlier fails the bridge PR's own check. Finally remove the old key from
+   `version.json` in a follow-up PR labelled with the new `semver:<new>:none`.
+
+The old tags are left in place: the ruleset blocks deleting them, and
+`version_from_tag` ignores another prefix.
 
 ## Installers are unsigned
 
