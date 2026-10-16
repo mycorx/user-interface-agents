@@ -136,10 +136,10 @@ async fn ungating_capture_resumes_forwarding_mid_session() {
 
 #[tokio::test]
 async fn gated_capture_reports_a_flat_level_and_never_barges_in() {
-    // A loud frame is the one that would both move the meter and interrupt
-    // the assistant. Muted, it must do neither: an equalizer that keeps
-    // dancing while the mic is off says "you are being heard", and an
-    // interrupt from audio the engine never received is worse still.
+    // A loud frame is the one that would interrupt the assistant. Muted, it
+    // must not: an interrupt from audio the engine never received is a reply
+    // cut off for nothing. Nor does it move the meter, which follows the
+    // assistant's playback and never the microphone.
     let (activation, act_tx) = ChannelActivation::new();
     let engine = FakeEngine::new(vec![EngineEvent::Ready, EngineEvent::SpeechStarted]);
     let probe = engine.audio_probe();
@@ -169,6 +169,44 @@ async fn gated_capture_reports_a_flat_level_and_never_barges_in() {
     assert_eq!(*level.borrow_and_update(), 0.0);
     assert_eq!(session.state(), State::Speaking, "muted audio barged in");
     assert!(probe.sent().is_empty());
+}
+
+#[tokio::test]
+async fn a_muted_mic_still_shows_the_assistant_speaking() {
+    // Muting the mic does not mute the assistant: a typed turn answered aloud
+    // while muted is still a voice playing, and the wave is that voice.
+    let (activation, act_tx) = ChannelActivation::new();
+    let engine = FakeEngine::new(vec![
+        EngineEvent::Ready,
+        EngineEvent::SpeechStarted,
+        EngineEvent::AudioChunk(vec![i16::MAX / 2; 480]),
+    ]);
+
+    let mut session = Session::new(SessionDeps {
+        source: Box::new(FixtureSource::new(
+            AudioFormat::mono_pcm16(16_000),
+            vec![vec![0; 480]],
+        )),
+        sink: Box::new(VecSink::new(AudioFormat::mono_pcm16(24_000))),
+        engine: Box::new(engine),
+        executor: std::sync::Arc::new(FakeExecutor::new()),
+        memory: std::sync::Arc::new(NullMemory),
+        activation: Box::new(activation),
+        ctx: ctx(),
+    });
+    let control = session.control();
+    let level = session.subscribe_level();
+    control.set_capture_enabled(false);
+
+    act_tx.send(ActivationEvent::Show).await.unwrap();
+    session.run_until_idle_or(State::Speaking).await;
+    session.pump_audio_once().await;
+
+    let observed = *level.borrow();
+    assert!(
+        (observed - 0.5).abs() < 0.01,
+        "the assistant's half-scale chunk is rms ~0.5 with the mic muted, observed {observed}"
+    );
 }
 
 #[tokio::test]
@@ -886,18 +924,20 @@ async fn disconnecting_collapses_the_meter_so_a_deaf_window_never_looks_live() {
     // called and the meter simply holds its last value: a ribbon frozen
     // mid-shape, reading exactly as "you are being heard".
     //
-    // This is the same honesty rule the capture gate already follows, for the
-    // same reason it gives: "a muted mic that still animates reads as 'you
-    // are being heard'". A deaf session is not different in kind from a muted
-    // one — in both, the level the meter is showing is going nowhere.
+    // A session that has dropped its engine has no voice to show, so the
+    // meter must not keep standing over the gap.
     let (activation, act_tx) = ChannelActivation::new();
-    let engine = FakeEngine::new(vec![EngineEvent::Ready]);
-    let loud = vec![i16::MAX / 2; 480];
+    let engine = FakeEngine::new(vec![
+        EngineEvent::Ready,
+        EngineEvent::SpeechStarted,
+        EngineEvent::AudioChunk(vec![i16::MAX / 2; 480]),
+    ]);
+    let quiet = vec![0; 480];
 
     let mut session = Session::new(SessionDeps {
         source: Box::new(FixtureSource::new(
             AudioFormat::mono_pcm16(16_000),
-            vec![loud.clone(), loud.clone(), loud],
+            vec![quiet.clone(), quiet.clone(), quiet],
         )),
         sink: Box::new(VecSink::new(AudioFormat::mono_pcm16(24_000))),
         engine: Box::new(engine),
@@ -909,7 +949,7 @@ async fn disconnecting_collapses_the_meter_so_a_deaf_window_never_looks_live() {
     let level = session.subscribe_level();
 
     act_tx.send(ActivationEvent::Show).await.unwrap();
-    session.run_until_idle_or(State::Listening).await;
+    session.run_until_idle_or(State::Speaking).await;
     session.pump_audio_once().await;
 
     let live = *level.borrow();

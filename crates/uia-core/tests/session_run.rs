@@ -81,12 +81,18 @@ async fn every_state_transition_is_broadcast_so_the_hud_never_misses_one() {
 }
 
 #[tokio::test]
-async fn the_capture_level_is_published_for_the_meter() {
+async fn the_assistants_playback_level_is_published_for_the_meter() {
     // `uia://level` at ~30 Hz. Unlike state, latest-only is correct here:
     // a meter that renders a stale backlog is worse than one that skips.
-    let loud = vec![i16::MAX / 2; 480];
-    let engine = FakeEngine::new(vec![EngineEvent::Ready]);
-    let (d, act_tx) = deps(Box::new(engine), vec![loud]);
+    //
+    // The wave is the assistant's voice, so the level is what the sink is
+    // playing. A quiet mic frame is still needed to drive the pump cycle.
+    let engine = FakeEngine::new(vec![
+        EngineEvent::Ready,
+        EngineEvent::SpeechStarted,
+        EngineEvent::AudioChunk(vec![i16::MAX / 2; 480]),
+    ]);
+    let (d, act_tx) = deps(Box::new(engine), vec![vec![0; 480]]);
     let mut session = Session::new(d);
     let level = session.subscribe_level();
 
@@ -99,7 +105,28 @@ async fn the_capture_level_is_published_for_the_meter() {
     let observed = *level.borrow();
     assert!(
         (observed - 0.5).abs() < 0.01,
-        "a constant half-scale frame is rms ~0.5, observed {observed}"
+        "a constant half-scale chunk is rms ~0.5, observed {observed}"
+    );
+}
+
+#[tokio::test]
+async fn the_users_own_voice_does_not_move_the_meter() {
+    // The bug this pins: the meter used to be the capture RMS, so the wave
+    // danced to the user's microphone instead of the assistant's voice.
+    let loud = vec![i16::MAX / 2; 480];
+    let engine = FakeEngine::new(vec![EngineEvent::Ready]);
+    let (d, act_tx) = deps(Box::new(engine), vec![loud]);
+    let mut session = Session::new(d);
+    let level = session.subscribe_level();
+
+    act_tx.send(ActivationEvent::Show).await.unwrap();
+    drop(act_tx);
+    session.run().await;
+
+    assert_eq!(
+        *level.borrow(),
+        0.0,
+        "a loud mic with nothing playing is silent"
     );
 }
 

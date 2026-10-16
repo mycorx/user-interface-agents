@@ -213,10 +213,12 @@
   // left edge; the bars were a fixed 68px adrift in whatever space was left,
   // which is why the window resize stranded them off-centre.
   //
-  // The engine sends one RMS number, never a spectrum, so this is a stylised
-  // response to amplitude — as the bars were. What it must not do is invent
-  // motion: a wave that undulates through silence is decoration pretending to
-  // be your voice, so the driver below stops dead when nothing is being said.
+  // The wave is the assistant's voice: the engine sends one RMS number of
+  // what the speaker is playing, never the microphone and never a spectrum,
+  // so this is a stylised response to amplitude — as the bars were. What it
+  // must not do is invent motion: a wave that undulates through silence is
+  // decoration pretending to be a voice, so the driver below stops dead when
+  // nothing is being said.
   const LAYERS = 13;
   const VB_W = 300;
   const VB_H = 100;
@@ -239,7 +241,9 @@
   // ribbon barely moving. The cube root opens the quiet end out without ever
   // exceeding 1.
   const shaped = $derived(Math.cbrt(Math.min(1, level)));
-  const live = $derived(captureEnabled && shaped > 0.04);
+  // Not gated on the mic: the level is the assistant's playback, and muting
+  // the mic does not mute the assistant.
+  const live = $derived(shaped > 0.04);
 
   function layerPath(amp: number, phase: number, layer: number): string {
     const steps = 48;

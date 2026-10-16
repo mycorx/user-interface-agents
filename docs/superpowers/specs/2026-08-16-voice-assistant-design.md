@@ -289,11 +289,10 @@ runs.
 ## 5. Data flow and state machine
 
 ```
-AudioSource ─► resample ─► [RMS ─► level event]
-                        ├─► barge-in detector
+AudioSource ─► resample ─► [RMS] ─► barge-in detector
                         └─► engine.send_audio()
 
-engine events ─► AudioChunk ─► resample ─► [RMS] ─► AudioSink
+engine events ─► AudioChunk ─► resample ─► AudioSink ─► [RMS of what played ─► level event]
               ├─► ToolCall ──► session ──► ToolExecutor ──► send_tool_result()
               └─► state transitions ─► IPC ─► Svelte HUD
 ```

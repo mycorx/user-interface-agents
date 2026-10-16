@@ -28,6 +28,15 @@ pub trait AudioSink: Send {
     /// Drop all buffered audio immediately. Synchronous and non-blocking by
     /// contract: barge-in must not await anything, least of all the network.
     fn clear(&mut self);
+    /// RMS (0.0..=1.0) of the audio the device most recently played — what
+    /// the HUD's wave follows, so it moves with the assistant's voice and
+    /// never with the user's. Measured where the queue is drained rather than
+    /// where `write` fills it: engines stream faster than real time, so a
+    /// level taken on `write` would run ahead of what is audible and fall flat
+    /// while the tail of a reply is still playing. Starved or cleared is 0.0.
+    fn level(&self) -> f32 {
+        0.0
+    }
 }
 
 pub struct FixtureSource {
@@ -61,6 +70,9 @@ impl AudioSource for FixtureSource {
 pub struct SinkProbe {
     buf: std::sync::Arc<std::sync::Mutex<Vec<i16>>>,
     clears: std::sync::Arc<std::sync::Mutex<usize>>,
+    /// RMS of the last write. A `VecSink` has no playback clock, so it treats
+    /// each write as played the moment it lands.
+    level: std::sync::Arc<std::sync::Mutex<f32>>,
 }
 
 impl SinkProbe {
@@ -104,11 +116,16 @@ impl AudioSink for VecSink {
     }
     async fn write(&mut self, frame: &[i16]) -> Result<(), AudioError> {
         self.probe.buf.lock().unwrap().extend_from_slice(frame);
+        *self.probe.level.lock().unwrap() = crate::audio::rms(frame);
         Ok(())
     }
     fn clear(&mut self) {
         self.probe.buf.lock().unwrap().clear();
         *self.probe.clears.lock().unwrap() += 1;
+        *self.probe.level.lock().unwrap() = 0.0;
+    }
+    fn level(&self) -> f32 {
+        *self.probe.level.lock().unwrap()
     }
 }
 
