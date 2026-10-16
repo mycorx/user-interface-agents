@@ -1,5 +1,6 @@
 import json
 import unittest
+from pathlib import Path
 
 from helpers import REGISTRY, load_registry_from, make_repo
 from release import registry as reg
@@ -109,6 +110,19 @@ class SyncTests(unittest.TestCase):
         path.write_text(path.read_text().replace('name = "uia-app"', 'name = "other"'))
         with self.assertRaises(sync.SyncError):
             sync.apply(self.root, self.comp, "0.2.0")
+
+
+class RealRepoTests(unittest.TestCase):
+    """The checked-in registry, version.json and synced files agree."""
+
+    ROOT = Path(__file__).resolve().parents[3]
+
+    def test_every_component_is_in_step(self):
+        registry = load_registry_from(self.ROOT)
+        versions = reg.read_versions(self.ROOT)
+        for comp in registry.values():
+            self.assertIn(comp.name, versions)
+            self.assertEqual(sync.check(self.ROOT, comp, versions[comp.name]), [], comp.name)
 
 
 if __name__ == "__main__":
