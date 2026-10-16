@@ -18,7 +18,11 @@ fix=false
 
 # Generated bindings and vendored spikes are excluded: spikes/ are throwaway
 # probes outside the workspace, and *.d.ts shims are not authored code.
-mapfile -t files < <(
+# A read loop, not mapfile: macOS ships bash 3.2, which has no mapfile.
+files=()
+while IFS= read -r f; do
+  files+=("$f")
+done < <(
   find crates src -type f \( -name '*.rs' -o -name '*.ts' \) \
     -not -path '*/target/*' \
     -not -path '*/node_modules/*' \
