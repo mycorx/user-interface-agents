@@ -28,7 +28,7 @@ reqwest = { version = "0.13", default-features = false, features = ["json", "rus
 # Version-locked with `uia-openai`'s pair for the same reason: the codec
 # parameter types a local media track needs are not re-exported by the facade.
 webrtc = "=0.20.2"
-rtc = "=0.20.2"
+rtc = "=0.21.0"
 rand = "0.10"
 bytes = "1"
 
