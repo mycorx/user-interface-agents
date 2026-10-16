@@ -1,5 +1,5 @@
 The image files in this directory, and the application icons in ../icons/,
-are MycorX brand assets: copyright (c) 2026 MycorX (Daniel, Sole Trader).
+are MycorX brand assets: copyright (c) 2026 MycorX.
 All rights reserved.
 
 They are NOT covered by the PolyForm licenses in the repository root

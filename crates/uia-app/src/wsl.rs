@@ -1,4 +1,4 @@
-// Copyright (c) 2026 MycorX (Daniel, Sole Trader). All rights reserved.
+// Copyright (c) 2026 MycorX. All rights reserved.
 // PolyForm Internal Use 1.0.0 OR PolyForm Noncommercial 1.0.0 — see LICENSE.md.
 
 // uia is a GUI-only client: an always-on-top transparent HUD, a tray icon, a

@@ -9,7 +9,7 @@ set -euo pipefail
 repo_root="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 cd "$repo_root"
 
-LINE1='// Copyright (c) 2026 MycorX (Daniel, Sole Trader). All rights reserved.'
+LINE1='// Copyright (c) 2026 MycorX. All rights reserved.'
 LINE2='// PolyForm Internal Use 1.0.0 OR PolyForm Noncommercial 1.0.0 — see LICENSE.md.'
 MARKER='Copyright (c) 2026 MycorX'
 

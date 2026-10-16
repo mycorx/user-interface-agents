@@ -1,4 +1,4 @@
-// Copyright (c) 2026 MycorX (Daniel, Sole Trader). All rights reserved.
+// Copyright (c) 2026 MycorX. All rights reserved.
 // PolyForm Internal Use 1.0.0 OR PolyForm Noncommercial 1.0.0 — see LICENSE.md.
 
 //! In-app updates (docs/superpowers/specs/2026-10-07-auto-updater-design.md).

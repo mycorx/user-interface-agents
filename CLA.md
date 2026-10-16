@@ -141,6 +141,6 @@ aware that would make these representations inaccurate in any respect.
 
 ---
 
-Copyright © 2026 MycorX (Daniel, Sole Trader).
+Copyright © 2026 MycorX.
 
 Questions about this agreement: info@mycorx.com.au
