@@ -7,28 +7,28 @@ from release import notes, plan
 class PlanTests(unittest.TestCase):
     def setUp(self):
         self.registry = load_registry_from(make_repo())
-        self.comp = self.registry["uai-app"]
+        self.comp = self.registry["uia-app"]
         self.tags = {
-            "uai-app-0.1.1": "a1", "uai-app-0.1.2": "a2", "uai-app-0.1.10": "a10",
-            "uai-app-0.1.3": "a3", "other-1.0.0": "zz", "0.1.1": "old",
+            "uia-app-0.1.1": "a1", "uia-app-0.1.2": "a2", "uia-app-0.1.10": "a10",
+            "uia-app-0.1.3": "a3", "other-1.0.0": "zz", "0.1.1": "old",
         }
         self.yes = lambda *a: True
 
     def test_promotes_the_newest_tag_after_the_published_baseline(self):
-        p = plan.make_plan(self.comp, self.tags, {"uai-app-0.1.1"}, self.yes, self.yes)
-        self.assertEqual(p.baseline, "uai-app-0.1.1")
-        self.assertEqual(p.target, "uai-app-0.1.10")
-        self.assertEqual(p.candidates, ("uai-app-0.1.2", "uai-app-0.1.3", "uai-app-0.1.10"))
+        p = plan.make_plan(self.comp, self.tags, {"uia-app-0.1.1"}, self.yes, self.yes)
+        self.assertEqual(p.baseline, "uia-app-0.1.1")
+        self.assertEqual(p.target, "uia-app-0.1.10")
+        self.assertEqual(p.candidates, ("uia-app-0.1.2", "uia-app-0.1.3", "uia-app-0.1.10"))
         self.assertEqual(p.target_sha, "a10")
 
     def test_a_published_release_of_another_component_is_not_our_baseline(self):
-        p = plan.make_plan(self.comp, self.tags, {"other-1.0.0", "uai-app-0.1.2"}, self.yes, self.yes)
-        self.assertEqual(p.baseline, "uai-app-0.1.2")
-        self.assertEqual(p.candidates, ("uai-app-0.1.3", "uai-app-0.1.10"))
+        p = plan.make_plan(self.comp, self.tags, {"other-1.0.0", "uia-app-0.1.2"}, self.yes, self.yes)
+        self.assertEqual(p.baseline, "uia-app-0.1.2")
+        self.assertEqual(p.candidates, ("uia-app-0.1.3", "uia-app-0.1.10"))
 
     def test_nothing_newer_is_an_error(self):
         with self.assertRaisesRegex(plan.PlanError, "nothing to release"):
-            plan.make_plan(self.comp, self.tags, {"uai-app-0.1.10"}, self.yes, self.yes)
+            plan.make_plan(self.comp, self.tags, {"uia-app-0.1.10"}, self.yes, self.yes)
 
     def test_no_published_release_means_every_tag_counts(self):
         p = plan.make_plan(self.comp, self.tags, set(), self.yes, self.yes)
@@ -36,25 +36,25 @@ class PlanTests(unittest.TestCase):
         self.assertEqual(len(p.candidates), 4)
 
     def test_a_published_release_whose_tag_was_deleted_still_sets_the_baseline(self):
-        tags = {k: v for k, v in self.tags.items() if k != "uai-app-0.1.1"}
-        p = plan.make_plan(self.comp, tags, {"uai-app-0.1.1"}, self.yes, self.yes)
-        self.assertEqual(p.baseline, "uai-app-0.1.1")
-        self.assertEqual(p.candidates, ("uai-app-0.1.2", "uai-app-0.1.3", "uai-app-0.1.10"))
+        tags = {k: v for k, v in self.tags.items() if k != "uia-app-0.1.1"}
+        p = plan.make_plan(self.comp, tags, {"uia-app-0.1.1"}, self.yes, self.yes)
+        self.assertEqual(p.baseline, "uia-app-0.1.1")
+        self.assertEqual(p.candidates, ("uia-app-0.1.2", "uia-app-0.1.3", "uia-app-0.1.10"))
 
     def test_target_must_descend_from_the_baseline(self):
         with self.assertRaisesRegex(plan.PlanError, "not a descendant"):
-            plan.make_plan(self.comp, self.tags, {"uai-app-0.1.1"}, lambda a, b: False, self.yes)
+            plan.make_plan(self.comp, self.tags, {"uia-app-0.1.1"}, lambda a, b: False, self.yes)
 
     def test_target_must_be_on_main(self):
         with self.assertRaisesRegex(plan.PlanError, "not reachable from main"):
-            plan.make_plan(self.comp, self.tags, {"uai-app-0.1.1"}, self.yes, lambda sha: False)
+            plan.make_plan(self.comp, self.tags, {"uia-app-0.1.1"}, self.yes, lambda sha: False)
 
 
 class HeadPlanTests(unittest.TestCase):
     """A dry run from a branch builds that branch, not main's newest tag."""
 
     def setUp(self):
-        self.comp = load_registry_from(make_repo())["uai-app"]
+        self.comp = load_registry_from(make_repo())["uia-app"]
 
     def test_ships_the_given_commit_at_the_given_version(self):
         p = plan.make_head_plan(self.comp, "0.1.3", "abc123")
@@ -66,7 +66,7 @@ class HeadPlanTests(unittest.TestCase):
         self.assertEqual((p.target, p.baseline, p.candidates), ("", None, ()))
 
     def test_rejects_a_version_that_is_not_plain_semver(self):
-        for bad in ("v0.1.3", "0.1.3-rc.1", "uai-app-0.1.3"):
+        for bad in ("v0.1.3", "0.1.3-rc.1", "uia-app-0.1.3"):
             with self.assertRaises(ValueError):
                 plan.make_head_plan(self.comp, bad, "abc123")
 
@@ -76,31 +76,31 @@ class TagTests(unittest.TestCase):
         self.registry = load_registry_from(make_repo())
 
     def test_creates_the_missing_tag(self):
-        got = plan.tags_to_create(self.registry, {"uai-app": "0.1.2"}, {"uai-app-0.1.1"})
-        self.assertEqual(got, [("uai-app", "uai-app-0.1.2")])
+        got = plan.tags_to_create(self.registry, {"uia-app": "0.1.2"}, {"uia-app-0.1.1"})
+        self.assertEqual(got, [("uia-app", "uia-app-0.1.2")])
 
     def test_existing_tag_means_nothing_to_do(self):
-        self.assertEqual(plan.tags_to_create(self.registry, {"uai-app": "0.1.1"}, {"uai-app-0.1.1"}), [])
+        self.assertEqual(plan.tags_to_create(self.registry, {"uia-app": "0.1.1"}, {"uia-app-0.1.1"}), [])
 
     def test_a_component_with_no_tags_at_all_refuses_to_guess(self):
         with self.assertRaisesRegex(plan.TagError, "no tags at all"):
-            plan.tags_to_create(self.registry, {"uai-app": "0.1.1"}, {"0.1.1", "0.1.0"})
+            plan.tags_to_create(self.registry, {"uia-app": "0.1.1"}, {"0.1.1", "0.1.0"})
         with self.assertRaisesRegex(plan.TagError, "LAST PUBLISHED release"):
-            plan.tags_to_create(self.registry, {"uai-app": "0.1.2"}, {"0.1.1"})
+            plan.tags_to_create(self.registry, {"uia-app": "0.1.2"}, {"0.1.1"})
 
     def test_versions_must_not_go_backwards(self):
         with self.assertRaisesRegex(plan.TagError, "only go up"):
-            plan.tags_to_create(self.registry, {"uai-app": "0.1.1"}, {"uai-app-0.1.5"})
+            plan.tags_to_create(self.registry, {"uia-app": "0.1.1"}, {"uia-app-0.1.5"})
 
 
 class NotesTests(unittest.TestCase):
     def setUp(self):
-        self.comp = load_registry_from(make_repo())["uai-app"]
+        self.comp = load_registry_from(make_repo())["uia-app"]
 
     def pr(self, n, label, note, author="alice", title="t"):
         body = f"## Release note\n{note}\n" if note else ""
         return {"number": n, "title": title, "url": f"https://x/{n}", "author": author,
-                "labels": [f"semver:uai-app:{label}"], "body": body}
+                "labels": [f"semver:uia-app:{label}"], "body": body}
 
     def test_groups_by_bump_with_breaking_first(self):
         out = notes.build_notes([

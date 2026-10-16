@@ -1,7 +1,7 @@
 {
-  "uai-app": {
-    "tag": "uai-app-{version}",
-    "label": "uai-app",
+  "uia-app": {
+    "tag": "uia-app-{version}",
+    "label": "uia-app",
     "synced": [
       { "kind": "tauri-conf", "path": "crates/uia-app/tauri.conf.json" },
       { "kind": "cargo-toml", "path": "crates/uia-app/Cargo.toml" },

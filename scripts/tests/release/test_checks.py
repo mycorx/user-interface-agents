@@ -15,8 +15,8 @@ class LabelTests(unittest.TestCase):
         return labels.check_labels(self.registry, lbls, files, renovate)
 
     def test_code_with_a_bump_label_is_fine(self):
-        chosen, errors = self.run_labels(["semver:uai-app:patch"], CODE)
-        self.assertEqual((chosen, errors), ({"uai-app": "patch"}, []))
+        chosen, errors = self.run_labels(["semver:uia-app:patch"], CODE)
+        self.assertEqual((chosen, errors), ({"uia-app": "patch"}, []))
 
     def test_no_semver_label_is_an_error(self):
         _, errors = self.run_labels(["bug"], CODE)
@@ -24,36 +24,36 @@ class LabelTests(unittest.TestCase):
         self.assertIn("no semver label", errors[0])
 
     def test_two_labels_for_one_component_is_an_error(self):
-        _, errors = self.run_labels(["semver:uai-app:patch", "semver:uai-app:minor"], CODE)
+        _, errors = self.run_labels(["semver:uia-app:patch", "semver:uia-app:minor"], CODE)
         self.assertTrue(any("more than one" in e for e in errors))
 
     def test_unknown_component_malformed_and_unknown_bump(self):
-        for bad in ("semver:uai-mobile:patch", "semver:patch", "semver:uai-app:huge"):
+        for bad in ("semver:uia-mobile:patch", "semver:patch", "semver:uia-app:huge"):
             _, errors = self.run_labels([bad], CODE)
             self.assertTrue(errors, bad)
 
     def test_none_is_rejected_when_code_changed(self):
-        _, errors = self.run_labels(["semver:uai-app:none"], CODE)
+        _, errors = self.run_labels(["semver:uia-app:none"], CODE)
         self.assertTrue(any("not allowed" in e for e in errors))
 
     def test_none_is_accepted_when_only_docs_changed(self):
-        self.assertEqual(self.run_labels(["semver:uai-app:none"], DOCS)[1], [])
+        self.assertEqual(self.run_labels(["semver:uia-app:none"], DOCS)[1], [])
 
     def test_a_bump_is_rejected_when_nothing_shippable_changed(self):
-        _, errors = self.run_labels(["semver:uai-app:patch"], DOCS)
+        _, errors = self.run_labels(["semver:uia-app:patch"], DOCS)
         self.assertTrue(any("release nothing" in e for e in errors))
 
     def test_renovate_may_label_none_over_code(self):
-        self.assertEqual(self.run_labels(["semver:uai-app:none"], CODE, renovate=True)[1], [])
+        self.assertEqual(self.run_labels(["semver:uia-app:none"], CODE, renovate=True)[1], [])
 
     def test_renovate_still_needs_exactly_a_label(self):
         self.assertTrue(self.run_labels([], CODE, renovate=True)[1])
 
     def test_expected_versions(self):
-        got = labels.expected_versions(self.registry, {"uai-app": "0.1.1"}, {"uai-app": "minor"})
-        self.assertEqual(got, {"uai-app": "0.2.0"})
-        got = labels.expected_versions(self.registry, {"uai-app": "0.1.1"}, {})
-        self.assertEqual(got, {"uai-app": "0.1.1"})
+        got = labels.expected_versions(self.registry, {"uia-app": "0.1.1"}, {"uia-app": "minor"})
+        self.assertEqual(got, {"uia-app": "0.2.0"})
+        got = labels.expected_versions(self.registry, {"uia-app": "0.1.1"}, {})
+        self.assertEqual(got, {"uia-app": "0.1.1"})
 
 
 class TwoComponentTests(unittest.TestCase):
@@ -64,28 +64,28 @@ class TwoComponentTests(unittest.TestCase):
 
     def test_each_touched_component_needs_a_label(self):
         files = CODE + ["mobile/app.kt"]
-        _, errors = labels.check_labels(self.registry, ["semver:uai-app:patch"], files, False)
+        _, errors = labels.check_labels(self.registry, ["semver:uia-app:patch"], files, False)
         self.assertEqual(len(errors), 1)
-        self.assertIn("uai-mobile", errors[0])
+        self.assertIn("uia-mobile", errors[0])
 
     def test_both_labelled_is_fine_and_bumps_each(self):
         files = CODE + ["mobile/app.kt"]
         chosen, errors = labels.check_labels(
-            self.registry, ["semver:uai-app:patch", "semver:uai-mobile:minor"], files, False)
-        self.assertEqual((chosen, errors), ({"uai-app": "patch", "uai-mobile": "minor"}, []))
+            self.registry, ["semver:uia-app:patch", "semver:uia-mobile:minor"], files, False)
+        self.assertEqual((chosen, errors), ({"uia-app": "patch", "uia-mobile": "minor"}, []))
         got = labels.expected_versions(
-            self.registry, {"uai-app": "0.1.1", "uai-mobile": "1.0.0"}, chosen)
-        self.assertEqual(got, {"uai-app": "0.1.2", "uai-mobile": "1.1.0"})
+            self.registry, {"uia-app": "0.1.1", "uia-mobile": "1.0.0"}, chosen)
+        self.assertEqual(got, {"uia-app": "0.1.2", "uia-mobile": "1.1.0"})
 
     def test_a_label_for_the_component_that_did_not_change_is_rejected(self):
         _, errors = labels.check_labels(
-            self.registry, ["semver:uai-app:patch", "semver:uai-mobile:patch"], CODE, False)
+            self.registry, ["semver:uia-app:patch", "semver:uia-mobile:patch"], CODE, False)
         self.assertEqual(len(errors), 1)
-        self.assertIn("uai-mobile", errors[0])
+        self.assertIn("uia-mobile", errors[0])
 
     def test_tags_are_per_component(self):
-        self.assertEqual(self.registry["uai-mobile"].tag_for("1.0.0"), "uai-mobile-1.0.0")
-        self.assertIsNone(self.registry["uai-app"].version_from_tag("uai-mobile-1.0.0"))
+        self.assertEqual(self.registry["uia-mobile"].tag_for("1.0.0"), "uia-mobile-1.0.0")
+        self.assertIsNone(self.registry["uia-app"].version_from_tag("uia-mobile-1.0.0"))
 
 
 class BodyTests(unittest.TestCase):
@@ -131,9 +131,9 @@ class CheckPrTests(unittest.TestCase):
 
     def run_check(self, **over):
         args = dict(
-            registry=self.registry, labels=["semver:uai-app:patch"], changed_files=CODE,
-            author="alice", body=GOOD_BODY, base_versions={"uai-app": "0.1.1"},
-            head_versions={"uai-app": "0.1.2"}, sync_errors=[],
+            registry=self.registry, labels=["semver:uia-app:patch"], changed_files=CODE,
+            author="alice", body=GOOD_BODY, base_versions={"uia-app": "0.1.1"},
+            head_versions={"uia-app": "0.1.2"}, sync_errors=[],
         )
         args.update(over)
         return checks.check_pr(**args)
@@ -142,23 +142,23 @@ class CheckPrTests(unittest.TestCase):
         self.assertEqual(self.run_check(), [])
 
     def test_unbumped_pr_names_the_version_it_needs(self):
-        errors = self.run_check(head_versions={"uai-app": "0.1.1"})
+        errors = self.run_check(head_versions={"uia-app": "0.1.1"})
         self.assertEqual(len(errors), 1)
         self.assertIn("expected 0.1.2", errors[0])
 
     def test_bump_hint_is_a_command_that_works_as_printed(self):
-        errors = self.run_check(head_versions={"uai-app": "0.1.1"})
+        errors = self.run_check(head_versions={"uia-app": "0.1.1"})
         for flag in ("--root", "--base-root", "--label", "--changed-files"):
             self.assertIn(flag, errors[0])
         self.assertNotIn("bot", errors[0])
 
     def test_a_stale_bump_is_caught_when_base_moved(self):
-        errors = self.run_check(base_versions={"uai-app": "0.1.2"})
+        errors = self.run_check(base_versions={"uia-app": "0.1.2"})
         self.assertIn("expected 0.1.3", errors[0])
 
     def test_none_pr_must_leave_the_version_alone(self):
         errors = self.run_check(
-            labels=["semver:uai-app:none"], changed_files=DOCS,
+            labels=["semver:uia-app:none"], changed_files=DOCS,
             body=GOOD_BODY.replace("Adds a thing users asked for.", "N/A"),
         )
         self.assertTrue(any("expected 0.1.1" in e for e in errors))

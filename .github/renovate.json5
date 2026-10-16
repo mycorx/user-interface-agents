@@ -89,7 +89,7 @@
       "description": "Major cargo/npm updates cut a patch version of the app",
       "matchManagers": ["cargo", "npm"],
       "matchUpdateTypes": ["major"],
-      "addLabels": ["semver:uai-app:patch"],
+      "addLabels": ["semver:uia-app:patch"],
     },
     {
       "description": "Every other cargo/npm update type cuts no version",
@@ -98,7 +98,7 @@
         "minor", "patch", "pin", "digest", "pinDigest", "lockFileMaintenance",
         "rollback", "replacement", "bump",
       ],
-      "addLabels": ["semver:uai-app:none"],
+      "addLabels": ["semver:uia-app:none"],
     },
     {
       // Catch-all for every other manager (github-actions, docker, ...) and
@@ -106,7 +106,7 @@
       // .github/**, which ships nothing.
       "description": "Updates from any other manager cut no version",
       "matchManagers": ["!cargo", "!npm"],
-      "addLabels": ["semver:uai-app:none"],
+      "addLabels": ["semver:uia-app:none"],
     },
     {
       // No label here: this only changes how majors are handled.

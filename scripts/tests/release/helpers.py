@@ -4,9 +4,9 @@ import tempfile
 from pathlib import Path
 
 REGISTRY = {
-    "uai-app": {
-        "tag": "uai-app-{version}",
-        "label": "uai-app",
+    "uia-app": {
+        "tag": "uia-app-{version}",
+        "label": "uia-app",
         "synced": [
             {"kind": "tauri-conf", "path": "crates/uia-app/tauri.conf.json"},
             {"kind": "cargo-toml", "path": "crates/uia-app/Cargo.toml"},
@@ -78,7 +78,7 @@ def make_repo(version="0.1.1", root=None) -> Path:
     (root / ".github").mkdir(parents=True, exist_ok=True)
     (root / "crates/uia-app").mkdir(parents=True, exist_ok=True)
     (root / ".github/release-components.json").write_text(json.dumps(REGISTRY, indent=2))
-    (root / "version.json").write_text(json.dumps({"uai-app": version}) + "\n")
+    (root / "version.json").write_text(json.dumps({"uia-app": version}) + "\n")
     (root / "crates/uia-app/tauri.conf.json").write_text(TAURI.replace("@V@", version))
     (root / "crates/uia-app/Cargo.toml").write_text(CARGO_TOML.replace("@V@", version))
     (root / "Cargo.lock").write_text(CARGO_LOCK.replace("@V@", version))
@@ -92,13 +92,13 @@ def load_registry_from(root):
 
 
 def two_component_registry(root=None):
-    """The uai-app registry plus a uai-mobile that owns mobile/**."""
+    """The uia-app registry plus a uia-mobile that owns mobile/**."""
     import json as _json
     root = make_repo(root=root)
     both = _json.loads(_json.dumps(REGISTRY))
-    both["uai-mobile"] = {
-        "tag": "uai-mobile-{version}",
-        "label": "uai-mobile",
+    both["uia-mobile"] = {
+        "tag": "uia-mobile-{version}",
+        "label": "uia-mobile",
         "synced": [],
         "code_paths": ["mobile/**"],
         "ignore_paths": [],
