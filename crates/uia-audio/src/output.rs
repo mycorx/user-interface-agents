@@ -2,6 +2,7 @@
 // PolyForm Internal Use 1.0.0 OR PolyForm Noncommercial 1.0.0 — see LICENSE.md.
 
 use crate::input::to_audio_format;
+use crate::level::PlaybackLevel;
 use async_trait::async_trait;
 use cpal::traits::{DeviceTrait, HostTrait, StreamTrait};
 use std::collections::VecDeque;
@@ -64,6 +65,7 @@ pub fn list_output_devices() -> Result<Vec<String>, AudioError> {
 pub struct CpalSink {
     format: AudioFormat,
     buf: Arc<Mutex<VecDeque<i16>>>,
+    level: PlaybackLevel,
     // Held only to keep the stream alive; cpal stops playback on drop.
     _stream: cpal::Stream,
 }
@@ -94,6 +96,8 @@ impl CpalSink {
 
         let buf: Arc<Mutex<VecDeque<i16>>> = Arc::new(Mutex::new(VecDeque::new()));
         let callback_buf = Arc::clone(&buf);
+        let level = PlaybackLevel::default();
+        let callback_level = level.clone();
         // The engine speaks mono; `write` queues one sample per audio frame.
         // A stereo (or wider) device's `data` interleaves N slots per frame,
         // so each queued sample must fan out to every slot in its frame —
@@ -117,6 +121,8 @@ impl CpalSink {
                             *slot = sample;
                         }
                     }
+                    drop(queue);
+                    callback_level.record(data);
                 },
                 move |err| eprintln!("uia-audio: output stream error: {err}"),
                 None,
@@ -129,6 +135,7 @@ impl CpalSink {
         Ok(Self {
             format,
             buf,
+            level,
             _stream: stream,
         })
     }
@@ -153,6 +160,10 @@ impl AudioSink for CpalSink {
 
     fn clear(&mut self) {
         self.buf.lock().unwrap().clear();
+    }
+
+    fn level(&self) -> f32 {
+        self.level.get()
     }
 }
 

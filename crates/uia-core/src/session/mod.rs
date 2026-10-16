@@ -176,8 +176,10 @@ pub struct Session {
     /// them, and it lives for microseconds — a latest-value channel would
     /// coalesce it away and the HUD would jump straight to `Listening`.
     state_tx: broadcast::Sender<State>,
-    /// Latest capture level, 0.0..=1.0. `watch` rather than broadcast for the
-    /// opposite reason: at ~30 Hz nobody wants a backlog, only the newest value.
+    /// Latest *playback* level, 0.0..=1.0 — the assistant's voice as the sink
+    /// is playing it, never the microphone. `watch` rather than broadcast for
+    /// the opposite reason: at ~30 Hz nobody wants a backlog, only the newest
+    /// value.
     level_tx: watch::Sender<f32>,
     /// Every engine error's message, in order — broadcast rather than `watch`
     /// for the same reason as `state_tx`: a transient error the shell missed
@@ -286,7 +288,7 @@ impl Session {
         self.state_tx.subscribe()
     }
 
-    /// Observe the latest capture level for a meter. Always readable; starts at 0.0.
+    /// Observe the latest playback level for the HUD wave. Always readable; starts at 0.0.
     pub fn subscribe_level(&self) -> watch::Receiver<f32> {
         self.level_tx.subscribe()
     }
@@ -831,15 +833,18 @@ impl Session {
             return false;
         };
 
+        // The meter is the assistant's voice, read from the sink once per
+        // captured frame (~20 ms), so the capture pump doubles as its clock.
+        // Published before the capture gate on purpose: muting the mic does
+        // not mute the assistant, and a typed turn answered aloud while muted
+        // must still move the wave.
+        let _ = self.level_tx.send(self.deps.sink.level());
+
         // Gated capture (PLAN.md FD15). The frame is read from the device
         // either way — stopping the read would let the capture buffer back up
         // and hand the engine a burst of stale audio on unmute — and then
-        // dropped here, before the meter, before barge-in, before any resample
-        // or `send_audio`. Reporting 0.0 rather than the real level is the
-        // honest signal for the meter: a muted mic that still animates reads
-        // as "you are being heard".
+        // dropped here, before barge-in, before any resample or `send_audio`.
         if !self.control.capture_enabled() {
-            let _ = self.level_tx.send(0.0);
             return true;
         }
 
@@ -848,11 +853,10 @@ impl Session {
         // deadline and drop the connection, which is the case this exists for.
         self.mark_activity();
 
-        // The meter reads every captured frame, not only the ones that trigger
-        // barge-in — a level that only moves while the assistant is speaking is
-        // a broken meter. Computed once and shared with the barge-in test below.
+        // The user's level feeds barge-in only. It used to be published as the
+        // meter too, which made the wave follow the user's voice rather than
+        // the assistant's.
         let level = crate::audio::rms(&frame);
-        let _ = self.level_tx.send(level);
 
         // Barge-in: clear the local buffer FIRST and synchronously. Waiting
         // for the provider to acknowledge would let the assistant keep

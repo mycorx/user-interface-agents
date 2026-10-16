@@ -51,4 +51,8 @@ impl AudioSink for CoreAudioSink {
         // Synchronous and non-blocking, per the `AudioSink` contract.
         self.backend.shared.queue.lock().unwrap().clear();
     }
+
+    fn level(&self) -> f32 {
+        self.backend.shared.level.get()
+    }
 }

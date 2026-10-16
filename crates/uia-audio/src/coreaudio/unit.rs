@@ -63,6 +63,8 @@ pub(crate) type FramesTx = tokio::sync::mpsc::Sender<Vec<i16>>;
 /// keep this alive, and that must not keep the microphone channel open.
 pub(crate) struct Shared {
     pub(crate) queue: Mutex<VecDeque<i16>>,
+    /// What `CoreAudioSink::level` reads, recorded by the render callback.
+    pub(crate) level: crate::level::PlaybackLevel,
     pub(crate) render_calls: AtomicU64,
     pub(crate) render_frames: AtomicU64,
 }
@@ -71,6 +73,7 @@ impl Shared {
     pub(crate) fn new() -> Self {
         Self {
             queue: Mutex::new(VecDeque::new()),
+            level: crate::level::PlaybackLevel::default(),
             render_calls: AtomicU64::new(0),
             render_frames: AtomicU64::new(0),
         }
@@ -272,6 +275,7 @@ unsafe extern "C-unwind" fn render_callback(
         let out = unsafe { std::slice::from_raw_parts_mut(buffer.mData.cast::<f32>(), floats) };
         if index == 0 {
             drain_into(queue.as_deref_mut(), out);
+            ctx.shared.level.record(out);
         } else {
             out.fill(0.0);
         }

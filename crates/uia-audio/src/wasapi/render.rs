@@ -18,6 +18,7 @@ use super::{
     LiveFormat, WAIT_TIMEOUT_MS, request_mmcss, revert_mmcss, stop_worker, wait_before_reopen,
 };
 use crate::input::to_audio_format;
+use crate::level::PlaybackLevel;
 use async_trait::async_trait;
 use std::collections::VecDeque;
 use std::sync::atomic::{AtomicBool, Ordering};
@@ -49,6 +50,7 @@ pub struct WasapiSink {
     /// exactly as it was rather than quietly changed here.
     format: Arc<LiveFormat>,
     buf: Arc<Mutex<VecDeque<i16>>>,
+    level: PlaybackLevel,
     stop: Arc<AtomicBool>,
     event: EventHandle,
     worker: Option<JoinHandle<()>>,
@@ -70,6 +72,8 @@ impl WasapiSink {
         let (ready_tx, ready_rx) = std::sync::mpsc::channel::<Result<Ready, AudioError>>();
         let buf: Arc<Mutex<VecDeque<i16>>> = Arc::new(Mutex::new(VecDeque::new()));
         let worker_buf = Arc::clone(&buf);
+        let level = PlaybackLevel::default();
+        let worker_level = level.clone();
         let stop = Arc::new(AtomicBool::new(false));
         let worker_stop = Arc::clone(&stop);
         let device_name = device_name.map(str::to_owned);
@@ -83,6 +87,7 @@ impl WasapiSink {
                 render_thread(
                     ready_tx,
                     worker_buf,
+                    worker_level,
                     worker_stop,
                     device_name,
                     worker_format,
@@ -113,6 +118,7 @@ impl WasapiSink {
         Ok(Self {
             format,
             buf,
+            level,
             stop,
             event: ready.event,
             worker: Some(worker),
@@ -145,6 +151,10 @@ impl AudioSink for WasapiSink {
         // `BUFFER_DURATION_HNS` is 20 ms rather than the spikes' 200 ms.
         self.buf.lock().unwrap().clear();
     }
+
+    fn level(&self) -> f32 {
+        self.level.get()
+    }
 }
 
 impl Drop for WasapiSink {
@@ -156,6 +166,7 @@ impl Drop for WasapiSink {
 fn render_thread(
     ready_tx: std::sync::mpsc::Sender<Result<Ready, AudioError>>,
     buf: Arc<Mutex<VecDeque<i16>>>,
+    level: PlaybackLevel,
     stop: Arc<AtomicBool>,
     device_name: Option<String>,
     format: Arc<LiveFormat>,
@@ -167,7 +178,7 @@ fn render_thread(
             ))));
             return;
         }
-        render_run(ready_tx, buf, stop, device_name.as_deref(), format);
+        render_run(ready_tx, buf, level, stop, device_name.as_deref(), format);
         CoUninitialize();
     }
 }
@@ -188,6 +199,7 @@ unsafe fn open_render_stream(
     device_name: Option<&str>,
     reuse_event: Option<EventHandle>,
     buf: &Arc<Mutex<VecDeque<i16>>>,
+    level: &PlaybackLevel,
 ) -> Result<Stream, AudioError> {
     unsafe {
         let opened = open_communications_client(eRender, device_name, reuse_event)?;
@@ -196,7 +208,7 @@ unsafe fn open_render_stream(
         })?;
         // Pre-roll one buffer of silence before starting, so the engine always
         // has something valid to play rather than whatever was in the buffer.
-        fill(&opened.client, &render, opened.channels, buf).map_err(|e| {
+        fill(&opened.client, &render, opened.channels, buf, level).map_err(|e| {
             AudioError::DeviceUnavailable(format!(
                 "wasapi: could not pre-fill the render buffer: {e}"
             ))
@@ -230,6 +242,7 @@ unsafe fn open_render_stream(
 unsafe fn render_run(
     ready_tx: std::sync::mpsc::Sender<Result<Ready, AudioError>>,
     buf: Arc<Mutex<VecDeque<i16>>>,
+    level: PlaybackLevel,
     stop: Arc<AtomicBool>,
     device_name: Option<&str>,
     format: Arc<LiveFormat>,
@@ -241,7 +254,7 @@ unsafe fn render_run(
         let mut loss_logged = false;
 
         while !stop.load(Ordering::SeqCst) {
-            let stream = match open_render_stream(device_name, event, &buf) {
+            let stream = match open_render_stream(device_name, event, &buf, &level) {
                 Ok(stream) => stream,
                 Err(e) => {
                     if let Some(tx) = ready_tx.take() {
@@ -299,7 +312,13 @@ unsafe fn render_run(
                 if stop.load(Ordering::SeqCst) {
                     break;
                 }
-                if let Err(e) = fill(&stream.client, &stream.render, stream.channels, &buf) {
+                if let Err(e) = fill(
+                    &stream.client,
+                    &stream.render,
+                    stream.channels,
+                    &buf,
+                    &level,
+                ) {
                     lost = Some(e.to_string());
                     break;
                 }
@@ -326,6 +345,7 @@ unsafe fn fill(
     render: &IAudioRenderClient,
     channels: u16,
     buf: &Arc<Mutex<VecDeque<i16>>>,
+    level: &PlaybackLevel,
 ) -> windows::core::Result<()> {
     unsafe {
         let available = client
@@ -356,6 +376,7 @@ unsafe fn fill(
                 }
             }
         }
+        level.record(slots);
 
         render.ReleaseBuffer(available, 0)
     }
