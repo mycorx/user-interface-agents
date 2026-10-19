@@ -6,6 +6,13 @@ Plan: `docs/superpowers/plans/2026-10-18-wake-word-spike.md` (local only, not
 published). Model: `sherpa-onnx-kws-zipformer-gigaspeech-3.3M-2024-01-01`
 (English, BPE, about 3.3M parameters).
 
+**Result and next steps:**
+
+- **Provisional GO** for an opt-in desktop wake word in **quiet rooms**, with sherpa-onnx 1.13.1. "Hey Juniper" detected 84/88 and "Hey My My" 81/88 on clean synthetic speech, with 0 false triggers in 26.68 h.
+- **NO-GO in noisy rooms** (37.5% at best with 10 dB babble) and **for short names** ("Max": 3.00 false triggers per 8 h).
+- **Two things would make it final:** a human `prompt-record` session, and the same run on macOS. Neither has been done.
+- The full list of next steps is in [section 7](#7-next-steps).
+
 Every number below came from `spikes/wake-probe`. That probe is **local only**:
 `spikes/` is gitignored, and the probe has its own nested git repo, so none of
 its code, audio or reports are in this repository. Run from `spikes/wake-probe`
@@ -126,7 +133,7 @@ Why this decision:
 
 **To make the decision final:**
 
-- a human `prompt-record` session, scored (README Task 6, Step 2);
+- a human `prompt-record` session, scored (README Task 6, Step 2, in the local-only probe);
 - the same run on macOS.
 
 If human detection on Windows falls below about 90% for both names, the
@@ -171,7 +178,7 @@ Notes:
   (85/88 to 84/88).
 - **MAX at its most sensitive** (t = 0.15) detects 86/88 clean but fires 17
   times in 26.68 h (5.10 per 8 h, upper 7.65).
-- **No cross-firing on clean TTS:** in the Task 6S-a run, no clip fired a
+- **No cross-firing on clean TTS:** in the Task 6S-a run (made before the 6S-b vet regenerated one broken clip), no clip fired a
   different name's keyword. Task 8 did not tabulate cross-fires for the
   noisy mixes.
 - **The room bound of 23.77 per 8 h is too wide to mean anything.** 0
@@ -219,7 +226,7 @@ invented name is not how it is said:
 | "HEY MARI GOLD" | | 31.8% (t = 0.25) |
 | "HEY MERRY GOLD" (HEY_MARIGOLD_PH) | `▁HE Y ▁ME R RY ▁GO L D` | 55.7% (t = 0.25); 38/88 = 43.2% at t = 0.40 |
 
-The Marigold spellings come from a controller experiment on the same 88
+The Marigold spellings come from a one-off experiment on the same 88
 clips at t = 0.25. Only MERRY GOLD was carried into the full Task 8 run.
 
 **Consequence for `uia-wake`: the name-to-token step must not be a naive BPE
@@ -266,7 +273,7 @@ genuinely false. Their causes are unknown: the excerpts in
 |---|---|
 | tract and candle op support | **tract 0.23.4:** every op loads except one shape-inference bug in tract-hir's `Range` with negative steps. With the one-line fix, fp32 parity passes on all graphs. **candle: not tested.** |
 | Licence of the sherpa-onnx KWS model | **Open.** The archive ships no licence file. The README front matter (ModelScope metadata) says `license: Apache License 2.0`. It was trained on GigaSpeech XL, which has its own terms. Confirm with k2-fsa, or find a licence file upstream, before shipping, and record it in `NOTICE.txt`. |
-| Installer size added by the model | **Model files:** encoder 12M fp32 / 4.6M int8, decoder 1.1M / 272K, joiner 628K / 160K (`du -sh`). That is about 13.8 MB for fp32 and about 5.0 MB for int8, plus `tokens.txt` and `bpe.model` (239K). The whole model dir is 20M including test WAVs. **Static sherpa-onnx lib:** the downloaded `sherpa-onnx-v1.13.1-win-x64-static-MT-Release-lib.tar.bz2` is 114.2 MB (114,222,392 B), but that is the full static library set, and the linker keeps only what is used. The tighter bound is the whole probe: `wake-probe.exe` release, **without tract, is 22.3 MB** (22,294,016 B). That includes sherpa-onnx, onnxruntime, tokio, reqwest and uia-audio. **With `--features tract` it is 46.6 MB** (46,644,736 B), so tract-onnx adds **24.4 MB** of Rust code on top. "Pure Rust" is therefore not smaller. Both were built 2026-10-19 with `cargo build --release --locked [--features tract]`. Shipping fp32 adds about 13.8 MB of model files. Note that sherpa-onnx int8 accuracy was not measured. |
+| Installer size added by the model | **Model files:** encoder 12M fp32 / 4.6M int8, decoder 1.1M / 272K, joiner 628K / 160K (`du -sh`). That is about 13.8 MB for fp32 and about 5.0 MB for int8, plus `bpe.model` (239K) and `tokens.txt` (8K). The whole model dir is 20M including test WAVs. **Static sherpa-onnx lib:** the downloaded `sherpa-onnx-v1.13.1-win-x64-static-MT-Release-lib.tar.bz2` is 114.2 MB (114,222,392 B), but that is the full static library set, and the linker keeps only what is used. The tighter bound is the whole probe: `wake-probe.exe` release, **without tract, is 22.3 MB** (22,294,016 B). That includes sherpa-onnx, onnxruntime, tokio, reqwest and uia-audio. **With `--features tract` it is 46.6 MB** (46,644,736 B), so tract-onnx adds **24.4 MB** of Rust code on top. "Pure Rust" is therefore not smaller. Both were built 2026-10-19 with `cargo build --release --locked [--features tract]`. Shipping fp32 adds about 13.8 MB of model files. Note that sherpa-onnx int8 accuracy was not measured. |
 | iOS background audio rules | **Unchanged from spec.** App Review Guideline 2.5.4: background services only "for their intended purposes: VoIP, audio playback, location, task completion, local notifications, etc." Guideline 2.5.14 requires "a clear visual and/or audible indication when recording". Always-on background listening for a wake word fits neither well. Source: <https://developer.apple.com/app-store/review/guidelines/>, accessed 2026-10-19. Apple's background-modes page (<https://developer.apple.com/documentation/xcode/configuring-background-execution-modes>) did not render for the fetcher, so the `audio` mode details were **not re-verified**. |
 | Android foreground service `microphone` | **Confirmed, unchanged from spec.** Apps targeting Android 12+ cannot start a foreground service from the background (`ForegroundServiceStartNotAllowedException`) except in listed cases. `microphone` needs `FOREGROUND_SERVICE_MICROPHONE` plus runtime `RECORD_AUDIO`. Since Android 14, `RECORD_AUDIO` is while-in-use, so the service "cannot be created while your app is in the background", even with most exemptions. It must be started while an activity is visible, or from a notification or widget interaction. Sources: <https://developer.android.com/develop/background-work/services/fgs/restrictions-bg-start> and <https://developer.android.com/about/versions/14/changes/fgs-types-required>, both accessed 2026-10-19. |
 
@@ -283,7 +290,7 @@ genuinely false. Their causes are unknown: the excerpts in
     23.77 per 8 h);
   - no far field or reverberation was tested.
 - **Optimistic threshold:** the threshold was picked on the same data it is
-  reported on. With n = 88, the 95% interval is about ±5 points near 92–95%.
+  reported on. With n = 88, the 95% interval is asymmetric, roughly −7/+3 points around 92–95% (for example 88.9–98.2% for 84/88).
 - **Not all TTS clips are short:** 21 of the 352 clips have more than 5 s of
   speech. They were kept, since extra speech cannot hide a detection, but
   they may slightly inflate rates if the TTS repeated the name.
@@ -300,7 +307,7 @@ genuinely false. Their causes are unknown: the excerpts in
 
 ## 7. Next steps
 
-1. **A human `prompt-record` session on Windows** (README Task 6, Step 2).
+1. **A human `prompt-record` session on Windows** (README Task 6, Step 2; the probe README is local only, like the plan).
    Record 15 clips at the desk and 15 from about 2 m for HEY_JUNIPER and
    HEY_MY_MY, with a second speaker if possible. Score them at t = 0.30 and
    t = 0.20. This turns "provisional" into go or no-go for Windows.
