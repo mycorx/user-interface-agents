@@ -12,7 +12,7 @@ members = [
 ]
 # Phase 0 spikes are throwaway probes that need network and provider credentials.
 # They must never gate `cargo test --workspace` or CI's clippy run.
-exclude = ["spikes/nova-probe", "spikes/openai-probe", "spikes/wake-probe"]
+exclude = ["spikes/nova-probe", "spikes/openai-probe"]
 
 [workspace.package]
 edition = "2024"
