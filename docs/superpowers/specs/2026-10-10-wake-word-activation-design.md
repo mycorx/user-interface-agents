@@ -1,6 +1,6 @@
 # Wake-word activation (configurable assistant name)
 
-Status: **Proposed**, not started. Written 2026-10-10.
+Status: **Spike done** (provisional go for quiet rooms, sherpa-onnx), see docs/superpowers/findings/2026-10-19-wake-word-spike.md.
 
 ## Problem
 
