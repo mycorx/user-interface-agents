@@ -1,4 +1,5 @@
 import { svelte } from '@sveltejs/vite-plugin-svelte';
+import { resolve } from 'node:path';
 import { defineConfig } from 'vite';
 
 // Tauri's dev server expectations: fixed port, no auto-open, no clearing the
@@ -20,6 +21,14 @@ export default defineConfig({
   envPrefix: ['VITE_', 'TAURI_'],
   build: {
     outDir: 'dist',
+    // Two pages: the main window and the floating MCP alert window (created
+    // on demand by the backend with WebviewUrl::App("alert.html")).
+    rollupOptions: {
+      input: {
+        main: resolve(import.meta.dirname, 'index.html'),
+        alert: resolve(import.meta.dirname, 'alert.html'),
+      },
+    },
     // The old chrome105/safari13 split (from earlier Tauri templates) is too
     // old for Svelte 5's compiled output (esbuild can't down-transform the
     // destructuring it emits). SP1 only targets Windows, where the WebView2

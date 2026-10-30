@@ -17,14 +17,21 @@
 
 use std::path::PathBuf;
 use std::str::FromStr;
+use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::{Arc, Mutex};
 use tauri::menu::{MenuBuilder, MenuItemBuilder};
 use tauri::tray::TrayIconBuilder;
 use tauri::{AppHandle, Emitter, Manager};
 use uia_app::activation_desktop::{self, DEFAULT_ACCELERATOR, activation_event_for_menu_id};
+use uia_app::alerts::{
+    AlertEnv, CardQueue, Coordinator, LiveAlertSettings, SessionStateFeed, TextTurns, UiState,
+    text_turns_from, ui_state_from,
+};
 use uia_app::config::{AudioSection, Config, EngineChoice};
 use uia_app::hud::{
-    CONNECTION_EVENT, ENGINE_EVENT, ERROR_EVENT, LEVEL_EVENT, LEVEL_INTERVAL, STATE_EVENT,
-    TEXT_TURN_SUPPORT_EVENT, TURN_EVENT, WindowAction, connection_payload, engine_payload,
+    ALERT_WINDOW_HEIGHT, ALERT_WINDOW_WIDTH, CONNECTION_EVENT, ENGINE_EVENT, ERROR_EVENT,
+    LEVEL_EVENT, LEVEL_INTERVAL, MCP_ALERT_EVENT, STATE_EVENT, TEXT_TURN_SUPPORT_EVENT, TURN_EVENT,
+    WindowAction, alert_payload, alert_window_position, connection_payload, engine_payload,
     error_payload, level_payload, state_payload, window_action_for,
 };
 use uia_app::mcp_registry;
@@ -38,8 +45,13 @@ use uia_app::settings::{
 use uia_app::updater::{self, CheckTrigger, UpdateStatus, UpdaterState};
 use uia_core::activation::{Activation, ActivationEvent, ChannelActivation};
 use uia_core::session::SessionControl;
+use uia_mcp::alert::Alert;
 
 const HUD_WINDOW: &str = "hud";
+/// The MCP alert card window, built on the first card (see `show_alert_card`).
+const ALERT_WINDOW: &str = "alert";
+/// How long a held alert waits for the agent before it goes to the card.
+const ALERT_HOLD_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(30);
 const OPEN_SETTINGS_EVENT: &str = "uia://open-settings";
 
 /// Emitted when the background OAuth token exchange (`complete_oauth_sign_in`)
@@ -112,12 +124,10 @@ struct ConfiguredFoundryEndpoint(Option<String>);
 /// [`SettingsPath`]/[`FoundrySettingsPath`].
 struct AudioSettingsPath(PathBuf);
 
-/// The audio settings this launch actually resolved and opened devices with —
-/// `config.audio` after [`settings::resolve_audio_settings`] has already been
-/// applied (see `main`), so `get_audio_settings` hands back the same value
-/// `build_session` used rather than re-deriving it. Same request/response
-/// rationale as [`CurrentEngine`].
-struct CurrentAudioSettings(AudioSection);
+/// `uia.toml`'s raw `[audio]` section, before the sidecar is applied, read
+/// once at startup. `get_audio_settings` layers the sidecar over it on each
+/// call, the same split as [`ConfiguredFoundryEndpoint`].
+struct ConfiguredAudioSettings(AudioSection);
 
 /// The path `set_agent_settings` persists to — same
 /// rationale as [`SettingsPath`]/[`FoundrySettingsPath`]/[`AudioSettingsPath`].
@@ -132,7 +142,7 @@ struct ModelSettingsPath(PathBuf);
 /// [`settings::resolve_openai_model`]/[`settings::resolve_bedrock_model`]/
 /// [`settings::resolve_foundry_model`] have already been applied (see
 /// `main`), so `get_model` hands back the same values `build_session` used.
-/// Same request/response rationale as [`CurrentAudioSettings`].
+/// Same request/response rationale as [`CurrentEngine`].
 struct CurrentModelSettings {
     openai: String,
     bedrock: String,
@@ -174,6 +184,177 @@ struct McpLocalServersDir(PathBuf);
 /// server added or enabled after startup is simply absent from the map until
 /// the next launch.
 struct McpHealthState(uia_app::session::McpHealth);
+
+/// Each server's alert settings as the running app applies them;
+/// `set_mcp_alerts` writes through to it.
+struct LiveAlerts(Arc<LiveAlertSettings>);
+
+/// The cards the `alert` window shows, oldest first.
+struct AlertCards(Mutex<CardQueue>);
+
+/// Whether a typed turn has been accepted this run, which is what lets an
+/// engine whose typed-turn support is `Unknown` open a session for an alert.
+struct TypedTurnSeen(Arc<AtomicBool>);
+
+/// The coordinator's window, session and card effects.
+struct AppAlertEnv {
+    app: AppHandle,
+    control: SessionControl,
+    typed_turn_seen: Arc<AtomicBool>,
+}
+
+impl AlertEnv for AppAlertEnv {
+    fn ui_state(&self) -> UiState {
+        match self.app.get_webview_window(HUD_WINDOW) {
+            Some(hud) => ui_state_from(
+                hud.is_visible().unwrap_or(false),
+                hud.is_minimized().unwrap_or(false),
+            ),
+            None => UiState::Hidden,
+        }
+    }
+
+    fn text_turns(&self) -> TextTurns {
+        text_turns_from(
+            &self.control.text_turn_support(),
+            self.typed_turn_seen.load(Ordering::Relaxed),
+        )
+    }
+
+    fn show_card(&self, alert: Alert) {
+        show_alert_card(&self.app, alert);
+    }
+
+    fn connect(&self) {
+        self.control.request_connect();
+    }
+
+    fn disconnect(&self) {
+        self.control.request_disconnect();
+    }
+
+    fn speak(&self, text: String) -> Result<(), ()> {
+        self.control.submit_text_turn(text).map_err(|_| ())?;
+        self.typed_turn_seen.store(true, Ordering::Relaxed);
+        Ok(())
+    }
+}
+
+/// Queue a card, open (or reuse) the `alert` window and tell it.
+///
+/// The window is built hidden on the first card and kept afterwards, hidden
+/// whenever the queue empties. A freshly built page misses this event, which
+/// is why it reads the queue with `take_pending_alerts` on load.
+fn show_alert_card(app: &AppHandle, alert: Alert) {
+    let cards = app.state::<AlertCards>();
+    let card_id = cards
+        .0
+        .lock()
+        .unwrap_or_else(|e| e.into_inner())
+        .push(alert.clone());
+    let payload = alert_payload(card_id, &alert);
+    let window = match app.get_webview_window(ALERT_WINDOW) {
+        Some(window) => window,
+        None => match build_alert_window(app) {
+            Ok(window) => window,
+            Err(e) => {
+                eprintln!("uia: cannot open the alert card window: {e}");
+                return;
+            }
+        },
+    };
+    // Shown without focus: the window is not focusable, so this cannot take
+    // the keyboard from whatever the user is typing into.
+    let _ = window.show();
+    let _ = app.emit_to(ALERT_WINDOW, MCP_ALERT_EVENT, payload);
+}
+
+/// Undecorated, transparent, always on top, on every workspace, never
+/// focused and absent from the taskbar, in the top-right corner of the
+/// primary monitor's work area, sized for three stacked cards (the page
+/// shrinks it to its content with `setSize`, granted in
+/// `capabilities/alert.json`).
+///
+/// v1 limitation: on macOS it is visible on all desktops/Spaces but not
+/// guaranteed over another app's full-screen Space. That needs the
+/// full-screen-auxiliary collection behaviour or a non-activating panel,
+/// which Tauri does not expose, and no AppKit code is added for it.
+fn build_alert_window(app: &AppHandle) -> tauri::Result<tauri::WebviewWindow> {
+    let mut builder = tauri::WebviewWindowBuilder::new(
+        app,
+        ALERT_WINDOW,
+        tauri::WebviewUrl::App("alert.html".into()),
+    )
+    .title("Alerts")
+    .inner_size(ALERT_WINDOW_WIDTH, ALERT_WINDOW_HEIGHT)
+    .resizable(false)
+    .decorations(false)
+    .transparent(true)
+    .shadow(false)
+    .always_on_top(true)
+    .visible_on_all_workspaces(true)
+    .skip_taskbar(true)
+    .focused(false)
+    .focusable(false)
+    // A window that never takes focus must still act on the first click.
+    .accept_first_mouse(true)
+    .visible(false);
+    if let Some(monitor) = app.primary_monitor()? {
+        let area = monitor.work_area();
+        let (x, y) = alert_window_position(
+            (area.position.x, area.position.y),
+            (area.size.width, area.size.height),
+            monitor.scale_factor(),
+        );
+        builder = builder.position(x, y);
+    }
+    builder.build()
+}
+
+/// Run the alert coordinator: alerts from every server's listener, session
+/// state changes, and a 1 s tick for the hold timeout.
+///
+/// `show` off drops an alert here, before the coordinator (the listener also
+/// filters it, but a toggle can land between the two). Alert text is never
+/// logged.
+async fn run_alert_coordinator(
+    app: AppHandle,
+    control: SessionControl,
+    live: Arc<LiveAlertSettings>,
+    typed_turn_seen: Arc<AtomicBool>,
+    mut alerts: tokio::sync::mpsc::UnboundedReceiver<Alert>,
+    mut states: tokio::sync::mpsc::UnboundedReceiver<uia_core::session::State>,
+) {
+    let env = Arc::new(AppAlertEnv {
+        app: app.clone(),
+        control,
+        typed_turn_seen,
+    });
+    let mut coordinator = Coordinator::new(env, ALERT_HOLD_TIMEOUT);
+    let current = app
+        .state::<SessionStateFeed>()
+        .snapshot_and_drain(&mut states);
+    coordinator.on_state(current, std::time::Instant::now());
+
+    let mut tick = tokio::time::interval(std::time::Duration::from_secs(1));
+    tick.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
+    loop {
+        tokio::select! {
+            alert = alerts.recv() => {
+                let Some(alert) = alert else { break };
+                if !live.shows(&alert.server) {
+                    continue;
+                }
+                let wake_agent = live.wakes_agent(&alert.server);
+                coordinator.on_alert(alert, wake_agent, std::time::Instant::now());
+            }
+            Some(state) = states.recv() => {
+                coordinator.on_state(state, std::time::Instant::now());
+            }
+            _ = tick.tick() => coordinator.on_tick(std::time::Instant::now()),
+        }
+    }
+}
 
 fn main() {
     // The release smoke test (scripts/smoke/) runs the installed binary as
@@ -277,6 +458,7 @@ fn main() {
     // failing the whole session in `build_session`. A failed enumeration
     // yields an empty list, which disables the filter rather than discarding
     // every audio setting the user has.
+    let configured_audio_settings = config.audio.clone();
     let available_devices: Vec<String> = input_device_names()
         .unwrap_or_default()
         .into_iter()
@@ -287,7 +469,6 @@ fn main() {
         settings::load(&audio_settings_path),
         &available_devices,
     );
-    let current_audio_settings = config.audio.clone();
 
     let model_settings_path = model_settings_path_for(&config_path);
     // Same restart-to-switch tier as the engine choice (S18) and FD5: all
@@ -413,6 +594,20 @@ fn main() {
     // the pipe is ready when they do.
     let managed_control = session_control.clone();
 
+    // MCP alerts: every connected server's listener sends into `alert_tx`,
+    // and `run_alert_coordinator` (started in `setup`) drains it.
+    let live_alerts = Arc::new(LiveAlertSettings::from_registry(&mcp_registry));
+    let (alert_tx, alert_rx) = tokio::sync::mpsc::unbounded_channel::<Alert>();
+    let (state_feed, state_rx) = SessionStateFeed::new(uia_core::session::State::Idle);
+    let typed_turn_seen = Arc::new(AtomicBool::new(false));
+    let alert_feeds = uia_app::session::AlertFeeds {
+        settings: live_alerts.clone(),
+        sink: alert_tx,
+    };
+    let alert_control = session_control.clone();
+    let alert_settings = live_alerts.clone();
+    let alert_typed_turn_seen = typed_turn_seen.clone();
+
     tauri::Builder::default()
         // MUST be first: on Linux and Windows the OS starts a NEW process for a
         // deep link, with the URL in argv. This callback runs in the ALREADY
@@ -445,7 +640,7 @@ fn main() {
         .manage(FoundrySettingsPath(foundry_settings_path))
         .manage(ConfiguredFoundryEndpoint(configured_foundry_endpoint))
         .manage(AudioSettingsPath(audio_settings_path))
-        .manage(CurrentAudioSettings(current_audio_settings))
+        .manage(ConfiguredAudioSettings(configured_audio_settings))
         .manage(AgentSettingsPath(agent_settings_path))
         .manage(ModelSettingsPath(model_settings_path))
         .manage(current_model_settings)
@@ -456,6 +651,10 @@ fn main() {
         .manage(McpHealthState(mcp_health.clone()))
         .manage(ConversationStorePath(memory_path.clone()))
         .manage(UpdaterState::default())
+        .manage(LiveAlerts(live_alerts))
+        .manage(AlertCards(Mutex::new(CardQueue::default())))
+        .manage(TypedTurnSeen(typed_turn_seen))
+        .manage(state_feed)
         .invoke_handler(tauri::generate_handler![
             set_engine,
             get_engine,
@@ -499,6 +698,10 @@ fn main() {
             preview_mcp_remote_server,
             add_mcp_remote_server,
             set_mcp_remote_server_enabled,
+            get_mcp_alerts,
+            set_mcp_alerts,
+            take_pending_alerts,
+            dismiss_alert,
             remove_mcp_remote_server,
             get_update_status,
             check_for_update,
@@ -645,6 +848,15 @@ fn main() {
                 });
             }
 
+            tauri::async_runtime::spawn(run_alert_coordinator(
+                handle.clone(),
+                alert_control,
+                alert_settings,
+                alert_typed_turn_seen,
+                alert_rx,
+                state_rx,
+            ));
+
             // Update checks: 30 s after launch, then every 6 h, each one
             // gated on the agent settings' `auto_update_check`.
             updater::spawn_background_checks(handle.clone(), agent_settings_path_for(&config_path));
@@ -702,6 +914,7 @@ fn main() {
                     &task_local_servers_dir,
                     home_location.as_deref(),
                     &task_health,
+                    &alert_feeds,
                 );
                 let mut session = match build.await {
                     Ok(s) => s,
@@ -814,6 +1027,7 @@ fn main() {
 
 fn emit_state(app: &AppHandle, state: uia_core::session::State) {
     app.state::<UpdaterState>().set_session_state(state);
+    app.state::<SessionStateFeed>().set(state);
     let _ = app.emit(STATE_EVENT, state_payload(state));
 }
 
@@ -937,8 +1151,14 @@ fn get_connection_wanted(state: tauri::State<SessionControlState>) -> bool {
 /// turn that still fails surfaces as an `Err` string from the engine, not
 /// from this command, which only reports whether the turn was *queued*.
 #[tauri::command]
-fn send_typed_turn(state: tauri::State<SessionControlState>, text: String) -> Result<(), String> {
-    state.0.submit_text_turn(text).map_err(|e| e.to_string())
+fn send_typed_turn(
+    state: tauri::State<SessionControlState>,
+    seen: tauri::State<TypedTurnSeen>,
+    text: String,
+) -> Result<(), String> {
+    state.0.submit_text_turn(text).map_err(|e| e.to_string())?;
+    seen.0.store(true, Ordering::Relaxed);
+    Ok(())
 }
 
 /// The running session's typed-turn capability (PLAN.md FD2, S0), as the flat
@@ -1248,13 +1468,16 @@ fn set_start_at_login(app: tauri::AppHandle, enabled: bool) -> Result<(), String
     }
 }
 
-/// The Audio tab's initial values - the same `AudioSection` `build_session`
-/// already opened devices with (see `main`'s `resolve_audio_settings` call),
-/// not re-derived here from `uia.toml` plus the sidecar separately, so
-/// this can never disagree with what the running session actually did.
+/// The Audio tab's initial values: what is saved, read fresh on every call
+/// (see [`settings::saved_audio_settings`]). After a save this is the choice
+/// for the next launch, which may differ from the devices the running session
+/// opened; the Settings restart notice covers that gap.
 #[tauri::command]
-fn get_audio_settings(state: tauri::State<CurrentAudioSettings>) -> AudioSection {
-    state.0.clone()
+fn get_audio_settings(
+    configured: tauri::State<ConfiguredAudioSettings>,
+    path: tauri::State<AudioSettingsPath>,
+) -> AudioSection {
+    settings::saved_audio_settings(&configured.0, &path.0)
 }
 
 /// Writes the sidecar file `settings::resolve_audio_settings` reads at the
@@ -1792,6 +2015,62 @@ async fn add_mcp_remote_server(
     }
 
     Ok(PreviewOutcome::Connected(RemoteServerSummary::from(entry)))
+}
+
+#[tauri::command]
+fn get_mcp_alerts(
+    state: tauri::State<McpRegistryPath>,
+    server: String,
+) -> mcp_registry::AlertSettings {
+    mcp_registry::load(&state.0).alerts_for(&server)
+}
+
+/// Saves and applies at once: `show` and `wake_agent` take effect on the
+/// next alert. A changed `alert_resource` is read when the server's feeds are
+/// next discovered, which in practice is the next connect.
+#[tauri::command]
+fn set_mcp_alerts(
+    state: tauri::State<McpRegistryPath>,
+    live: tauri::State<LiveAlerts>,
+    server: String,
+    alerts: mcp_registry::AlertSettings,
+) -> Result<(), String> {
+    let mut registry = mcp_registry::load(&state.0);
+    if !registry.set_alerts(&server, alerts) {
+        return Err(format!("no MCP server named {server}"));
+    }
+    mcp_registry::save(&state.0, &registry).map_err(|e| e.to_string())?;
+    // The stored value, not the argument: `set_alerts` normalises it.
+    live.0.apply(&server, &registry.alerts_for(&server));
+    Ok(())
+}
+
+/// The cards waiting in the `alert` window, oldest first, as
+/// `hud::alert_payload` shapes them. The window calls this on load, since
+/// Tauri drops events sent before it listens. Reading does not clear them.
+#[tauri::command]
+fn take_pending_alerts(cards: tauri::State<AlertCards>) -> Vec<serde_json::Value> {
+    cards
+        .0
+        .lock()
+        .unwrap_or_else(|e| e.into_inner())
+        .cards()
+        .map(|(card_id, alert)| alert_payload(card_id, alert))
+        .collect()
+}
+
+/// Remove the card with `card_id` (from its payload) if it is still queued,
+/// hiding the window once none are left. An unknown id changes nothing.
+#[tauri::command]
+fn dismiss_alert(app: AppHandle, cards: tauri::State<AlertCards>, card_id: u64) {
+    let empty = {
+        let mut cards = cards.0.lock().unwrap_or_else(|e| e.into_inner());
+        cards.dismiss(card_id);
+        cards.is_empty()
+    };
+    if empty && let Some(window) = app.get_webview_window(ALERT_WINDOW) {
+        let _ = window.hide();
+    }
 }
 
 #[tauri::command]

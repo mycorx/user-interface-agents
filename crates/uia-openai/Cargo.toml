@@ -18,11 +18,11 @@ async-trait.workspace = true
 serde_json.workspace = true
 tokio.workspace = true
 reqwest = { version = "0.13", default-features = false, features = ["json", "rustls"] }
-# `webrtc` 0.20 is the sans-IO rewrite; `rtc` is REQUIRED alongside it because the
+# `webrtc` 0.20+ is the sans-IO rewrite; `rtc` is REQUIRED alongside it because the
 # codec parameter types a local media track needs are not re-exported by the facade.
 # Version-locked together. Both are forbidden in uia-core (check-core-deps.sh).
-webrtc = "=0.20.2"
-rtc = "=0.20.2"
+webrtc = "=0.21.1"
+rtc = "=0.21.1"
 rand = "0.10"
 # `Sample.data` is `bytes::Bytes`; this is the same version `rtc` already pulls.
 bytes = "1"

@@ -534,6 +534,16 @@ pub fn resolve_audio_settings(
     }
 }
 
+/// What the Audio tab shows: `uia.toml`'s `[audio]` with the sidecar applied,
+/// read from disk on every call. Not the launch snapshot: the tab remounts
+/// each time it is opened, and showing the startup values after a save made
+/// the picker revert, so the next Save wrote the stale device back. No device
+/// filter either: a pinned device that is unplugged stays visible in the
+/// picker (it appends it), and startup still drops it before opening devices.
+pub fn saved_audio_settings(configured: &AudioSection, path: &Path) -> AudioSection {
+    resolve_audio_settings(configured, load(path), &[])
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -1251,6 +1261,52 @@ mod tests {
             barge_in_threshold: None,
         };
         assert_eq!(resolve_audio_settings(&configured, None, &[]), configured);
+    }
+
+    #[test]
+    fn saved_audio_settings_reflects_a_save_made_after_launch() {
+        let dir = std::env::temp_dir().join(format!(
+            "uia-audio-settings-after-save-{}",
+            std::process::id()
+        ));
+        std::fs::create_dir_all(&dir).unwrap();
+        let path = dir.join("uia-audio.json");
+        let configured = AudioSection {
+            aec_enabled: true,
+            input_device: None,
+            output_device: None,
+            barge_in_threshold: None,
+        };
+
+        save(
+            &path,
+            &AudioSettings {
+                input_device: Some("Unplugged USB Mic".into()),
+                output_device: None,
+                aec_enabled: Some(true),
+                barge_in_threshold: Some(0.05),
+            },
+        )
+        .unwrap();
+        let shown = saved_audio_settings(&configured, &path);
+
+        std::fs::remove_dir_all(&dir).ok();
+        // The pinned device is shown even though nothing by that name is
+        // plugged in: the picker keeps it rather than pretending "Default".
+        assert_eq!(shown.input_device.as_deref(), Some("Unplugged USB Mic"));
+        assert_eq!(shown.output_device, None);
+    }
+
+    #[test]
+    fn saved_audio_settings_without_a_sidecar_is_the_configured_section() {
+        let configured = AudioSection {
+            aec_enabled: false,
+            input_device: Some("configured-in".into()),
+            output_device: None,
+            barge_in_threshold: Some(0.1),
+        };
+        let missing = std::env::temp_dir().join("uia-audio-settings-does-not-exist.json");
+        assert_eq!(saved_audio_settings(&configured, &missing), configured);
     }
 
     #[test]
