@@ -1069,12 +1069,19 @@ impl Session {
     /// check whose ordering carries meaning: drain the engine, drain typed
     /// turns, reconnect, close, reset the backoff, park, swap the prompt,
     /// swap the audio, rotate, idle out. Then it waits on one biased
-    /// `select!` over the engine's events, typed turns, the connection-wanted
-    /// switch, the next captured frame and a `POLL_INTERVAL` tick, handles
-    /// the one that came, and goes round again. Capture runs on its own task (`session/audio.rs`)
-    /// precisely so it can be one arm among these: when the loop awaited the
-    /// microphone directly, a device that yielded nothing froze engine
-    /// playback, parking, rotation and the idle deadline with it.
+    /// `select!` over the next captured frame, the engine's events, typed
+    /// turns, the connection-wanted switch and a `POLL_INTERVAL` tick,
+    /// handles the one that came, and goes round again. Capture runs on its
+    /// own task (`session/audio.rs`) precisely so it can be one arm among
+    /// these: when the loop awaited the microphone directly, a device that
+    /// yielded nothing froze engine playback, parking, rotation and the idle
+    /// deadline with it.
+    ///
+    /// Capture is the first arm. Behind a fast-streaming reply the events arm
+    /// was always ready, so barge-in frames piled up in capture's short queue
+    /// and arrived late. Capture first cannot starve the rest: a device
+    /// delivers about one frame per 20 ms, and the drain at the top of every
+    /// pass handles queued engine events whichever arm woke the loop.
     ///
     /// An engine event is not handled in its arm: it goes into
     /// `stashed_event` for the next drain, so the reconnect and barge-in
@@ -1243,6 +1250,13 @@ impl Session {
 
                 tokio::select! {
                     biased;
+                    // First, so a barge-in frame is never queued behind a
+                    // streaming reply. It cannot starve the arms below: the
+                    // device paces it to one frame per ~20 ms.
+                    frame = self.capture.recv() => match frame {
+                        Some(frame) => self.handle_frame(frame).await,
+                        None => return RunOutcome::SourceExhausted,
+                    },
                     ev = recv_or_never(&mut self.events) => {
                         // `None` is the stream closing: the next drain sees
                         // `Closed` and handles it like any other close.
@@ -1259,10 +1273,6 @@ impl Session {
                             return RunOutcome::ShutDown;
                         }
                     }
-                    frame = self.capture.recv() => match frame {
-                        Some(frame) => self.handle_frame(frame).await,
-                        None => return RunOutcome::SourceExhausted,
-                    },
                     _ = tick.tick() => {
                         let _ = self.level_tx.send(self.deps.sink.level());
                     }
