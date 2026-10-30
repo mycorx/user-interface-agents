@@ -11,8 +11,11 @@
 use uia_core::audio::{AudioError, WaitingFor};
 
 /// Why a device could not be opened.
-// Only the cpal legs consume this so far.
-#[cfg_attr(not(feature = "cpal-io"), allow(dead_code))]
+// Consumed by the cpal legs and the WASAPI workers.
+#[cfg_attr(
+    not(any(feature = "cpal-io", all(windows, feature = "wasapi-aec"))),
+    allow(dead_code)
+)]
 #[derive(Debug)]
 pub(crate) enum OpenFailure {
     /// The user pinned `name` and no present device matches it.
@@ -31,8 +34,11 @@ impl From<OpenFailure> for AudioError {
 }
 
 /// What to do when the very first open fails.
-// Only the cpal legs consume this so far.
-#[cfg_attr(not(feature = "cpal-io"), allow(dead_code))]
+// Consumed by the cpal legs and the WASAPI workers.
+#[cfg_attr(
+    not(any(feature = "cpal-io", all(windows, feature = "wasapi-aec"))),
+    allow(dead_code)
+)]
 #[derive(Debug, PartialEq, Eq)]
 pub(crate) enum FirstOpen {
     /// Start anyway and wait for this.
@@ -43,8 +49,11 @@ pub(crate) enum FirstOpen {
 
 /// A missing pinned name is waited for; every other failure keeps today's
 /// handling and fails the open.
-// Only the cpal legs consume this so far.
-#[cfg_attr(not(feature = "cpal-io"), allow(dead_code))]
+// Consumed by the cpal legs and the WASAPI workers.
+#[cfg_attr(
+    not(any(feature = "cpal-io", all(windows, feature = "wasapi-aec"))),
+    allow(dead_code)
+)]
 pub(crate) fn first_open(failure: &OpenFailure) -> FirstOpen {
     match failure {
         OpenFailure::MissingPinned { name, .. } => FirstOpen::Wait(WaitingFor::Named(name.clone())),
@@ -53,8 +62,11 @@ pub(crate) fn first_open(failure: &OpenFailure) -> FirstOpen {
 }
 
 /// What a direction with this configured device is waiting for.
-// Only the cpal legs consume this so far.
-#[cfg_attr(not(feature = "cpal-io"), allow(dead_code))]
+// Consumed by the cpal legs and the WASAPI workers.
+#[cfg_attr(
+    not(any(feature = "cpal-io", all(windows, feature = "wasapi-aec"))),
+    allow(dead_code)
+)]
 pub(crate) fn waiting_for(pinned: Option<&str>) -> WaitingFor {
     match pinned {
         Some(name) => WaitingFor::Named(name.to_string()),
@@ -63,8 +75,11 @@ pub(crate) fn waiting_for(pinned: Option<&str>) -> WaitingFor {
 }
 
 /// Which way audio flows.
-// Only the cpal legs consume this so far.
-#[cfg_attr(not(feature = "cpal-io"), allow(dead_code))]
+// Consumed by the cpal legs and the WASAPI workers.
+#[cfg_attr(
+    not(any(feature = "cpal-io", all(windows, feature = "wasapi-aec"))),
+    allow(dead_code)
+)]
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
 pub(crate) enum Flow {
     Capture,
@@ -72,13 +87,8 @@ pub(crate) enum Flow {
 }
 
 /// A Windows device role, as the default-changed notification reports it.
-#[cfg_attr(
-    not(test),
-    expect(
-        dead_code,
-        reason = "the WASAPI default-change notification has not landed yet"
-    )
-)]
+// Only the WASAPI default-change notification consumes this.
+#[cfg_attr(not(all(windows, feature = "wasapi-aec")), allow(dead_code))]
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
 pub(crate) enum Role {
     Console,
@@ -91,13 +101,8 @@ pub(crate) enum Role {
 /// Only an unpinned direction follows, only for its own flow, and only for
 /// the communications role: that is the one UIA opens, so the other two
 /// would reopen onto the device it already has.
-#[cfg_attr(
-    not(test),
-    expect(
-        dead_code,
-        reason = "the WASAPI default-change notification has not landed yet"
-    )
-)]
+// Only the WASAPI default-change notification consumes this.
+#[cfg_attr(not(all(windows, feature = "wasapi-aec")), allow(dead_code))]
 pub(crate) fn reopen_for_default_change(
     pinned: bool,
     ours: Flow,
@@ -120,7 +125,10 @@ pub(crate) fn host_follows_default(host_name: &str, flow: Flow) -> bool {
 
 /// Is the playback queue still valid after a reopen? Samples queued for one
 /// rate would play at the wrong pitch on another.
-#[cfg_attr(not(feature = "cpal-io"), allow(dead_code))]
+#[cfg_attr(
+    not(any(feature = "cpal-io", all(windows, feature = "wasapi-aec"))),
+    allow(dead_code)
+)]
 pub(crate) fn keep_queue_on_reopen(old_rate_hz: u32, new_rate_hz: u32) -> bool {
     old_rate_hz == new_rate_hz
 }

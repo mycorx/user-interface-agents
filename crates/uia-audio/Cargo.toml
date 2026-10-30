@@ -31,7 +31,7 @@ aec = ["webrtc-audio-processing"]
 # opened with `AudioCategory_Communications` - no bundled C++ library needed.
 # Windows-only: `windows` below is gated to `cfg(windows)`, so this feature is
 # a no-op (undefined symbols) anywhere else.
-wasapi-aec = ["dep:windows"]
+wasapi-aec = ["dep:windows", "dep:windows-core"]
 # macOS's equivalent of `wasapi-aec`: the Voice Processing IO audio unit
 # applies Apple's own AEC/AGC/NS to what it records, using what it plays as
 # the reference. No bundled C++, no toolchain. Enabled by default on macOS by
@@ -82,6 +82,10 @@ windows = { version = "0.62", optional = true, features = [
   "Win32_UI_Shell_PropertiesSystem",
   "Win32_Devices_FunctionDiscovery",
 ] }
+# `#[windows::core::implement]` (the default-device notification client)
+# expands to `::windows_core` paths, so the crate must be a direct dependency.
+# Already in Cargo.lock at this version through `windows` itself.
+windows-core = { version = "0.62", optional = true }
 
 # All four are already in Cargo.lock at these versions via cpal's own CoreAudio
 # host, so this adds features, not crates.

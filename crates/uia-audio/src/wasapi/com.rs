@@ -11,6 +11,8 @@
 //! call and apply its own AEC/AGC/NS beneath us; reversed, everything still
 //! "works" and no echo cancellation happens at all.
 
+use super::StreamCategory;
+use crate::follow::OpenFailure;
 use std::mem::size_of;
 use uia_core::audio::AudioError;
 use windows::Win32::Devices::FunctionDiscovery::PKEY_Device_FriendlyName;
@@ -57,15 +59,28 @@ pub(crate) struct EventHandle(pub(crate) HANDLE);
 unsafe impl Send for EventHandle {}
 unsafe impl Sync for EventHandle {}
 
+/// Create the auto-reset event a worker parks on.
+///
+/// Made by the constructor, before the worker starts, so the handle `Drop`
+/// signals exists even while the first open is still waiting for a device,
+/// and stays the same across every reopen. See [`super::stop_worker`] for
+/// who closes it.
+pub(crate) fn create_wake_event() -> Result<EventHandle, AudioError> {
+    // SAFETY: no security attributes and no name, so nothing is borrowed; the
+    // returned handle is owned by the caller and closed by `stop_worker`.
+    unsafe { CreateEventW(None, false, false, PCWSTR::null()) }
+        .map(EventHandle)
+        .map_err(|e| device_error("could not create the wake event", e))
+}
+
 /// An opened, initialised, not-yet-started WASAPI client.
 pub(crate) struct OpenedClient {
     pub(crate) client: IAudioClient2,
-    pub(crate) event: EventHandle,
     pub(crate) sample_rate_hz: u32,
     pub(crate) channels: u16,
     /// The endpoint's own name (e.g. "Headset Microphone (Realtek Audio)"),
     /// read once at open time so callers can log which physical device
-    /// `eCommunications` actually resolved to. `open_communications_client`'s
+    /// `eCommunications` actually resolved to. `open_client`'s
     /// doc comment already notes this can differ from the console/default
     /// device a user expects — this is what lets that be confirmed rather
     /// than guessed when someone reports "wrong device".
@@ -73,7 +88,12 @@ pub(crate) struct OpenedClient {
 }
 
 /// Open an `eCommunications`-role endpoint for `direction` and initialise it
-/// in shared, event-driven mode under `AudioCategory_Communications`.
+/// in shared, event-driven mode, under `AudioCategory_Communications` when
+/// `category` asks for Windows' echo cancellation.
+///
+/// "Default" is the default communication device in both categories:
+/// [`StreamCategory::Plain`] differs only in skipping `SetClientProperties`,
+/// so turning echo cancellation off never moves audio to another device.
 ///
 /// `device_name_filter`, when `Some`, picks the first active endpoint whose
 /// friendly name contains it (case-insensitive) instead of asking Windows for
@@ -92,23 +112,26 @@ pub(crate) struct OpenedClient {
 /// # Safety
 /// The caller must have initialised COM on this thread (`CoInitializeEx`) and
 /// must keep it initialised for as long as the returned client is used.
-/// `reuse_event`, when `Some`, attaches that existing wake event to the new
-/// client instead of creating one.
+/// `event` is attached to the new client as its wake event.
 ///
-/// This is what lets a worker reopen a device that went away without its
-/// wake handle ever changing. The shutdown protocol in [`super::stop_worker`]
-/// signals a handle the *struct* holds and closes it after joining; if a
-/// reopen swapped in a fresh handle, that signal would land on the old one
-/// and the worker would sleep through its own shutdown.
-pub(crate) unsafe fn open_communications_client(
+/// Always the worker's one event, so a worker reopens a device that went away
+/// without its wake handle ever changing. The shutdown protocol in
+/// [`super::stop_worker`] signals a handle the *struct* holds and closes it
+/// after joining; if a reopen swapped in a fresh handle, that signal would
+/// land on the old one and the worker would sleep through its own shutdown.
+///
+/// A pinned name that matches nothing is [`OpenFailure::MissingPinned`], so
+/// the caller can wait for it; every other failure is [`OpenFailure::Other`].
+pub(crate) unsafe fn open_client(
     direction: EDataFlow,
     device_name_filter: Option<&str>,
-    reuse_event: Option<EventHandle>,
-) -> Result<OpenedClient, AudioError> {
+    event: EventHandle,
+    category: StreamCategory,
+) -> Result<OpenedClient, OpenFailure> {
     unsafe {
         let enumerator: IMMDeviceEnumerator =
             CoCreateInstance(&MMDeviceEnumerator, None, CLSCTX_ALL)
-                .map_err(|e| device_error("could not create the device enumerator", e))?;
+                .map_err(|e| other("could not create the device enumerator", e))?;
 
         let device = match device_name_filter {
             Some(name) => find_device_by_name(&enumerator, direction, name)?,
@@ -118,29 +141,35 @@ pub(crate) unsafe fn open_communications_client(
             // *different* physical device than the console default cpal
             // opens — that is intended, and called out for testers in
             // docs/MANUAL-TEST.md.
+            //
+            // The plain category opens this same endpoint: Windows' "Default"
+            // is one device whether or not its echo cancellation is wanted.
             None => enumerator
                 .GetDefaultAudioEndpoint(direction, eCommunications)
-                .map_err(|e| device_error("no default communications endpoint", e))?,
+                .map_err(|e| other("no default communications endpoint", e))?,
         };
         let device_name = friendly_name(&device);
         let client: IAudioClient2 = device
             .Activate(CLSCTX_ALL, None)
-            .map_err(|e| device_error("could not activate the audio client", e))?;
+            .map_err(|e| other("could not activate the audio client", e))?;
 
-        // THE load-bearing call. Before `Initialize`, always.
-        client
-            .SetClientProperties(&AudioClientProperties {
-                cbSize: size_of::<AudioClientProperties>() as u32,
-                bIsOffload: false.into(),
-                eCategory: AudioCategory_Communications,
-                Options: AUDCLNT_STREAMOPTIONS_NONE,
-            })
-            .map_err(|e| device_error("could not request the Communications category", e))?;
+        // THE load-bearing call. Before `Initialize`, always. Skipped for the
+        // plain category, which leaves the stream as an ordinary one.
+        if category == StreamCategory::Communications {
+            client
+                .SetClientProperties(&AudioClientProperties {
+                    cbSize: size_of::<AudioClientProperties>() as u32,
+                    bIsOffload: false.into(),
+                    eCategory: AudioCategory_Communications,
+                    Options: AUDCLNT_STREAMOPTIONS_NONE,
+                })
+                .map_err(|e| other("could not request the Communications category", e))?;
+        }
 
         let mix_format = client
             .GetMixFormat()
-            .map_err(|e| device_error("could not read the mix format", e))?;
-        validate_float_format(mix_format)?;
+            .map_err(|e| other("could not read the mix format", e))?;
+        validate_float_format(mix_format).map_err(OpenFailure::Other)?;
         let sample_rate_hz = (*mix_format).nSamplesPerSec;
         let channels = (*mix_format).nChannels;
 
@@ -154,20 +183,14 @@ pub(crate) unsafe fn open_communications_client(
                 mix_format,
                 None,
             )
-            .map_err(|e| device_error("could not initialise the audio client", e))?;
+            .map_err(|e| other("could not initialise the audio client", e))?;
 
-        let event = match reuse_event {
-            Some(existing) => existing.0,
-            None => CreateEventW(None, false, false, PCWSTR::null())
-                .map_err(|e| device_error("could not create the wake event", e))?,
-        };
         client
-            .SetEventHandle(event)
-            .map_err(|e| device_error("could not attach the wake event", e))?;
+            .SetEventHandle(event.0)
+            .map_err(|e| other("could not attach the wake event", e))?;
 
         Ok(OpenedClient {
             client,
-            event: EventHandle(event),
             sample_rate_hz,
             channels,
             device_name,
@@ -179,7 +202,8 @@ pub(crate) unsafe fn open_communications_client(
 /// `name` (case-insensitive substring, not exact match — so a user can paste
 /// the name Sound settings shows without worrying about exact punctuation).
 ///
-/// Fails loudly with the list of what *is* available on a miss: a config
+/// Fails loudly with the list of what *is* available on a miss, as
+/// [`OpenFailure::MissingPinned`] so the caller waits for it: a config
 /// typo silently falling back to some other device would recreate exactly
 /// the "which device is this actually using" confusion `friendly_name`
 /// logging exists to solve, and a caller deserves to be told rather than to
@@ -188,20 +212,20 @@ unsafe fn find_device_by_name(
     enumerator: &IMMDeviceEnumerator,
     direction: EDataFlow,
     name: &str,
-) -> Result<IMMDevice, AudioError> {
+) -> Result<IMMDevice, OpenFailure> {
     unsafe {
         let collection = enumerator
             .EnumAudioEndpoints(direction, DEVICE_STATE_ACTIVE)
-            .map_err(|e| device_error("could not enumerate audio endpoints", e))?;
+            .map_err(|e| other("could not enumerate audio endpoints", e))?;
         let count = collection
             .GetCount()
-            .map_err(|e| device_error("could not count audio endpoints", e))?;
+            .map_err(|e| other("could not count audio endpoints", e))?;
 
         let mut available = Vec::with_capacity(count as usize);
         for i in 0..count {
             let device = collection
                 .Item(i)
-                .map_err(|e| device_error("could not read an audio endpoint", e))?;
+                .map_err(|e| other("could not read an audio endpoint", e))?;
             let device_name = friendly_name(&device);
             if crate::device_name_matches(&device_name, name) {
                 return Ok(device);
@@ -209,9 +233,13 @@ unsafe fn find_device_by_name(
             available.push(device_name);
         }
 
-        Err(AudioError::DeviceUnavailable(format!(
-            "wasapi: no audio device matching {name:?} among the active endpoints: {available:?}"
-        )))
+        Err(OpenFailure::MissingPinned {
+            name: name.to_string(),
+            detail: format!(
+                "wasapi: no audio device matching {name:?} among the active endpoints: \
+                 {available:?}"
+            ),
+        })
     }
 }
 
@@ -273,4 +301,8 @@ unsafe fn validate_float_format(format: *const WAVEFORMATEX) -> Result<(), Audio
 
 fn device_error(what: &str, e: windows::core::Error) -> AudioError {
     AudioError::DeviceUnavailable(format!("wasapi: {what}: {e}"))
+}
+
+fn other(what: &str, e: windows::core::Error) -> OpenFailure {
+    OpenFailure::Other(device_error(what, e))
 }

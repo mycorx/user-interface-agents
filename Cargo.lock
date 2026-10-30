@@ -7203,6 +7203,7 @@ dependencies = [
  "uia-core",
  "webrtc-audio-processing",
  "windows",
+ "windows-core",
 ]
 
 [[package]]
