@@ -50,6 +50,14 @@ list by hand on each platform and paste the results into the PR's
 
 - [ ] With a pinned mic missing, output plays through the default speaker;
       plugging the mic in brings back echo cancellation (no echo).
+- [ ] The ignored device tests pass on a Mac with devices attached. Run
+      `UIA_TEST_INPUT="<mic name>" UIA_TEST_OUTPUT="<speaker name>" cargo test -p uia-audio --features coreaudio-aec -- --ignored --test-threads=1`.
+      `--test-threads=1` is required (a parallel run hangs on VPIO).
+      `UIA_TEST_INPUT` and `UIA_TEST_OUTPUT` must name two different attached
+      devices (read by `a_split_named_pair_opens`). The test
+      `a_slow_input_is_raised_while_open_and_restored_on_release` also needs
+      `UIA_TEST_SLOW_INPUT` set to a mic running below 24 kHz that supports
+      more; without one, it cannot run.
 - [ ] The Audio tab shows "Saved." with no restart notice; Providers still
       shows one; the echo-cancellation toggle is enabled.
 
