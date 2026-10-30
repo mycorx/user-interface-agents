@@ -14,7 +14,7 @@ thiserror.workspace = true
 tokio = { workspace = true, features = ["io-std", "io-util", "process"] }
 serde.workspace = true
 serde_json.workspace = true
-rmcp = { version = "3.5.1", features = ["client", "auth", "transport-child-process", "transport-streamable-http-client-reqwest"] }
+rmcp = { version = "3.8.0", features = ["client", "auth", "transport-child-process", "transport-streamable-http-client-reqwest"] }
 zip = { version = "9.0.0", default-features = false, features = ["deflate"] }
 http = "1.5.0"
 futures = "0.3.34"
@@ -42,5 +42,7 @@ tracing = "0.1.44"
 oauth2 = "5.0.0"
 
 [dev-dependencies]
+# The integration tests stand up an in-process rmcp *server* (duplex transport).
+rmcp = { version = "3.8.0", features = ["server", "transport-io"] }
 axum = "0.8.9"
 tokio = { version = "1.53.2", features = ["full", "test-util"] }
