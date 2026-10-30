@@ -44,7 +44,12 @@
     "active": true,
     "targets": ["msi"],
     "createUpdaterArtifacts": true,
-    "icon": ["icons/32x32.png", "icons/128x128.png", "icons/icon.ico"]
+    "icon": ["icons/32x32.png", "icons/128x128.png", "icons/icon.ico"],
+    "linux": {
+      "deb": {
+        "depends": ["libpipewire-0.3-0t64"]
+      }
+    }
   },
   "plugins": {
     "deep-link": {

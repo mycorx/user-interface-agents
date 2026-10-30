@@ -61,6 +61,8 @@ webrtc-audio-processing = { version = "2.1.0", optional = true, features = ["bun
 # defaults to PipeWire, which reports the default device as a node that follows
 # the desktop's choice, so "Default" can be switched live. Falls back to ALSA
 # where no PipeWire daemon runs (CI runners). Builds pipewire-sys with bindgen.
+# Links libpipewire-0.3 dynamically, so the release .deb declares it in
+# tauri.conf.json's bundle.linux.deb.depends.
 cpal = { version = "0.18.2", optional = true, features = ["pipewire"] }
 
 [target.'cfg(windows)'.dependencies]

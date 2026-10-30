@@ -66,6 +66,12 @@ Arch, openSUSE) now have no Linux artifact at all. Bring the AppImage back —
 with the bundler tools mirrored or pinned — when one of them is a real
 audience.
 
+Tauri declares the WebKit and GTK runtimes in the `.deb` on its own; anything
+else the binary links must be listed in `bundle.linux.deb.depends` in
+`tauri.conf.json`, or the release smoke job's `ldd` check fails on a bare
+Ubuntu. Today that is `libpipewire-0.3-0t64`, which cpal's PipeWire host
+(`crates/uia-audio/Cargo.toml`) links dynamically.
+
 ## How a change becomes a release
 
 1. **Label the PR.** Exactly one `semver:uia-app:<bump>` label, where `<bump>` is
