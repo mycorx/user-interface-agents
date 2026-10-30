@@ -124,12 +124,10 @@ struct ConfiguredFoundryEndpoint(Option<String>);
 /// [`SettingsPath`]/[`FoundrySettingsPath`].
 struct AudioSettingsPath(PathBuf);
 
-/// The audio settings this launch actually resolved and opened devices with —
-/// `config.audio` after [`settings::resolve_audio_settings`] has already been
-/// applied (see `main`), so `get_audio_settings` hands back the same value
-/// `build_session` used rather than re-deriving it. Same request/response
-/// rationale as [`CurrentEngine`].
-struct CurrentAudioSettings(AudioSection);
+/// `uia.toml`'s raw `[audio]` section, before the sidecar is applied, read
+/// once at startup. `get_audio_settings` layers the sidecar over it on each
+/// call, the same split as [`ConfiguredFoundryEndpoint`].
+struct ConfiguredAudioSettings(AudioSection);
 
 /// The path `set_agent_settings` persists to — same
 /// rationale as [`SettingsPath`]/[`FoundrySettingsPath`]/[`AudioSettingsPath`].
@@ -144,7 +142,7 @@ struct ModelSettingsPath(PathBuf);
 /// [`settings::resolve_openai_model`]/[`settings::resolve_bedrock_model`]/
 /// [`settings::resolve_foundry_model`] have already been applied (see
 /// `main`), so `get_model` hands back the same values `build_session` used.
-/// Same request/response rationale as [`CurrentAudioSettings`].
+/// Same request/response rationale as [`CurrentEngine`].
 struct CurrentModelSettings {
     openai: String,
     bedrock: String,
@@ -460,6 +458,7 @@ fn main() {
     // failing the whole session in `build_session`. A failed enumeration
     // yields an empty list, which disables the filter rather than discarding
     // every audio setting the user has.
+    let configured_audio_settings = config.audio.clone();
     let available_devices: Vec<String> = input_device_names()
         .unwrap_or_default()
         .into_iter()
@@ -470,7 +469,6 @@ fn main() {
         settings::load(&audio_settings_path),
         &available_devices,
     );
-    let current_audio_settings = config.audio.clone();
 
     let model_settings_path = model_settings_path_for(&config_path);
     // Same restart-to-switch tier as the engine choice (S18) and FD5: all
@@ -642,7 +640,7 @@ fn main() {
         .manage(FoundrySettingsPath(foundry_settings_path))
         .manage(ConfiguredFoundryEndpoint(configured_foundry_endpoint))
         .manage(AudioSettingsPath(audio_settings_path))
-        .manage(CurrentAudioSettings(current_audio_settings))
+        .manage(ConfiguredAudioSettings(configured_audio_settings))
         .manage(AgentSettingsPath(agent_settings_path))
         .manage(ModelSettingsPath(model_settings_path))
         .manage(current_model_settings)
@@ -1470,13 +1468,16 @@ fn set_start_at_login(app: tauri::AppHandle, enabled: bool) -> Result<(), String
     }
 }
 
-/// The Audio tab's initial values - the same `AudioSection` `build_session`
-/// already opened devices with (see `main`'s `resolve_audio_settings` call),
-/// not re-derived here from `uia.toml` plus the sidecar separately, so
-/// this can never disagree with what the running session actually did.
+/// The Audio tab's initial values: what is saved, read fresh on every call
+/// (see [`settings::saved_audio_settings`]). After a save this is the choice
+/// for the next launch, which may differ from the devices the running session
+/// opened; the Settings restart notice covers that gap.
 #[tauri::command]
-fn get_audio_settings(state: tauri::State<CurrentAudioSettings>) -> AudioSection {
-    state.0.clone()
+fn get_audio_settings(
+    configured: tauri::State<ConfiguredAudioSettings>,
+    path: tauri::State<AudioSettingsPath>,
+) -> AudioSection {
+    settings::saved_audio_settings(&configured.0, &path.0)
 }
 
 /// Writes the sidecar file `settings::resolve_audio_settings` reads at the
