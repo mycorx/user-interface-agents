@@ -12,7 +12,7 @@
 //!
 //! It is deliberately **not** a command channel for the capture gate — the
 //! push-to-talk mic button has to be read on the capture path, once per
-//! ~20 ms frame, from inside `pump_audio`; a message the run loop drains
+//! ~20 ms frame, from inside `handle_frame`; a message the run loop drains
 //! between frames would add a frame of latency and, worse, could not be read
 //! at all while the loop is parked awaiting engine traffic. An
 //! `Arc<AtomicBool>` is readable from inside the loop at any instant, with no

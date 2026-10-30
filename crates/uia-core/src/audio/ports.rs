@@ -16,8 +16,17 @@ pub enum AudioError {
 
 #[async_trait]
 pub trait AudioSource: Send {
+    /// The format of the frames this source yields. Read right after
+    /// `next_frame` returns, it describes *that* frame: the session tags each
+    /// frame with the rate read there, so a source whose device reopens at a
+    /// new rate must report the new rate from the first frame it yields at
+    /// that rate, and not before.
     fn format(&self) -> AudioFormat;
     /// Yields the next captured frame, or `None` when the source is exhausted.
+    ///
+    /// Must be cancel-safe: the session races this against a stop signal and
+    /// drops the future when the stop wins, so dropping it before it resolves
+    /// must lose no frame that a later call would otherwise have yielded.
     async fn next_frame(&mut self) -> Option<Vec<i16>>;
 }
 
@@ -61,6 +70,57 @@ impl AudioSource for FixtureSource {
     async fn next_frame(&mut self) -> Option<Vec<i16>> {
         self.frames.pop_front()
     }
+}
+
+/// A source with no device behind it: `next_frame` never resolves.
+///
+/// What a session holds while it has no microphone — before one is opened,
+/// or between closing one device and opening the next. Never resolving,
+/// rather than yielding `None`, is the point: `None` means the source is
+/// exhausted and ends the run loop, while a missing microphone is a state
+/// the session waits out.
+pub struct DetachedSource {
+    format: AudioFormat,
+}
+
+impl DetachedSource {
+    pub fn new(format: AudioFormat) -> Self {
+        Self { format }
+    }
+}
+
+#[async_trait]
+impl AudioSource for DetachedSource {
+    fn format(&self) -> AudioFormat {
+        self.format
+    }
+    async fn next_frame(&mut self) -> Option<Vec<i16>> {
+        std::future::pending().await
+    }
+}
+
+/// A sink with no device behind it: writes are discarded and nothing ever
+/// plays, so its level is always 0.0. The output-side twin of
+/// `DetachedSource`.
+pub struct DetachedSink {
+    format: AudioFormat,
+}
+
+impl DetachedSink {
+    pub fn new(format: AudioFormat) -> Self {
+        Self { format }
+    }
+}
+
+#[async_trait]
+impl AudioSink for DetachedSink {
+    fn format(&self) -> AudioFormat {
+        self.format
+    }
+    async fn write(&mut self, _frame: &[i16]) -> Result<(), AudioError> {
+        Ok(())
+    }
+    fn clear(&mut self) {}
 }
 
 /// A handle onto a `VecSink`'s observations that survives the sink being moved
@@ -142,6 +202,24 @@ mod tests {
         assert_eq!(src.next_frame().await, Some(vec![1, 2]));
         assert_eq!(src.next_frame().await, Some(vec![3, 4]));
         assert_eq!(src.next_frame().await, None);
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn a_detached_source_never_yields_a_frame_and_never_ends() {
+        let mut src = DetachedSource::new(AudioFormat::mono_pcm16(48_000));
+        let waited =
+            tokio::time::timeout(std::time::Duration::from_secs(60), src.next_frame()).await;
+        assert!(waited.is_err(), "a detached source yielded {waited:?}");
+        assert_eq!(src.format(), AudioFormat::mono_pcm16(48_000));
+    }
+
+    #[tokio::test]
+    async fn a_detached_sink_accepts_writes_and_plays_nothing() {
+        let mut sink = DetachedSink::new(AudioFormat::mono_pcm16(24_000));
+        sink.write(&[i16::MAX; 480]).await.unwrap();
+        sink.clear();
+        assert_eq!(sink.level(), 0.0);
+        assert_eq!(sink.format(), AudioFormat::mono_pcm16(24_000));
     }
 
     #[tokio::test]

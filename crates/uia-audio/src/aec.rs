@@ -431,7 +431,7 @@ mod tests {
     /// `wrap_with_echo_cancellation` and confirms the source's frames come
     /// back already echo-cancelled - what makes
     /// `uia_core::session::Session`'s barge-in RMS check (which reads
-    /// `source.next_frame()` directly, see `Session::pump_audio`) see the
+    /// `source.next_frame()` on its capture task, see `Session::handle_frame`) see the
     /// processed stream rather than the raw one, satisfying the stage's
     /// "confirm the barge-in RMS detector consumes the processed capture
     /// stream" step without touching `uia-core` at all.
@@ -487,7 +487,7 @@ mod tests {
             // Real usage interleaves these per engine turn: the sink gets
             // written with what is about to play, and capture is pulled
             // alongside it - exactly what `Session::handle_event` (writes)
-            // and `Session::pump_audio` (reads) do independently today.
+            // and the session's capture task (reads) do independently today.
             wrapped_sink.write(&far_end).await.unwrap();
             if let Some(frame) = wrapped_source.next_frame().await {
                 last_yielded = frame;

@@ -9,9 +9,10 @@
 //! unobservable from outside the crate, and `Backoff` (S6) existed but nothing
 //! ever called it. These tests pin all three.
 
+use std::time::Duration;
 use tokio::sync::mpsc::Sender;
 use uia_core::activation::{ActivationEvent, ChannelActivation};
-use uia_core::audio::{AudioFormat, FixtureSource, VecSink};
+use uia_core::audio::{AudioFormat, DetachedSource, FixtureSource, SinkProbe, VecSink};
 use uia_core::engine::{
     EngineError, EngineEvent, EngineId, FakeEngine, S2sEngine, SessionConfig, ToolCallId,
 };
@@ -549,4 +550,130 @@ async fn set_transcription_reaches_the_engine_config() {
             .transcription,
         "the engine must be asked to transcribe the user"
     );
+}
+
+/// An engine with a whole turn already scripted, so everything the run loop
+/// does between frames has work to do from the first pass.
+fn an_engine_with_a_scripted_turn() -> FakeEngine {
+    FakeEngine::new(vec![
+        EngineEvent::Ready,
+        EngineEvent::SpeechStarted,
+        EngineEvent::AudioChunk(vec![8_000; 480]),
+        EngineEvent::SpeechEnded,
+    ])
+}
+
+/// A session whose microphone is open but yields nothing -- a muted device, a
+/// driver that stopped delivering. Every test below drives the real `run()`
+/// loop and must finish well inside its timeout: a capture read that blocked
+/// the loop would freeze everything the loop does between frames.
+fn a_session_with_a_silent_microphone(
+    engine: FakeEngine,
+) -> (Session, SinkProbe, Sender<ActivationEvent>) {
+    let sink = VecSink::new(AudioFormat::mono_pcm16(24_000));
+    let speaker = sink.probe();
+    let (activation, act_tx) = ChannelActivation::new();
+    let session = Session::new(SessionDeps {
+        source: Box::new(DetachedSource::new(AudioFormat::mono_pcm16(16_000))),
+        sink: Box::new(sink),
+        engine: Box::new(engine),
+        executor: std::sync::Arc::new(FakeExecutor::new()),
+        memory: std::sync::Arc::new(NullMemory),
+        activation: Box::new(activation),
+        ctx: ctx(),
+    });
+    (session, speaker, act_tx)
+}
+
+const RUN_LOOP_BUDGET: Duration = Duration::from_secs(5);
+
+/// Polls `done` until it holds, yielding to the run loop between checks.
+async fn until(mut done: impl FnMut() -> bool) {
+    while !done() {
+        tokio::time::sleep(Duration::from_millis(5)).await;
+    }
+}
+
+#[tokio::test]
+async fn engine_audio_reaches_the_speaker_while_the_microphone_yields_nothing() {
+    let (mut session, speaker, act_tx) =
+        a_session_with_a_silent_microphone(an_engine_with_a_scripted_turn());
+    act_tx.send(ActivationEvent::Show).await.unwrap();
+
+    let played = tokio::time::timeout(RUN_LOOP_BUDGET, async {
+        tokio::select! {
+            outcome = session.run() => panic!("run() ended with {outcome:?}"),
+            () = until(|| !speaker.written().is_empty()) => {}
+        }
+    })
+    .await;
+
+    assert!(
+        played.is_ok(),
+        "the engine's audio never reached the speaker"
+    );
+}
+
+#[tokio::test]
+async fn opening_settings_parks_a_session_whose_microphone_is_silent() {
+    let engine = an_engine_with_a_scripted_turn();
+    let closes = engine.close_probe();
+    let (mut session, _speaker, act_tx) = a_session_with_a_silent_microphone(engine);
+    let control = session.control();
+    let mut states = session.subscribe_state();
+    act_tx.send(ActivationEvent::Show).await.unwrap();
+
+    let parked = tokio::time::timeout(RUN_LOOP_BUDGET, async {
+        tokio::select! {
+            outcome = session.run() => panic!("run() ended with {outcome:?}"),
+            () = async {
+                while states.recv().await.unwrap() != State::Listening {}
+                control.request_disconnect();
+                while states.recv().await.unwrap() != State::Idle {}
+            } => {}
+        }
+    })
+    .await;
+
+    assert!(parked.is_ok(), "the session never parked");
+    assert_eq!(closes.count(), 1, "parking must close the engine");
+}
+
+#[tokio::test]
+async fn a_session_with_a_silent_microphone_still_rotates_before_the_provider_cap() {
+    let engine = an_engine_with_a_scripted_turn();
+    let configs = engine.config_probe();
+    let (mut session, _speaker, act_tx) = a_session_with_a_silent_microphone(engine);
+    // Equal to the rotation margin, so the session is due at once.
+    session.set_max_session_duration(Some(Duration::from_secs(30)));
+    act_tx.send(ActivationEvent::Show).await.unwrap();
+
+    let rotated = tokio::time::timeout(RUN_LOOP_BUDGET, async {
+        tokio::select! {
+            outcome = session.run() => panic!("run() ended with {outcome:?}"),
+            () = until(|| configs.count() >= 2) => {}
+        }
+    })
+    .await;
+
+    assert!(rotated.is_ok(), "the session never rotated");
+}
+
+#[tokio::test]
+async fn the_idle_deadline_still_disconnects_a_session_whose_microphone_is_silent() {
+    let (mut session, _speaker, act_tx) =
+        a_session_with_a_silent_microphone(an_engine_with_a_scripted_turn());
+    session.set_idle_deadline(Duration::from_millis(50));
+    let control = session.control();
+    act_tx.send(ActivationEvent::Show).await.unwrap();
+
+    let dropped = tokio::time::timeout(RUN_LOOP_BUDGET, async {
+        tokio::select! {
+            outcome = session.run() => panic!("run() ended with {outcome:?}"),
+            () = until(|| !control.connection_wanted()) => {}
+        }
+    })
+    .await;
+
+    assert!(dropped.is_ok(), "the idle deadline never fired");
 }

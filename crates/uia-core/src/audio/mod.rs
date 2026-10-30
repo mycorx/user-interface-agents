@@ -9,6 +9,9 @@ pub mod rms;
 
 pub use convert::{downmix_to_mono, f32_to_i16, i16_to_f32};
 pub use format::{AudioFormat, Encoding};
-pub use ports::{AudioError, AudioSink, AudioSource, FixtureSource, SinkProbe, VecSink};
+pub use ports::{
+    AudioError, AudioSink, AudioSource, DetachedSink, DetachedSource, FixtureSource, SinkProbe,
+    VecSink,
+};
 pub use resample::Resampler;
 pub use rms::rms;
