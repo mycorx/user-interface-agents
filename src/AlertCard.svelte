@@ -113,8 +113,11 @@
     try {
       await openUrl(alert.action.url);
     } catch (e) {
+      // Keep the card so the user can retry or dismiss it.
       console.error('openUrl() failed:', e);
+      return;
     }
+    await dismiss(alert.card_id);
   }
 
   void refresh();
@@ -124,6 +127,7 @@
   }).catch((e) => console.error('uia://mcp-alert listen() failed:', e));
 </script>
 
+<span id="open-hint" class="sr-only">Opens the assistant</span>
 <div class="stack" bind:this={stack}>
   {#each alerts as alert (alert.card_id)}
     <!-- svelte-ignore a11y_no_static_element_interactions -->
@@ -137,7 +141,7 @@
       <button
         type="button"
         class="body"
-        aria-label={`Open the assistant: ${alert.title ?? alert.server}`}
+        aria-describedby="open-hint"
         onclick={showHud}
       >
         <span class="server">{alert.server}</span>
@@ -173,6 +177,15 @@
       sans-serif;
     font-size: 13px;
     color: #e8eaf0;
+  }
+
+  .sr-only {
+    position: absolute;
+    width: 1px;
+    height: 1px;
+    overflow: hidden;
+    clip-path: inset(50%);
+    white-space: nowrap;
   }
 
   .stack {
