@@ -14,11 +14,10 @@
 //! synchronous, non-blocking barge-in behaviour.
 
 use super::com::{EventHandle, open_communications_client};
-use super::{
-    LiveFormat, WAIT_TIMEOUT_MS, request_mmcss, revert_mmcss, stop_worker, wait_before_reopen,
-};
+use super::{WAIT_TIMEOUT_MS, request_mmcss, revert_mmcss, stop_worker, wait_before_reopen};
 use crate::input::to_audio_format;
 use crate::level::PlaybackLevel;
+use crate::live::LiveFormat;
 use async_trait::async_trait;
 use std::collections::VecDeque;
 use std::sync::atomic::{AtomicBool, Ordering};

@@ -5,6 +5,7 @@
 pub mod aec;
 mod backoff;
 pub mod codec;
+mod follow;
 // Only the playback backends record a level, so it compiles with them.
 #[cfg(any(
     feature = "cpal-io",
@@ -12,6 +13,13 @@ pub mod codec;
     all(target_os = "macos", feature = "coreaudio-aec")
 ))]
 mod level;
+// Gated like `level`, which `PlaybackQueue` records into.
+#[cfg(any(
+    feature = "cpal-io",
+    all(windows, feature = "wasapi-aec"),
+    all(target_os = "macos", feature = "coreaudio-aec")
+))]
+mod live;
 // Gated together: these two are the only modules that touch cpal, and the
 // `cpal-io` feature exists purely to keep them (and cpal) out of
 // `uia-openai`'s dependency graph.

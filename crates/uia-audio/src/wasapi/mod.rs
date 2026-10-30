@@ -47,31 +47,6 @@ use windows::core::w;
 /// silent *and* somehow missed the shutdown signal — not the normal path.
 const WAIT_TIMEOUT_MS: u32 = 2000;
 
-/// A device's sample rate and channel count, published as one word.
-///
-/// Two atomics would let a reader pair the new device's rate with the previous
-/// one's channel count during a reopen. The window is microseconds and nothing
-/// currently reads the channel count, but "safe because nobody looks" is the
-/// kind of reasoning that stops being true quietly, and packing them costs a
-/// shift.
-pub(crate) struct LiveFormat(std::sync::atomic::AtomicU64);
-
-impl LiveFormat {
-    pub(crate) fn new() -> Self {
-        Self(std::sync::atomic::AtomicU64::new(0))
-    }
-
-    pub(crate) fn store(&self, sample_rate_hz: u32, channels: u16) {
-        let packed = (u64::from(sample_rate_hz) << 16) | u64::from(channels);
-        self.0.store(packed, Ordering::Relaxed);
-    }
-
-    pub(crate) fn load(&self) -> (u32, u16) {
-        let packed = self.0.load(Ordering::Relaxed);
-        ((packed >> 16) as u32, packed as u16)
-    }
-}
-
 /// Park between reopen attempts, waking early if shutdown is signalled.
 ///
 /// Waits on the worker's own wake event rather than sleeping, so `Drop`'s
@@ -158,18 +133,6 @@ mod tests {
         fn assert_send<T: Send>() {}
         assert_send::<WasapiSource>();
         assert_send::<WasapiSink>();
-    }
-
-    /// Rate and channels must survive a round trip together, including the
-    /// rates and channel counts real endpoints actually report.
-    #[test]
-    fn a_live_format_round_trips_rate_and_channels() {
-        let live = LiveFormat::new();
-        assert_eq!(live.load(), (0, 0), "starts unset, not garbage");
-        for (rate, channels) in [(48_000u32, 2u16), (44_100, 1), (16_000, 8), (192_000, 2)] {
-            live.store(rate, channels);
-            assert_eq!(live.load(), (rate, channels));
-        }
     }
 
     /// Shutdown must not have to wait out a backoff it arrived during. With
