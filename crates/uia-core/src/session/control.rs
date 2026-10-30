@@ -334,12 +334,20 @@ impl SessionControl {
     /// immediately. A parked session applies it before it reconnects; a
     /// connected one at the next pass of its loop, without reconnecting.
     ///
-    /// Latest wins, like `request_prompt_swap`: an unconsumed swap is
-    /// replaced (and its opener dropped unrun), since only the newest
-    /// devices are wanted and opening each in turn would cycle real
-    /// hardware for nothing.
-    pub fn request_audio_swap(&self, swap: AudioSwap) {
-        *self.audio_swap.lock().expect("audio swap mutex") = Some(swap);
+    /// Latest wins, like `request_prompt_swap`, for each half separately.
+    /// A swap carrying an opener replaces whatever is pending (and drops an
+    /// unconsumed opener unrun), since only the newest devices are wanted
+    /// and opening each in turn would cycle real hardware for nothing. A
+    /// threshold-only swap takes over the threshold but keeps a pending
+    /// opener: it says "the devices did not change since the last Save",
+    /// not "keep the old devices", so dropping the opener would lose a
+    /// device change the shell already counts as applied.
+    pub fn request_audio_swap(&self, mut swap: AudioSwap) {
+        let mut pending = self.audio_swap.lock().expect("audio swap mutex");
+        if swap.open.is_none() {
+            swap.open = pending.take().and_then(|unconsumed| unconsumed.open);
+        }
+        *pending = Some(swap);
     }
 
     /// Consumes the pending audio swap, if any. Called by the run loop only.
@@ -567,6 +575,29 @@ mod tests {
             control.take_audio_swap().unwrap().barge_in_threshold,
             Some(0.2)
         );
+        assert!(control.take_audio_swap().is_none());
+    }
+
+    #[test]
+    fn a_threshold_only_swap_keeps_a_pending_device_change_and_takes_the_new_threshold() {
+        // Two Saves in one Settings visit: a new mic, then only a new
+        // threshold. Replacing the first would lose the mic change while the
+        // shell believes it was applied.
+        let control = SessionControl::new();
+        control.request_audio_swap(AudioSwap {
+            open: Some(Box::new(|| unreachable!("never opened in this test"))),
+            barge_in_threshold: Some(0.1),
+        });
+        control.request_audio_swap(AudioSwap {
+            open: None,
+            barge_in_threshold: Some(0.2),
+        });
+        let taken = control.take_audio_swap().unwrap();
+        assert!(
+            taken.open.is_some(),
+            "the pending device change must survive"
+        );
+        assert_eq!(taken.barge_in_threshold, Some(0.2));
         assert!(control.take_audio_swap().is_none());
     }
 
