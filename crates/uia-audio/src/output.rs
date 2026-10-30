@@ -1,24 +1,29 @@
 // Copyright (c) 2026 MycorX. All rights reserved.
 // PolyForm Internal Use 1.0.0 OR PolyForm Noncommercial 1.0.0 — see LICENSE.md.
 
+use crate::cpal_stream::Leg;
+use crate::follow::OpenFailure;
 use crate::input::to_audio_format;
-use crate::level::PlaybackLevel;
+use crate::live::{LiveFormat, PlaybackQueue};
 use async_trait::async_trait;
-use cpal::traits::{DeviceTrait, HostTrait, StreamTrait};
-use std::collections::VecDeque;
-use std::sync::{Arc, Mutex};
-use uia_core::audio::{AudioError, AudioFormat, AudioSink};
+use cpal::traits::{DeviceTrait, HostTrait};
+use std::sync::Arc;
+use uia_core::audio::{AudioError, AudioFormat, AudioSink, WaitingCell};
 
-/// First output device whose name contains `name` (case-insensitive). Fails
-/// loudly with the list of what cpal actually enumerated on a miss, rather
-/// than silently falling back to the default — a config typo deserves an
-/// error naming the available devices, not a debugging session.
-fn find_output_device_by_name(host: &cpal::Host, name: &str) -> Result<cpal::Device, AudioError> {
+/// First output device whose name contains `name` (case-insensitive). A miss
+/// is [`OpenFailure::MissingPinned`], naming what cpal actually enumerated,
+/// rather than a silent fallback to the default: a pinned device is waited
+/// for, and the list makes a config typo easy to spot in the log.
+pub(crate) fn find_output_device_by_name(
+    host: &cpal::Host,
+    name: &str,
+) -> Result<cpal::Device, OpenFailure> {
     let mut available = Vec::new();
-    for device in host
-        .output_devices()
-        .map_err(|e| AudioError::DeviceUnavailable(format!("cpal: could not list outputs: {e}")))?
-    {
+    for device in host.output_devices().map_err(|e| {
+        OpenFailure::Other(AudioError::DeviceUnavailable(format!(
+            "cpal: could not list outputs: {e}"
+        )))
+    })? {
         let device_name = device
             .description()
             .map(|d| d.name().to_string())
@@ -28,9 +33,10 @@ fn find_output_device_by_name(host: &cpal::Host, name: &str) -> Result<cpal::Dev
         }
         available.push(device_name);
     }
-    Err(AudioError::DeviceUnavailable(format!(
-        "cpal: no output device matching {name:?} among: {available:?}"
-    )))
+    Err(OpenFailure::MissingPinned {
+        name: name.to_string(),
+        detail: format!("cpal: no output device matching {name:?} among: {available:?}"),
+    })
 }
 
 /// Names of every output device cpal currently enumerates, in host order —
@@ -56,18 +62,22 @@ pub fn list_output_devices() -> Result<Vec<String>, AudioError> {
 
 /// Speaker playback over cpal, exposed as an `AudioSink`.
 ///
-/// Written frames land in a shared ring buffer; the cpal output callback
-/// drains it on the realtime thread (padding with silence if starved rather
-/// than blocking). `clear()` empties the buffer synchronously and
+/// Written frames land in a shared [`PlaybackQueue`]; the cpal output
+/// callback drains it on the realtime thread (padding with silence if starved
+/// rather than blocking). `clear()` empties the queue synchronously and
 /// non-blocking — a plain mutex lock, never an await — which is what makes
 /// barge-in work: the frozen decision in PLAN.md requires the sink to clear
 /// within 50 ms of detected speech, independent of the engine's `interrupt()`.
+///
+/// The stream underneath is reopened by its [`Leg`] when the device is lost
+/// or, for the default output, when the OS default moves; the queue survives
+/// a reopen at the same rate.
 pub struct CpalSink {
-    format: AudioFormat,
-    buf: Arc<Mutex<VecDeque<i16>>>,
-    level: PlaybackLevel,
-    // Held only to keep the stream alive; cpal stops playback on drop.
-    _stream: cpal::Stream,
+    format: Arc<LiveFormat>,
+    queue: PlaybackQueue,
+    waiting: WaitingCell,
+    // Held only to keep the stream alive; dropping it stops playback.
+    _leg: Leg,
 }
 
 impl CpalSink {
@@ -79,91 +89,60 @@ impl CpalSink {
     /// `None`. Matching is case-insensitive substring, same as the WASAPI
     /// path's `com::find_device_by_name` — a user can paste the name Windows
     /// shows without worrying about exact punctuation. A configured name that
-    /// matches nothing is a clear error rather than a silent fallback to the
-    /// default, listing what cpal actually sees so a typo is easy to spot.
+    /// matches nothing is never replaced by the default: the sink opens
+    /// waiting for it, reports that through [`AudioSink::waiting`], and
+    /// starts playing once it appears.
     pub fn output(device_name: Option<&str>) -> Result<Self, AudioError> {
-        let host = cpal::default_host();
-        let device = match device_name {
-            Some(name) => find_output_device_by_name(&host, name)?,
-            None => host
-                .default_output_device()
-                .ok_or_else(|| AudioError::DeviceUnavailable("no default output device".into()))?,
-        };
-        let config = device
-            .default_output_config()
-            .map_err(|e| AudioError::DeviceUnavailable(e.to_string()))?;
-        let format = to_audio_format(config.sample_rate(), config.channels());
-
-        let buf: Arc<Mutex<VecDeque<i16>>> = Arc::new(Mutex::new(VecDeque::new()));
-        let callback_buf = Arc::clone(&buf);
-        let level = PlaybackLevel::default();
-        let callback_level = level.clone();
-        // The engine speaks mono; `write` queues one sample per audio frame.
-        // A stereo (or wider) device's `data` interleaves N slots per frame,
-        // so each queued sample must fan out to every slot in its frame —
-        // popping one queued sample per *slot* instead silently plays two
-        // mono samples across L/R, which halves playback duration and pitches
-        // the voice up exactly like an unresampled rate mismatch does.
-        let channels = config.channels().max(1) as usize;
-        let stream_config: cpal::StreamConfig = config.into();
-        let stream = device
-            .build_output_stream(
-                stream_config,
-                move |data: &mut [f32], _: &cpal::OutputCallbackInfo| {
-                    let mut queue = callback_buf.lock().unwrap();
-                    for frame in data.chunks_mut(channels) {
-                        let sample = match queue.pop_front() {
-                            Some(s) => s as f32 / 32768.0,
-                            // Starved: pad with silence rather than block.
-                            None => 0.0,
-                        };
-                        for slot in frame {
-                            *slot = sample;
-                        }
-                    }
-                    drop(queue);
-                    callback_level.record(data);
-                },
-                move |err| eprintln!("uia-audio: output stream error: {err}"),
-                None,
-            )
-            .map_err(|e| AudioError::DeviceUnavailable(e.to_string()))?;
-        stream
-            .play()
-            .map_err(|e| AudioError::DeviceUnavailable(e.to_string()))?;
-
+        let format = Arc::new(LiveFormat::new());
+        let queue = PlaybackQueue::default();
+        let waiting = WaitingCell::default();
+        let leg = Leg::render(
+            device_name,
+            queue.clone(),
+            Arc::clone(&format),
+            waiting.clone(),
+        )?;
         Ok(Self {
             format,
-            buf,
-            level,
-            _stream: stream,
+            queue,
+            waiting,
+            _leg: leg,
         })
     }
 
     /// Number of samples currently queued for playback. Exposed for tests;
     /// production code has no need to poll it.
     pub fn buffered_len(&self) -> usize {
-        self.buf.lock().unwrap().len()
+        self.queue.len()
     }
 }
 
 #[async_trait]
 impl AudioSink for CpalSink {
     fn format(&self) -> AudioFormat {
-        self.format
+        let (sample_rate_hz, channels) = self.format.load();
+        to_audio_format(sample_rate_hz, channels)
     }
 
+    /// Dropped while waiting for a device: nothing would play it, and a
+    /// backlog would come out late, at whatever rate the device turns up at.
     async fn write(&mut self, frame: &[i16]) -> Result<(), AudioError> {
-        self.buf.lock().unwrap().extend(frame.iter().copied());
+        if self.waiting.get().is_none() {
+            self.queue.push(frame);
+        }
         Ok(())
     }
 
     fn clear(&mut self) {
-        self.buf.lock().unwrap().clear();
+        self.queue.clear();
     }
 
     fn level(&self) -> f32 {
-        self.level.get()
+        self.queue.level()
+    }
+
+    fn waiting(&self) -> Option<WaitingCell> {
+        Some(self.waiting.clone())
     }
 }
 
@@ -174,8 +153,30 @@ mod tests {
         let host = cpal::default_host();
         let err = super::find_output_device_by_name(&host, "definitely-not-a-real-device-9f3a1c")
             .unwrap_err();
-        let msg = err.to_string();
-        assert!(msg.contains("no output device matching"), "got: {msg}");
+        match err {
+            crate::follow::OpenFailure::MissingPinned { name, detail } => {
+                assert_eq!(name, "definitely-not-a-real-device-9f3a1c");
+                assert!(
+                    detail.contains("no output device matching"),
+                    "got: {detail}"
+                );
+            }
+            other => panic!("expected a missing pinned device, got {other:?}"),
+        }
+    }
+
+    /// Needs no device, like its input twin.
+    #[test]
+    fn a_pinned_output_that_is_missing_at_open_waits_instead_of_failing() {
+        use uia_core::audio::{AudioSink, WaitingFor};
+        let sink = super::CpalSink::output(Some("definitely-not-a-real-device-9f3a1c"))
+            .expect("a missing pinned output opens in the waiting state");
+        assert_eq!(
+            sink.waiting().unwrap().get(),
+            Some(WaitingFor::Named(
+                "definitely-not-a-real-device-9f3a1c".into()
+            ))
+        );
     }
 
     #[tokio::test]

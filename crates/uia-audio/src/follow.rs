@@ -8,22 +8,11 @@
 //! tested in the Linux CI that cannot build the WASAPI or CoreAudio code.
 //! The backends only map their OS types onto these.
 
-// Temporary: nothing consumes these until the cpal reopen loop and the WASAPI
-// and CoreAudio backends are wired in; those tasks drop this and rely on the
-// per-item `cfg_attr`s.
-#![allow(dead_code)]
-
 use uia_core::audio::{AudioError, WaitingFor};
 
 /// Why a device could not be opened.
-#[cfg_attr(
-    not(any(
-        feature = "cpal-io",
-        all(windows, feature = "wasapi-aec"),
-        all(target_os = "macos", feature = "coreaudio-aec")
-    )),
-    allow(dead_code)
-)]
+// Only the cpal legs consume this so far.
+#[cfg_attr(not(feature = "cpal-io"), allow(dead_code))]
 #[derive(Debug)]
 pub(crate) enum OpenFailure {
     /// The user pinned `name` and no present device matches it.
@@ -42,14 +31,8 @@ impl From<OpenFailure> for AudioError {
 }
 
 /// What to do when the very first open fails.
-#[cfg_attr(
-    not(any(
-        feature = "cpal-io",
-        all(windows, feature = "wasapi-aec"),
-        all(target_os = "macos", feature = "coreaudio-aec")
-    )),
-    allow(dead_code)
-)]
+// Only the cpal legs consume this so far.
+#[cfg_attr(not(feature = "cpal-io"), allow(dead_code))]
 #[derive(Debug, PartialEq, Eq)]
 pub(crate) enum FirstOpen {
     /// Start anyway and wait for this.
@@ -60,14 +43,8 @@ pub(crate) enum FirstOpen {
 
 /// A missing pinned name is waited for; every other failure keeps today's
 /// handling and fails the open.
-#[cfg_attr(
-    not(any(
-        feature = "cpal-io",
-        all(windows, feature = "wasapi-aec"),
-        all(target_os = "macos", feature = "coreaudio-aec")
-    )),
-    allow(dead_code)
-)]
+// Only the cpal legs consume this so far.
+#[cfg_attr(not(feature = "cpal-io"), allow(dead_code))]
 pub(crate) fn first_open(failure: &OpenFailure) -> FirstOpen {
     match failure {
         OpenFailure::MissingPinned { name, .. } => FirstOpen::Wait(WaitingFor::Named(name.clone())),
@@ -76,14 +53,8 @@ pub(crate) fn first_open(failure: &OpenFailure) -> FirstOpen {
 }
 
 /// What a direction with this configured device is waiting for.
-#[cfg_attr(
-    not(any(
-        feature = "cpal-io",
-        all(windows, feature = "wasapi-aec"),
-        all(target_os = "macos", feature = "coreaudio-aec")
-    )),
-    allow(dead_code)
-)]
+// Only the cpal legs consume this so far.
+#[cfg_attr(not(feature = "cpal-io"), allow(dead_code))]
 pub(crate) fn waiting_for(pinned: Option<&str>) -> WaitingFor {
     match pinned {
         Some(name) => WaitingFor::Named(name.to_string()),
@@ -92,14 +63,8 @@ pub(crate) fn waiting_for(pinned: Option<&str>) -> WaitingFor {
 }
 
 /// Which way audio flows.
-#[cfg_attr(
-    not(any(
-        feature = "cpal-io",
-        all(windows, feature = "wasapi-aec"),
-        all(target_os = "macos", feature = "coreaudio-aec")
-    )),
-    allow(dead_code)
-)]
+// Only the cpal legs consume this so far.
+#[cfg_attr(not(feature = "cpal-io"), allow(dead_code))]
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
 pub(crate) enum Flow {
     Capture,
@@ -107,7 +72,13 @@ pub(crate) enum Flow {
 }
 
 /// A Windows device role, as the default-changed notification reports it.
-#[cfg_attr(not(all(windows, feature = "wasapi-aec")), allow(dead_code))]
+#[cfg_attr(
+    not(test),
+    expect(
+        dead_code,
+        reason = "the WASAPI default-change notification has not landed yet"
+    )
+)]
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
 pub(crate) enum Role {
     Console,
@@ -120,7 +91,13 @@ pub(crate) enum Role {
 /// Only an unpinned direction follows, only for its own flow, and only for
 /// the communications role: that is the one UIA opens, so the other two
 /// would reopen onto the device it already has.
-#[cfg_attr(not(all(windows, feature = "wasapi-aec")), allow(dead_code))]
+#[cfg_attr(
+    not(test),
+    expect(
+        dead_code,
+        reason = "the WASAPI default-change notification has not landed yet"
+    )
+)]
 pub(crate) fn reopen_for_default_change(
     pinned: bool,
     ours: Flow,
@@ -150,11 +127,11 @@ pub(crate) fn keep_queue_on_reopen(old_rate_hz: u32, new_rate_hz: u32) -> bool {
 
 /// How looking up one direction's device went.
 #[cfg_attr(
-    not(any(
-        all(windows, feature = "wasapi-aec"),
-        all(target_os = "macos", feature = "coreaudio-aec")
-    )),
-    allow(dead_code)
+    not(test),
+    expect(
+        dead_code,
+        reason = "the split echo-cancelling unit has not landed yet"
+    )
 )]
 #[derive(Debug, PartialEq, Eq)]
 pub(crate) enum Resolution {
@@ -165,11 +142,11 @@ pub(crate) enum Resolution {
 
 /// How one direction runs when the unit is split.
 #[cfg_attr(
-    not(any(
-        all(windows, feature = "wasapi-aec"),
-        all(target_os = "macos", feature = "coreaudio-aec")
-    )),
-    allow(dead_code)
+    not(test),
+    expect(
+        dead_code,
+        reason = "the split echo-cancelling unit has not landed yet"
+    )
 )]
 #[derive(Debug, PartialEq, Eq)]
 pub(crate) enum LegPlan {
@@ -181,11 +158,11 @@ pub(crate) enum LegPlan {
 
 /// What the echo-cancelling unit does at open.
 #[cfg_attr(
-    not(any(
-        all(windows, feature = "wasapi-aec"),
-        all(target_os = "macos", feature = "coreaudio-aec")
-    )),
-    allow(dead_code)
+    not(test),
+    expect(
+        dead_code,
+        reason = "the split echo-cancelling unit has not landed yet"
+    )
 )]
 #[derive(Debug, PartialEq, Eq)]
 pub(crate) enum UnitPlan {
@@ -199,11 +176,11 @@ pub(crate) enum UnitPlan {
 
 /// Decide the unit from how each direction resolved.
 #[cfg_attr(
-    not(any(
-        all(windows, feature = "wasapi-aec"),
-        all(target_os = "macos", feature = "coreaudio-aec")
-    )),
-    allow(dead_code)
+    not(test),
+    expect(
+        dead_code,
+        reason = "the split echo-cancelling unit has not landed yet"
+    )
 )]
 pub(crate) fn plan_unit(input: &Resolution, output: &Resolution) -> UnitPlan {
     fn leg(r: &Resolution) -> Option<LegPlan> {

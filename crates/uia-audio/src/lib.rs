@@ -24,6 +24,8 @@ mod live;
 // `cpal-io` feature exists purely to keep them (and cpal) out of
 // `uia-openai`'s dependency graph.
 #[cfg(feature = "cpal-io")]
+mod cpal_stream;
+#[cfg(feature = "cpal-io")]
 pub mod input;
 #[cfg(feature = "cpal-io")]
 pub mod output;

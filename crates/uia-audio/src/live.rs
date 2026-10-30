@@ -4,9 +4,6 @@
 //! State the playback and WASAPI backends keep across a device reopen: the
 //! live device format and the mono playback queue.
 
-// Temporary: see `follow.rs`; the consumers arrive with the reopen loops.
-#![allow(dead_code)]
-
 use crate::level::PlaybackLevel;
 use std::collections::VecDeque;
 use std::sync::atomic::{AtomicU64, Ordering};
@@ -19,8 +16,12 @@ use std::sync::{Arc, Mutex};
 /// currently reads the channel count, but "safe because nobody looks" is the
 /// kind of reasoning that stops being true quietly, and packing them costs a
 /// shift.
+// Only the cpal legs consume this so far.
+#[cfg_attr(not(feature = "cpal-io"), allow(dead_code))]
 pub(crate) struct LiveFormat(AtomicU64);
 
+// Only the cpal legs consume this so far.
+#[cfg_attr(not(feature = "cpal-io"), allow(dead_code))]
 impl LiveFormat {
     pub(crate) fn new() -> Self {
         Self(AtomicU64::new(0))
@@ -42,12 +43,16 @@ impl LiveFormat {
 ///
 /// Held apart from the stream so a reopen onto another device can keep the
 /// queue (and the level reading) while the stream underneath is replaced.
+// Only the cpal legs consume this so far.
+#[cfg_attr(not(feature = "cpal-io"), allow(dead_code))]
 #[derive(Clone, Default)]
 pub(crate) struct PlaybackQueue {
     samples: Arc<Mutex<VecDeque<i16>>>,
     level: PlaybackLevel,
 }
 
+// Only the cpal legs consume this so far.
+#[cfg_attr(not(feature = "cpal-io"), allow(dead_code))]
 impl PlaybackQueue {
     pub(crate) fn push(&self, frame: &[i16]) {
         self.samples.lock().unwrap().extend(frame.iter().copied());

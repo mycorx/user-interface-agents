@@ -178,6 +178,10 @@ impl uia_core::audio::AudioSource for AecSource {
         let frame = self.inner.next_frame().await?;
         Some(self.aec.lock().unwrap().process_capture_frame(&frame))
     }
+
+    fn waiting(&self) -> Option<uia_core::audio::WaitingCell> {
+        self.inner.waiting()
+    }
 }
 
 /// Wraps a playback `AudioSink` so every frame written to it is also fed to
@@ -202,6 +206,10 @@ impl uia_core::audio::AudioSink for AecSink {
 
     fn clear(&mut self) {
         self.inner.clear()
+    }
+
+    fn waiting(&self) -> Option<uia_core::audio::WaitingCell> {
+        self.inner.waiting()
     }
 }
 
