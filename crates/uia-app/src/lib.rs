@@ -2,6 +2,7 @@
 // PolyForm Internal Use 1.0.0 OR PolyForm Noncommercial 1.0.0 — see LICENSE.md.
 
 pub mod activation_desktop;
+pub mod alerts;
 pub mod config;
 pub mod hud;
 pub mod mcp_registry;
