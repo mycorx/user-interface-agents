@@ -499,6 +499,8 @@ fn main() {
             preview_mcp_remote_server,
             add_mcp_remote_server,
             set_mcp_remote_server_enabled,
+            get_mcp_alerts,
+            set_mcp_alerts,
             remove_mcp_remote_server,
             get_update_status,
             check_for_update,
@@ -1792,6 +1794,27 @@ async fn add_mcp_remote_server(
     }
 
     Ok(PreviewOutcome::Connected(RemoteServerSummary::from(entry)))
+}
+
+#[tauri::command]
+fn get_mcp_alerts(
+    state: tauri::State<McpRegistryPath>,
+    server: String,
+) -> mcp_registry::AlertSettings {
+    mcp_registry::load(&state.0).alerts_for(&server)
+}
+
+#[tauri::command]
+fn set_mcp_alerts(
+    state: tauri::State<McpRegistryPath>,
+    server: String,
+    alerts: mcp_registry::AlertSettings,
+) -> Result<(), String> {
+    let mut registry = mcp_registry::load(&state.0);
+    if !registry.set_alerts(&server, alerts) {
+        return Err(format!("no MCP server named {server}"));
+    }
+    mcp_registry::save(&state.0, &registry).map_err(|e| e.to_string())
 }
 
 #[tauri::command]
