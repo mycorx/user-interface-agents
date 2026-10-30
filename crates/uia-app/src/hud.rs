@@ -58,6 +58,17 @@ pub const TURN_EVENT: &str = "uia://turn";
 /// [`crate::updater::UpdateStatus`], on every change.
 pub const UPDATE_EVENT: &str = "uia://update";
 
+/// One MCP alert for the `alert` card window ([`alert_payload`]). Tauri does
+/// not buffer events for a window that has not loaded yet, so the card also
+/// reads the current list with the `take_pending_alerts` command on load.
+pub const MCP_ALERT_EVENT: &str = "uia://mcp-alert";
+
+/// The card window's logical size: room for three stacked cards.
+pub const ALERT_WINDOW_WIDTH: f64 = 380.0;
+pub const ALERT_WINDOW_HEIGHT: f64 = 360.0;
+/// Gap between the card window and the work area's top and right edges.
+pub const ALERT_WINDOW_MARGIN: f64 = 16.0;
+
 /// ~30 Hz, the rate the stage asks for. Capture runs at 50 Hz (20 ms frames),
 /// so the meter is deliberately slower than the source: a level bar redrawn
 /// faster than a display refreshes costs IPC round trips and buys nothing.
@@ -143,6 +154,54 @@ pub fn text_turn_support_payload(support: &TextTurnSupport) -> serde_json::Value
         TextTurnSupport::Unknown => "unknown",
     };
     serde_json::json!({ "support": label, "reason": support.reason() })
+}
+
+/// `{ server, title, summary, details, action: null | { label, url, host } }`,
+/// the shape the alert card destructures.
+///
+/// A whitelist on purpose: `kind`, `id`, `stage` and `created_at` steer
+/// routing and deduplication and are never shown, and nothing of the raw feed
+/// gets this far. `host` is derived here from the action's URL, which the
+/// parser already restricted to `https`, so the card can always show where a
+/// button leads next to the server-written label. An action whose URL is not
+/// `https` or has no host is dropped rather than shown without one.
+pub fn alert_payload(alert: &uia_mcp::alert::Alert) -> serde_json::Value {
+    let action = alert.action.as_ref().and_then(|action| {
+        let url = url::Url::parse(&action.url).ok()?;
+        if url.scheme() != "https" {
+            return None;
+        }
+        let host = url.host_str()?.to_string();
+        Some(serde_json::json!({
+            "label": action.label,
+            "url": action.url,
+            "host": host,
+        }))
+    });
+    serde_json::json!({
+        "server": alert.server,
+        "title": alert.title,
+        "summary": alert.summary,
+        "details": alert.details,
+        "action": action,
+    })
+}
+
+/// Where the card window goes, in logical pixels: the top-right corner of a
+/// monitor's work area, given in physical pixels (`position`, `size`) with
+/// its `scale` factor. A non-positive or non-finite scale counts as 1.
+pub fn alert_window_position(position: (i32, i32), size: (u32, u32), scale: f64) -> (f64, f64) {
+    let scale = if scale.is_finite() && scale > 0.0 {
+        scale
+    } else {
+        1.0
+    };
+    let right = (f64::from(position.0) + f64::from(size.0)) / scale;
+    let top = f64::from(position.1) / scale;
+    (
+        right - ALERT_WINDOW_WIDTH - ALERT_WINDOW_MARGIN,
+        top + ALERT_WINDOW_MARGIN,
+    )
 }
 
 /// What an [`ActivationEvent`] means for the overlay window.
@@ -361,6 +420,114 @@ mod tests {
         assert!(
             LEVEL_INTERVAL < std::time::Duration::from_millis(50),
             "still visibly live"
+        );
+    }
+
+    fn calendar_alert(action: Option<(&str, &str)>) -> uia_mcp::alert::Alert {
+        uia_mcp::alert::Alert {
+            server: "calendar".into(),
+            title: Some("Standup".into()),
+            summary: "Starts in 5 minutes".into(),
+            details: Some("Room 4".into()),
+            kind: Some("reminder".into()),
+            id: Some("evt-1".into()),
+            stage: Some("T-5".into()),
+            created_at: Some("2026-10-27T09:55:00Z".into()),
+            action: action.map(|(label, url)| uia_mcp::alert::AlertAction {
+                label: label.into(),
+                url: url.into(),
+            }),
+        }
+    }
+
+    #[test]
+    fn the_alert_payload_carries_server_summary_and_a_validated_action_only() {
+        let payload = alert_payload(&calendar_alert(Some((
+            "Join",
+            "https://meet.example.com/abc?x=1",
+        ))));
+        assert_eq!(
+            payload,
+            serde_json::json!({
+                "server": "calendar",
+                "title": "Standup",
+                "summary": "Starts in 5 minutes",
+                "details": "Room 4",
+                "action": {
+                    "label": "Join",
+                    "url": "https://meet.example.com/abc?x=1",
+                    "host": "meet.example.com",
+                },
+            })
+        );
+        for leaked in ["kind", "id", "stage", "created_at", "data"] {
+            assert!(payload.get(leaked).is_none(), "leaked {leaked}");
+        }
+    }
+
+    #[test]
+    fn an_alert_without_an_action_has_a_null_action_and_absent_fields_stay_null() {
+        let mut alert = calendar_alert(None);
+        alert.title = None;
+        alert.details = None;
+        assert_eq!(
+            alert_payload(&alert),
+            serde_json::json!({
+                "server": "calendar",
+                "title": null,
+                "summary": "Starts in 5 minutes",
+                "details": null,
+                "action": null,
+            })
+        );
+    }
+
+    #[test]
+    fn an_action_whose_url_has_no_host_is_dropped_rather_than_shown_without_one() {
+        let payload = alert_payload(&calendar_alert(Some(("Open", "https://"))));
+        assert_eq!(payload["action"], serde_json::Value::Null);
+        let payload = alert_payload(&calendar_alert(Some(("Open", "http://example.com"))));
+        assert_eq!(payload["action"], serde_json::Value::Null, "https only");
+    }
+
+    #[test]
+    fn the_alert_event_is_namespaced_and_distinct_from_the_others() {
+        assert_eq!(MCP_ALERT_EVENT, "uia://mcp-alert");
+        for other in [
+            STATE_EVENT,
+            LEVEL_EVENT,
+            ERROR_EVENT,
+            CONNECTION_EVENT,
+            ENGINE_EVENT,
+            TEXT_TURN_SUPPORT_EVENT,
+            TURN_EVENT,
+            UPDATE_EVENT,
+        ] {
+            assert_ne!(MCP_ALERT_EVENT, other);
+        }
+    }
+
+    #[test]
+    fn the_alert_window_sits_in_the_top_right_of_the_work_area() {
+        // A 2560x1440 work area at scale 2 starting below a 50 px menu bar:
+        // 1280x720 logical, offset 25 logical.
+        let (x, y) = alert_window_position((0, 50), (2560, 1440), 2.0);
+        assert_eq!(x, 1280.0 - ALERT_WINDOW_WIDTH - ALERT_WINDOW_MARGIN);
+        assert_eq!(y, 25.0 + ALERT_WINDOW_MARGIN);
+    }
+
+    #[test]
+    fn the_alert_window_follows_a_primary_monitor_that_is_not_at_the_origin() {
+        let (x, y) = alert_window_position((1920, 0), (1920, 1080), 1.0);
+        assert_eq!(x, 3840.0 - ALERT_WINDOW_WIDTH - ALERT_WINDOW_MARGIN);
+        assert_eq!(y, ALERT_WINDOW_MARGIN);
+    }
+
+    #[test]
+    fn a_nonsensical_scale_factor_is_treated_as_one() {
+        assert_eq!(
+            alert_window_position((0, 0), (1000, 800), 0.0),
+            alert_window_position((0, 0), (1000, 800), 1.0)
         );
     }
 

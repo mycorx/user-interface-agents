@@ -468,6 +468,53 @@ pub fn mcp_targets(
     McpPlan { targets, skipped }
 }
 
+/// Where connected servers' alerts go: each server's live settings, and the
+/// one channel every listener sends into (drained by the app's coordinator).
+#[derive(Clone)]
+pub struct AlertFeeds {
+    pub settings: Arc<crate::alerts::LiveAlertSettings>,
+    pub sink: tokio::sync::mpsc::UnboundedSender<uia_mcp::alert::Alert>,
+}
+
+/// A connected server plus its alert listener, which is aborted when the
+/// server's executor is dropped so a listener never outlives its connection.
+struct ListeningExecutor {
+    inner: McpExecutor,
+    listener: tokio::task::JoinHandle<()>,
+}
+
+impl ListeningExecutor {
+    fn start(inner: McpExecutor, name: &str, feeds: &AlertFeeds) -> Self {
+        let listener =
+            inner.start_alert_listener(feeds.settings.view_for(name), feeds.sink.clone());
+        Self { inner, listener }
+    }
+}
+
+impl Drop for ListeningExecutor {
+    fn drop(&mut self) {
+        self.listener.abort();
+    }
+}
+
+#[async_trait::async_trait]
+impl ToolExecutor for ListeningExecutor {
+    async fn list_tools(
+        &self,
+    ) -> Result<Vec<uia_core::tools::ToolDescriptor>, uia_core::tools::ToolError> {
+        self.inner.list_tools().await
+    }
+
+    async fn execute(
+        &self,
+        name: &str,
+        args: serde_json::Value,
+        deadline: std::time::Duration,
+    ) -> Result<uia_core::tools::ToolResult, uia_core::tools::ToolError> {
+        self.inner.execute(name, args, deadline).await
+    }
+}
+
 /// Connect every approved MCP server and fan them out behind one executor.
 ///
 /// A server that refuses to connect is logged and skipped, never fatal: the
@@ -481,12 +528,16 @@ pub fn mcp_targets(
 /// name rather than by not calling `mcp_targets` for them at all, so that
 /// function's own `enabled` gating stays the single place that decides
 /// which servers connect at all.
+///
+/// Each server that connects gets an alert listener feeding `alerts`; it
+/// ends with the server's connection, or when the executor is dropped.
 pub async fn build_executor(
     registry: &McpRegistry,
     local_servers_dir: &std::path::Path,
     health: &McpHealth,
     home_location: Option<&str>,
     secrets: &dyn crate::secrets::SecretStore,
+    alerts: &AlertFeeds,
 ) -> Arc<dyn ToolExecutor> {
     let oauth_remote_names: std::collections::HashSet<&str> = registry
         .remote_servers
@@ -515,6 +566,7 @@ pub async fn build_executor(
         match McpExecutor::connect(&name, transport).await {
             Ok(exec) => {
                 record_health(health, [(name.clone(), ServerHealth::Connected)]);
+                let exec = ListeningExecutor::start(exec, &name, alerts);
                 servers.push((name, Arc::new(exec)));
             }
             Err(e) => {
@@ -549,6 +601,7 @@ pub async fn build_executor(
         match crate::mcp_registry::connect_oauth_remote(remote).await {
             Ok(exec) => {
                 record_health(health, [(remote.name.clone(), ServerHealth::Connected)]);
+                let exec = ListeningExecutor::start(exec, &remote.name, alerts);
                 servers.push((remote.name.clone(), Arc::new(exec)));
             }
             Err(e) => {
@@ -785,6 +838,8 @@ pub async fn build_session(
     // Where each server's connect outcome is recorded, for the Settings
     // panel to read back. Write-only from here.
     mcp_health: &McpHealth,
+    // Where each connected server's alerts go.
+    alerts: &AlertFeeds,
 ) -> Result<Session, AppError> {
     // The two echo-cancellation paths are mutually exclusive, and the `not(...)`
     // here is what makes that a compile-time guarantee rather than a rule
@@ -820,6 +875,7 @@ pub async fn build_session(
                     mcp_health,
                     home_location,
                     store,
+                    alerts,
                 )
                 .await,
             ),
@@ -1830,6 +1886,10 @@ mod tests {
             &McpHealth::default(),
             None,
             &crate::secrets::FakeSecretStore::new(),
+            &AlertFeeds {
+                settings: Default::default(),
+                sink: tokio::sync::mpsc::unbounded_channel().0,
+            },
         )
         .await;
         let empty = exec.list_tools().await.unwrap().is_empty();

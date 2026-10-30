@@ -4,9 +4,13 @@
 //! Pure decisions about MCP alerts: where an alert goes and what is said when
 //! the agent speaks it. No I/O and no timers; the coordinator drives these.
 
+mod cards;
 mod coordinator;
+mod live;
 
+pub use cards::{CardQueue, MAX_CARDS};
 pub use coordinator::{AlertEnv, Coordinator};
+pub use live::{LiveAlertSettings, text_turns_from, ui_state_from};
 
 use uia_core::session::State;
 use uia_mcp::alert::Alert;
