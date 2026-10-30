@@ -14,23 +14,25 @@ use super::com::EventHandle;
 use crate::follow::{self, Flow, Role};
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
-use windows::Win32::Foundation::PROPERTYKEY;
+use windows::Win32::Foundation::{
+    CloseHandle, DUPLICATE_SAME_ACCESS, DuplicateHandle, HANDLE, PROPERTYKEY,
+};
 use windows::Win32::Media::Audio::{
     DEVICE_STATE, EDataFlow, ERole, IMMDeviceEnumerator, IMMNotificationClient,
     IMMNotificationClient_Impl, MMDeviceEnumerator, eCapture, eCommunications, eConsole,
     eMultimedia, eRender,
 };
 use windows::Win32::System::Com::{CLSCTX_ALL, CoCreateInstance};
-use windows::Win32::System::Threading::SetEvent;
+use windows::Win32::System::Threading::{GetCurrentProcess, SetEvent};
 use windows::core::PCWSTR;
 
 /// A registered default-device notification for one flow, unregistered on
 /// drop.
 ///
 /// Registered and dropped on the worker thread, after `CoInitializeEx` and
-/// before `CoUninitialize`. It borrows the worker's wake event rather than
-/// owning one: [`super::stop_worker`] closes that event, and only after
-/// joining the worker, by which time this has been dropped and unregistered.
+/// before `CoUninitialize`. The callback signals its own duplicate of the
+/// worker's wake event ([`OwnedWake`]), so [`super::stop_worker`] closing
+/// the worker's handle never leaves the callback holding a dead one.
 pub(crate) struct DefaultChangeWatch {
     enumerator: IMMDeviceEnumerator,
     client: IMMNotificationClient,
@@ -45,7 +47,7 @@ impl DefaultChangeWatch {
         let changed = Arc::new(AtomicBool::new(false));
         let client: IMMNotificationClient = Notification {
             flow,
-            wake,
+            wake: OwnedWake::duplicate(wake)?,
             changed: Arc::clone(&changed),
         }
         .into();
@@ -72,8 +74,10 @@ impl DefaultChangeWatch {
 impl Drop for DefaultChangeWatch {
     fn drop(&mut self) {
         // SAFETY: the same enumerator and client that were registered.
-        // Unregistering waits for a callback already running to finish, so
-        // once this returns nothing signals the wake event on our behalf.
+        // Unregistering waits for a callback already running to finish. If
+        // it fails, Windows keeps the client and may still call it; that
+        // only signals the client's own duplicate, which stays open until
+        // the last reference to the client goes.
         unsafe {
             if let Err(e) = self
                 .enumerator
@@ -85,10 +89,54 @@ impl Drop for DefaultChangeWatch {
     }
 }
 
+/// The callback's own handle to the worker's wake event, closed when the
+/// callback object is released.
+///
+/// Duplicated rather than borrowed: if unregistering fails, Windows can
+/// call the callback after the worker has closed its handle, and `SetEvent`
+/// on a closed handle value signals whatever object reuses it.
+struct OwnedWake(HANDLE);
+
+// SAFETY: a kernel event handle is not thread affine. This one is only
+// signalled (`SetEvent`, from any notification thread) and closed once, in
+// `Drop`, after the last reference to the callback is gone.
+unsafe impl Send for OwnedWake {}
+unsafe impl Sync for OwnedWake {}
+
+impl OwnedWake {
+    fn duplicate(wake: EventHandle) -> windows::core::Result<Self> {
+        let mut copy = HANDLE::default();
+        // SAFETY: `wake` is the worker's open event, which outlives this
+        // call; `copy` receives a new handle this value owns and closes.
+        unsafe {
+            let process = GetCurrentProcess();
+            DuplicateHandle(
+                process,
+                wake.0,
+                process,
+                &mut copy,
+                0,
+                false,
+                DUPLICATE_SAME_ACCESS,
+            )?;
+        }
+        Ok(Self(copy))
+    }
+}
+
+impl Drop for OwnedWake {
+    fn drop(&mut self) {
+        // SAFETY: the handle `duplicate` created, closed exactly once.
+        unsafe {
+            let _ = CloseHandle(self.0);
+        }
+    }
+}
+
 #[windows::core::implement(IMMNotificationClient)]
 struct Notification {
     flow: Flow,
-    wake: EventHandle,
+    wake: OwnedWake,
     changed: Arc<AtomicBool>,
 }
 
@@ -125,8 +173,8 @@ impl IMMNotificationClient_Impl for Notification_Impl {
         // Only unpinned workers register a watch, hence `pinned: false`.
         if follow::reopen_for_default_change(false, self.flow, changed, role) {
             self.changed.store(true, Ordering::SeqCst);
-            // SAFETY: the wake event outlives this registration; see
-            // `DefaultChangeWatch`.
+            // SAFETY: this callback's own duplicate, open for as long as
+            // the callback exists; see `OwnedWake`.
             unsafe {
                 let _ = SetEvent(self.wake.0);
             }
