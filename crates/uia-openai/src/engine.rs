@@ -14,6 +14,7 @@
 //! `PeerConnectionEventHandler`, and the data channel is **polled**.
 
 use std::sync::Arc;
+use std::time::Instant;
 
 use async_trait::async_trait;
 use rtc::media::Sample;
@@ -21,7 +22,6 @@ use rtc::rtp_transceiver::rtp_sender::{
     RTCRtpCodec, RTCRtpCodecParameters, RTCRtpCodingParameters, RTCRtpEncodingParameters,
     RtpCodecKind,
 };
-use rtc::shared::time::SystemInstant;
 use tokio::sync::mpsc::Sender;
 use uia_audio::codec::OpusCodec;
 use uia_core::audio::AudioFormat;
@@ -284,20 +284,23 @@ impl S2sEngine for OpenAiEngine {
         // 3. Sendrecv Opus track. WebRTC carries Opus, never raw PCM.
         let ssrc = rand::random::<u32>();
         let track: Arc<TrackLocalStaticSample> = Arc::new(
-            TrackLocalStaticSample::new(MediaStreamTrack::new(
-                "uia-stream".to_owned(),
-                "uia-audio".to_owned(),
-                "uia-audio".to_owned(),
-                RtpCodecKind::Audio,
-                vec![RTCRtpEncodingParameters {
-                    rtp_coding_parameters: RTCRtpCodingParameters {
-                        ssrc: Some(ssrc),
+            TrackLocalStaticSample::new(
+                Instant::now(),
+                MediaStreamTrack::new(
+                    "uia-stream".to_owned(),
+                    "uia-audio".to_owned(),
+                    "uia-audio".to_owned(),
+                    RtpCodecKind::Audio,
+                    vec![RTCRtpEncodingParameters {
+                        rtp_coding_parameters: RTCRtpCodingParameters {
+                            ssrc: Some(ssrc),
+                            ..Default::default()
+                        },
+                        codec: audio_codec.rtp_codec.clone(),
                         ..Default::default()
-                    },
-                    codec: audio_codec.rtp_codec.clone(),
-                    ..Default::default()
-                }],
-            ))
+                    }],
+                ),
+            )
             .map_err(|e| EngineError::Transport(e.to_string()))?,
         );
         pc.add_track(Arc::clone(&track) as Arc<dyn TrackLocal>)
@@ -461,7 +464,7 @@ impl S2sEngine for OpenAiEngine {
         for payload in packets {
             let sample = Sample {
                 data: bytes::Bytes::from(payload),
-                timestamp: SystemInstant::now(),
+                timestamp: Instant::now(),
                 duration: FRAME_DURATION,
                 packet_timestamp: 0,
                 // Both counters describe packets lost *before* this sample.

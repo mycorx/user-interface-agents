@@ -1,11 +1,13 @@
 #!/usr/bin/env bash
-# `webrtc` and `rtc` are pinned `=0.20.2` in crates/uia-openai/Cargo.toml
-# because S9 shipped a live-only ICE-gathering regression in `webrtc` 0.20.3
-# that no offline test caught. `rtc-media` belongs to the same version-locked
-# family but is a transitive dependency Cargo gives us no way to pin directly;
-# it is held at 0.20.3 by the committed lockfile alone. This script fails
-# loudly if any member of the family drifts from the versions verified live,
-# so a stray `cargo update` cannot silently reintroduce S9's regression.
+# `webrtc` and `rtc` are pinned `=0.21.1` in crates/uia-openai/Cargo.toml and
+# crates/uia-foundry/Cargo.toml. The family is pinned exactly because S9
+# shipped a live-only ICE-gathering regression in `webrtc` 0.20.3 that no
+# offline test caught, so every bump needs a live voice-session check before
+# its pins land. `rtc-media` belongs to the same version-locked family but is
+# a transitive dependency Cargo gives us no way to pin directly; it is held at
+# 0.21.1 by the committed lockfile alone. This script fails loudly if any
+# member of the family drifts from the versions verified live, so a stray
+# `cargo update` cannot silently reintroduce S9's regression.
 set -euo pipefail
 
 LOCKFILE="Cargo.lock"
@@ -49,7 +51,7 @@ expect_version() {
   fi
 }
 
-expect_version "webrtc" "0.20.2"
-expect_version "rtc" "0.20.2"
-expect_version "rtc-media" "0.20.3"
+expect_version "webrtc" "0.21.1"
+expect_version "rtc" "0.21.1"
+expect_version "rtc-media" "0.21.1"
 echo "OK: webrtc/rtc/rtc-media lockfile pins unchanged"
