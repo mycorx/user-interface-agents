@@ -5,6 +5,7 @@
   import HudCard from './HudCard.svelte';
   import HistoryCard from './HistoryCard.svelte';
   import SettingsCard from './SettingsCard.svelte';
+  import { detectPlatform } from './platform';
 
   // Mirrors `uia_app::settings::UiSettings` - duplicated across the IPC
   // boundary like the other settings tabs' types. `theme` of `null` means
@@ -133,22 +134,20 @@
   // maps Windows 11 to major >= 13. WebView2 is Chromium, so this is
   // available without adding the os plugin — which would mean a new Rust
   // dependency and a main.rs registration, and main.rs is shared territory.
+  // Which OS this is comes from `detectPlatform()`; only this async Windows
+  // version check stays here.
   async function detectCardRadius(): Promise<number> {
     const uaData = (
       navigator as Navigator & {
         userAgentData?: {
-          platform?: string;
           getHighEntropyValues?: (h: string[]) => Promise<{ platformVersion?: string }>;
         };
       }
     ).userAgentData;
 
-    const platform = uaData?.platform ?? '';
-    const ua = navigator.userAgent;
-    const isWindows = platform ? platform === 'Windows' : /Windows/.test(ua);
-    const isMac = platform ? platform === 'macOS' : /Mac OS X|Macintosh/.test(ua);
+    const platform = detectPlatform();
 
-    if (isWindows) {
+    if (platform === 'windows') {
       try {
         const high = await uaData?.getHighEntropyValues?.(['platformVersion']);
         const major = Number.parseInt(String(high?.platformVersion ?? '').split('.')[0], 10);
@@ -161,7 +160,7 @@
         return CARD_RADIUS.windows10;
       }
     }
-    if (isMac) return CARD_RADIUS.macos;
+    if (platform === 'macos') return CARD_RADIUS.macos;
     return CARD_RADIUS.none;
   }
 
