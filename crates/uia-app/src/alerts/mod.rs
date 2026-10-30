@@ -4,6 +4,10 @@
 //! Pure decisions about MCP alerts: where an alert goes and what is said when
 //! the agent speaks it. No I/O and no timers; the coordinator drives these.
 
+mod coordinator;
+
+pub use coordinator::{AlertEnv, Coordinator};
+
 use uia_core::session::State;
 use uia_mcp::alert::Alert;
 
