@@ -921,53 +921,66 @@ Zlib OR MIT OR Apache-2.0
 npm packages
 ============
 
-56 packages, grouped by declared SPDX license expression.
+64 packages, grouped by declared SPDX license expression.
 
 MIT
 ---
 
-  @esbuild/darwin-arm64           0.28.2
-  @jridgewell/gen-mapping         0.3.13
-  @jridgewell/remapping           2.3.5
-  @jridgewell/resolve-uri         3.1.2
-  @jridgewell/sourcemap-codec     1.6.0
-  @jridgewell/trace-mapping       0.3.31
-  @oxc-project/types              0.155.0
-  @rolldown/binding-darwin-arm64  1.2.15
-  @rolldown/pluginutils           1.0.1
-  @sveltejs/acorn-typescript      1.0.13
-  @sveltejs/load-config           0.2.3
-  @sveltejs/vite-plugin-svelte    7.3.1
-  @tsconfig/svelte                5.0.8
-  @types/estree                   1.0.10
-  acorn                           8.19.0
-  chokidar                        4.0.3
-  clsx                            2.1.1
-  deepmerge                       4.3.1
-  devalue                         5.9.4
-  esbuild                         0.28.2
-  esm-env                         1.2.2
-  esrap                           2.4.0
-  fdir                            6.5.0
-  fsevents                        2.3.3
-  is-reference                    3.0.3
-  locate-character                3.0.0
-  magic-string                    0.30.21
-  magic-string                    1.4.5
-  mri                             1.2.0
-  nanoid                          3.3.20
-  obug                            2.2.1
-  picomatch                       4.0.7
-  postcss                         8.5.32
-  readdirp                        4.1.2
-  rolldown                        1.2.15
-  sade                            1.8.1
-  svelte                          5.57.3
-  svelte-check                    4.7.7
-  tinyglobby                      0.2.17
-  vite                            8.3.5
-  vitefu                          1.1.3
-  zimmerframe                     1.1.5
+  @esbuild/darwin-arm64             0.28.2
+  @esbuild/linux-x64                0.28.2
+  @esbuild/win32-x64                0.28.2
+  @jridgewell/gen-mapping           0.3.13
+  @jridgewell/remapping             2.3.5
+  @jridgewell/resolve-uri           3.1.2
+  @jridgewell/sourcemap-codec       1.6.0
+  @jridgewell/trace-mapping         0.3.31
+  @oxc-project/types                0.155.0
+  @rolldown/binding-darwin-arm64    1.2.15
+  @rolldown/binding-linux-x64-gnu   1.2.15
+  @rolldown/binding-win32-x64-msvc  1.2.15
+  @rolldown/pluginutils             1.0.1
+  @sveltejs/acorn-typescript        1.0.13
+  @sveltejs/load-config             0.2.3
+  @sveltejs/vite-plugin-svelte      7.3.1
+  @tsconfig/svelte                  5.0.8
+  @types/estree                     1.0.10
+  acorn                             8.19.0
+  chokidar                          4.0.3
+  clsx                              2.1.1
+  deepmerge                         4.3.1
+  devalue                           5.9.4
+  esbuild                           0.28.2
+  esm-env                           1.2.2
+  esrap                             2.4.0
+  fdir                              6.5.0
+  fsevents                          2.3.3
+  is-reference                      3.0.3
+  locate-character                  3.0.0
+  magic-string                      0.30.21
+  magic-string                      1.4.5
+  mri                               1.2.0
+  nanoid                            3.3.20
+  obug                              2.2.1
+  picomatch                         4.0.7
+  postcss                           8.5.32
+  readdirp                          4.1.2
+  rolldown                          1.2.15
+  sade                              1.8.1
+  svelte                            5.57.3
+  svelte-check                      4.7.7
+  tinyglobby                        0.2.17
+  vite                              8.3.5
+  vitefu                            1.1.3
+  zimmerframe                       1.1.5
+
+Apache-2.0 OR MIT
+-----------------
+
+  @tauri-apps/api                 2.12.4
+  @tauri-apps/cli                 2.12.4
+  @tauri-apps/cli-darwin-arm64    2.12.4
+  @tauri-apps/cli-linux-x64-gnu   2.12.4
+  @tauri-apps/cli-win32-x64-msvc  2.12.4
 
 Apache-2.0
 ----------
@@ -977,12 +990,13 @@ Apache-2.0
   detect-libc     2.1.2
   typescript      6.0.3
 
-Apache-2.0 OR MIT
------------------
+MPL-2.0
+-------
 
-  @tauri-apps/api               2.12.4
-  @tauri-apps/cli               2.12.4
-  @tauri-apps/cli-darwin-arm64  2.12.4
+  lightningcss                 1.33.0
+  lightningcss-darwin-arm64    1.33.0
+  lightningcss-linux-x64-gnu   1.33.0
+  lightningcss-win32-x64-msvc  1.33.0
 
 MIT OR Apache-2.0
 -----------------
@@ -990,12 +1004,6 @@ MIT OR Apache-2.0
   @tauri-apps/plugin-dialog   2.8.4
   @tauri-apps/plugin-opener   2.7.2
   @tauri-apps/plugin-process  2.4.0
-
-MPL-2.0
--------
-
-  lightningcss               1.33.0
-  lightningcss-darwin-arm64  1.33.0
 
 BSD-3-Clause
 ------------
