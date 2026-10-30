@@ -635,6 +635,25 @@ mod tests {
     }
 
     #[test]
+    fn an_unchanged_wait_is_not_shown_again() {
+        let mut notice = WaitingNotice::new();
+        notice.on_waiting(wait("Waiting for a speaker"));
+        assert_eq!(notice.on_waiting(wait("Waiting for a speaker")), None);
+    }
+
+    #[test]
+    fn a_reasserted_wait_is_wiped_when_the_device_returns() {
+        // The reconnect cleared the error line and showed the wait again, so
+        // the line holds the wait and clearing it wipes nothing newer.
+        let mut notice = WaitingNotice::new();
+        notice.on_waiting(wait("Waiting for a speaker"));
+        notice.on_error();
+        notice.on_state(State::Connecting);
+        notice.on_state(State::Listening);
+        assert_eq!(notice.on_waiting(None), wait(""));
+    }
+
+    #[test]
     fn the_wait_clears_when_the_device_returns() {
         let mut notice = WaitingNotice::new();
         notice.on_waiting(wait("Waiting for a speaker"));
