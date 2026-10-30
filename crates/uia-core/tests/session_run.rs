@@ -677,3 +677,104 @@ async fn the_idle_deadline_still_disconnects_a_session_whose_microphone_is_silen
 
     assert!(dropped.is_ok(), "the idle deadline never fired");
 }
+
+/// Speaks only when told to, after `connect` has long returned -- the case
+/// `FakeEngine` cannot express, since it queues its whole script inside
+/// `connect`, where the run loop drains it before it ever waits on anything.
+struct LateSpeakingEngine {
+    tx: std::sync::Arc<std::sync::Mutex<Option<Sender<EngineEvent>>>>,
+}
+
+/// The test's half of a `LateSpeakingEngine`: pushes events down the stream
+/// the engine was connected with.
+#[derive(Clone)]
+struct LateVoice(std::sync::Arc<std::sync::Mutex<Option<Sender<EngineEvent>>>>);
+
+impl LateVoice {
+    async fn say(&self, ev: EngineEvent) {
+        let tx = self.0.lock().unwrap().clone().expect("not connected yet");
+        tx.send(ev).await.unwrap();
+    }
+}
+
+#[async_trait::async_trait]
+impl S2sEngine for LateSpeakingEngine {
+    fn id(&self) -> EngineId {
+        EngineId::OpenAi
+    }
+    fn input_format(&self) -> AudioFormat {
+        AudioFormat::mono_pcm16(16_000)
+    }
+    fn output_format(&self) -> AudioFormat {
+        AudioFormat::mono_pcm16(24_000)
+    }
+    async fn connect(
+        &mut self,
+        _cfg: &SessionConfig,
+        tx: Sender<EngineEvent>,
+    ) -> Result<(), EngineError> {
+        let _ = tx.send(EngineEvent::Ready).await;
+        *self.tx.lock().unwrap() = Some(tx);
+        Ok(())
+    }
+    async fn send_audio(&mut self, _frame: &[i16]) -> Result<(), EngineError> {
+        Ok(())
+    }
+    async fn send_tool_result(
+        &mut self,
+        _id: ToolCallId,
+        _result: ToolResult,
+    ) -> Result<(), EngineError> {
+        Ok(())
+    }
+    async fn interrupt(&mut self) -> Result<(), EngineError> {
+        Ok(())
+    }
+    async fn close(&mut self) -> Result<(), EngineError> {
+        Ok(())
+    }
+}
+
+#[tokio::test(start_paused = true)]
+async fn engine_audio_sent_after_the_session_is_waiting_reaches_the_speaker_while_the_microphone_yields_nothing()
+ {
+    let tx = std::sync::Arc::new(std::sync::Mutex::new(None));
+    let voice = LateVoice(tx.clone());
+    let (activation, act_tx) = ChannelActivation::new();
+    let sink = VecSink::new(AudioFormat::mono_pcm16(24_000));
+    let speaker = sink.probe();
+    let mut session = Session::new(SessionDeps {
+        source: Box::new(DetachedSource::new(AudioFormat::mono_pcm16(16_000))),
+        sink: Box::new(sink),
+        engine: Box::new(LateSpeakingEngine { tx }),
+        executor: std::sync::Arc::new(FakeExecutor::new()),
+        memory: std::sync::Arc::new(NullMemory),
+        activation: Box::new(activation),
+        ctx: ctx(),
+    });
+    let mut states = session.subscribe_state();
+    act_tx.send(ActivationEvent::Show).await.unwrap();
+
+    // Shorter than the session's 50 ms poll tick, so the audio has to be
+    // woken for by the engine's own stream: a loop that only noticed it on
+    // its next tick, or never (blocked on the silent microphone), misses it.
+    const SOONER_THAN_THE_POLL_TICK: Duration = Duration::from_millis(40);
+
+    tokio::select! {
+        outcome = session.run() => panic!("run() ended with {outcome:?}"),
+        () = async {
+            while states.recv().await.unwrap() != State::Listening {}
+            voice.say(EngineEvent::SpeechStarted).await;
+            voice.say(EngineEvent::AudioChunk(vec![8_000; 480])).await;
+            let played = tokio::time::timeout(
+                SOONER_THAN_THE_POLL_TICK,
+                until(|| !speaker.written().is_empty()),
+            )
+            .await;
+            assert!(
+                played.is_ok(),
+                "engine audio sent while the session waited never reached the speaker in time"
+            );
+        } => {}
+    }
+}
