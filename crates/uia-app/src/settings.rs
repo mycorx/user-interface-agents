@@ -545,6 +545,15 @@ pub fn retrying_a_failed_swap(change: AudioChange, last_swap_failed: bool) -> Au
     }
 }
 
+/// What the Providers tab's engine choice shows: the saved choice, read from
+/// disk on every call, falling back to `uia.toml`'s `engine.default`. Not
+/// the engine this launch runs (`get_engine`): the tab remounts each time
+/// Settings opens, and the launch value made a choice saved for the next
+/// launch look forgotten.
+pub fn saved_engine_choice(configured_default: EngineChoice, path: &Path) -> EngineChoice {
+    resolve_engine_choice(configured_default, load(path))
+}
+
 /// What the Audio tab shows: `uia.toml`'s `[audio]` with the sidecar applied,
 /// read from disk on every call. Not the launch snapshot: the tab remounts
 /// each time it is opened, and showing the startup values after a save made
@@ -1312,6 +1321,37 @@ mod tests {
         // plugged in: the picker keeps it rather than pretending "Default".
         assert_eq!(shown.input_device.as_deref(), Some("Unplugged USB Mic"));
         assert_eq!(shown.output_device, None);
+    }
+
+    #[test]
+    fn saved_engine_choice_reflects_a_save_made_after_launch() {
+        let dir = std::env::temp_dir().join(format!(
+            "uia-engine-settings-after-save-{}",
+            std::process::id()
+        ));
+        std::fs::create_dir_all(&dir).unwrap();
+        let path = dir.join("uia-engine.json");
+
+        save(
+            &path,
+            &EngineSettings {
+                engine: EngineChoice::Bedrock,
+            },
+        )
+        .unwrap();
+        let shown = saved_engine_choice(EngineChoice::OpenAi, &path);
+
+        std::fs::remove_dir_all(&dir).ok();
+        assert_eq!(shown, EngineChoice::Bedrock);
+    }
+
+    #[test]
+    fn saved_engine_choice_without_a_sidecar_is_the_configured_default() {
+        let missing = std::env::temp_dir().join("uia-engine-settings-does-not-exist.json");
+        assert_eq!(
+            saved_engine_choice(EngineChoice::Foundry, &missing),
+            EngineChoice::Foundry
+        );
     }
 
     #[test]

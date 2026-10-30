@@ -114,6 +114,10 @@ struct SessionControlState(SessionControl);
 /// it before the value is set.
 struct CurrentEngine(EngineChoice);
 
+/// `uia.toml`'s `engine.default`, read once at startup: what
+/// `get_saved_engine` falls back to when no choice has been saved.
+struct ConfiguredEngine(EngineChoice);
+
 /// `uia.toml`'s inline `[foundry] endpoint`, read once at startup - the
 /// half of `resolve_foundry_endpoint`'s precedence that `get_foundry_endpoint`
 /// can't re-derive on its own since `Config` itself is not `tauri::State`-
@@ -435,10 +439,12 @@ fn main() {
     let settings_path = settings_path_for(&config_path);
     // The persisted UI choice wins over `uia.toml`'s `engine.default` —
     // see `settings::resolve_engine_choice`. Read once at startup: this is
-    // restart-to-switch (S18), not live switching, so nothing after this
-    // point needs to watch the settings file again.
+    // restart-to-switch (S18), not live switching: the session never looks
+    // at the file again. Only the Providers tab re-reads it, to show what
+    // was saved (`get_saved_engine`).
+    let configured_engine = config.engine.default;
     let engine_choice =
-        settings::resolve_engine_choice(config.engine.default, settings::load(&settings_path));
+        settings::resolve_engine_choice(configured_engine, settings::load(&settings_path));
 
     let foundry_settings_path = foundry_settings_path_for(&config_path);
     let configured_foundry_endpoint = config.foundry.resolve_endpoint();
@@ -633,6 +639,7 @@ fn main() {
         .manage(mcp_registry::PendingOAuthSessions::default())
         .manage(SettingsPath(settings_path))
         .manage(CurrentEngine(engine_choice))
+        .manage(ConfiguredEngine(configured_engine))
         .manage(FoundrySettingsPath(foundry_settings_path))
         .manage(ConfiguredFoundryEndpoint(configured_foundry_endpoint))
         .manage(AudioSettingsPath(audio_settings_path))
@@ -655,6 +662,7 @@ fn main() {
         .invoke_handler(tauri::generate_handler![
             set_engine,
             get_engine,
+            get_saved_engine,
             get_secret_status,
             set_secret,
             delete_secret,
@@ -934,7 +942,9 @@ fn main() {
                     // keep their order: the wait notice shares the error line
                     // and must land after the state change that clears it.
                     // A lagged HUD skips to the newest value rather than
-                    // dying. Errors also go to stderr: the terminal is
+                    // dying. Skipping keeps `notice` in step with the HUD:
+                    // both see only what this loop emits, so a skipped
+                    // state or error is one neither of them saw. Errors also go to stderr: the terminal is
                     // watched during manual testing (UIA_DUMP_EVENTS lives
                     // there too), and a crashed/never-opened webview must not
                     // be the only place this shows up.
@@ -1096,6 +1106,17 @@ fn set_engine(state: tauri::State<SettingsPath>, engine: String) -> Result<(), S
 #[tauri::command]
 fn get_engine(state: tauri::State<CurrentEngine>) -> &'static str {
     state.0.as_wire()
+}
+
+/// The engine choice saved for the next launch, read fresh, for the
+/// Providers tab (see [`settings::saved_engine_choice`]). The HUD keeps
+/// `get_engine`: it shows what is connected.
+#[tauri::command]
+fn get_saved_engine(
+    configured: tauri::State<ConfiguredEngine>,
+    path: tauri::State<SettingsPath>,
+) -> &'static str {
+    settings::saved_engine_choice(configured.0, &path.0).as_wire()
 }
 
 /// Gates capture *forwarding* on the running session — the mic button's
