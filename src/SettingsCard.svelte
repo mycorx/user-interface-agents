@@ -207,13 +207,6 @@
       <SettingsGeneral onchange={() => (restartNoticeVisible = true)} />
     {/if}
   </div>
-
-  {#if restartNoticeVisible}
-    <p class="restart-notice">
-      Restart the assistant for these changes to take effect.
-      <button type="button" class="restart-now" onclick={restartNow}>Restart Now</button>
-    </p>
-  {/if}
 </div>
 
 <div class="panel-footer">
@@ -228,6 +221,14 @@
     {#if visualSaveState === 'saved'}
       <span class="saved-flash">Saved.</span>
     {/if}
+  {/if}
+  <!-- In the pinned footer, not at the end of the scrolling panel: there it
+       appeared below the fold after a Save and went unnoticed. -->
+  {#if restartNoticeVisible}
+    <p class="restart-notice" role="status">
+      Restart the assistant for these changes to take effect.
+      <button type="button" class="restart-now" onclick={restartNow}>Restart Now</button>
+    </p>
   {/if}
 </div>
 
@@ -399,7 +400,7 @@
   }
 
   .restart-notice {
-    margin: 20px 0 0;
+    margin: 0;
     font-size: 13px;
     color: #b8bcc6;
   }
@@ -422,10 +423,11 @@
     padding: 0 24px 18px;
     display: flex;
     align-items: center;
+    flex-wrap: wrap;
     gap: 10px;
   }
 
-  .panel-footer button {
+  .panel-footer button:not(.restart-now) {
     font: inherit;
     color: inherit;
     background: rgba(255, 255, 255, 0.06);
@@ -435,12 +437,12 @@
     cursor: pointer;
   }
 
-  .panel-footer button:disabled {
+  .panel-footer button:not(.restart-now):disabled {
     opacity: 0.6;
     cursor: default;
   }
 
-  .panel-footer button:not(:disabled):hover {
+  .panel-footer button:not(.restart-now):not(:disabled):hover {
     background: var(--accent, #6ea8fe);
     color: #0c0e12;
     border-color: var(--accent, #6ea8fe);
