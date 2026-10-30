@@ -3,6 +3,7 @@
 
 use crate::audio::AudioFormat;
 use async_trait::async_trait;
+use std::sync::{Arc, Mutex, PoisonError};
 
 #[derive(Debug, thiserror::Error)]
 pub enum AudioError {
@@ -12,6 +13,41 @@ pub enum AudioError {
     Resample(String),
     #[error("invalid sample rate: {from_hz} -> {to_hz}")]
     InvalidRate { from_hz: u32, to_hz: u32 },
+}
+
+/// What a direction is waiting for while its device is missing.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum WaitingFor {
+    /// A device the user pinned by name, which is never replaced by another.
+    Named(String),
+    /// Whatever the OS default is, once there is one.
+    Default,
+}
+
+/// Where a backend says what it is waiting for, read by the session.
+///
+/// A shared cell rather than a channel: the session polls it once per pass of
+/// its run loop and only ever wants the current answer. Cloning shares the
+/// one value, so the backend keeps a clone and hands the session another.
+#[derive(Clone, Default)]
+pub struct WaitingCell(Arc<Mutex<Option<WaitingFor>>>);
+
+impl WaitingCell {
+    /// `None` once the device is open again.
+    pub fn set(&self, waiting: Option<WaitingFor>) {
+        *self.lock() = waiting;
+    }
+
+    pub fn get(&self) -> Option<WaitingFor> {
+        self.lock().clone()
+    }
+
+    /// A panic elsewhere while holding the lock leaves a plain value behind,
+    /// still valid to read and overwrite, so poisoning is not worth failing
+    /// an audio thread over.
+    fn lock(&self) -> std::sync::MutexGuard<'_, Option<WaitingFor>> {
+        self.0.lock().unwrap_or_else(PoisonError::into_inner)
+    }
 }
 
 #[async_trait]
@@ -28,6 +64,11 @@ pub trait AudioSource: Send {
     /// drops the future when the stop wins, so dropping it before it resolves
     /// must lose no frame that a later call would otherwise have yielded.
     async fn next_frame(&mut self) -> Option<Vec<i16>>;
+    /// Where this source reports waiting for its device, if it ever does.
+    /// `None` for a source that is either open or gone, never waiting.
+    fn waiting(&self) -> Option<WaitingCell> {
+        None
+    }
 }
 
 #[async_trait]
@@ -45,6 +86,10 @@ pub trait AudioSink: Send {
     /// while the tail of a reply is still playing. Starved or cleared is 0.0.
     fn level(&self) -> f32 {
         0.0
+    }
+    /// The output-side twin of `AudioSource::waiting`.
+    fn waiting(&self) -> Option<WaitingCell> {
+        None
     }
 }
 
@@ -220,6 +265,21 @@ mod tests {
         sink.clear();
         assert_eq!(sink.level(), 0.0);
         assert_eq!(sink.format(), AudioFormat::mono_pcm16(24_000));
+    }
+
+    #[test]
+    fn waiting_cell_clones_share_one_value() {
+        // The backend keeps one clone and the session reads another: they
+        // must be one value, or the HUD never hears what the device is doing.
+        let backend = WaitingCell::default();
+        let session = backend.clone();
+        assert_eq!(session.get(), None);
+
+        backend.set(Some(WaitingFor::Named("Jabra".into())));
+        assert_eq!(session.get(), Some(WaitingFor::Named("Jabra".into())));
+
+        session.set(None);
+        assert_eq!(backend.get(), None);
     }
 
     #[tokio::test]

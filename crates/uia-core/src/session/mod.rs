@@ -6,11 +6,13 @@ pub mod backoff;
 pub mod control;
 pub mod state;
 pub use backoff::Backoff;
-pub use control::{PromptSwap, PromptSwapOutcome, SessionControl};
+pub use control::{
+    AudioOpener, AudioPair, AudioSwap, PromptSwap, PromptSwapOutcome, SessionControl,
+};
 pub use state::{SessionInput, State, can_switch_engine, transition};
 
 use crate::activation::{Activation, ActivationEvent};
-use crate::audio::{AudioSink, AudioSource, DetachedSource, Resampler};
+use crate::audio::{AudioSink, AudioSource, DetachedSink, DetachedSource, Resampler};
 use crate::engine::{EngineEvent, S2sEngine, SessionConfig, TextTurnSupport};
 use crate::memory::{ConversationMemory, MemoryContext};
 use crate::tools::ToolExecutor;
@@ -212,6 +214,10 @@ pub struct Session {
     /// exchanges, which are real and should not be hidden from a live view
     /// when the stored history shows them.
     turn_tx: broadcast::Sender<crate::memory::Turn>,
+    /// What the audio devices are waiting for, as the HUD should say it, or
+    /// `None` while both are open. A `watch`: it is a state, and only the
+    /// current one matters.
+    audio_waiting: watch::Sender<Option<String>>,
     /// Set when a terminal error is seen, so the run loop can stop instead of
     /// entering the backoff loop.
     terminal: bool,
@@ -291,6 +297,7 @@ impl Session {
             level_tx: watch::channel(0.0).0,
             error_tx: broadcast::channel(ERROR_BROADCAST_CAPACITY).0,
             turn_tx: broadcast::channel(TURN_BROADCAST_CAPACITY).0,
+            audio_waiting: watch::channel(None).0,
             terminal: false,
             backoff: Backoff::new(),
             system_prompt: None,
@@ -325,6 +332,27 @@ impl Session {
     /// without polling for it.
     pub fn subscribe_turn(&self) -> broadcast::Receiver<crate::memory::Turn> {
         self.turn_tx.subscribe()
+    }
+
+    /// Observe what the audio devices are waiting for, e.g. `Waiting for the
+    /// microphone "Jabra"`, or `None` while both are open. Always readable.
+    pub fn subscribe_audio_waiting(&self) -> watch::Receiver<Option<String>> {
+        self.audio_waiting.subscribe()
+    }
+
+    /// Republish the devices' waits, waking subscribers only on a change.
+    fn publish_audio_waiting(&self) {
+        let input = self.capture.waiting().and_then(|cell| cell.get());
+        let output = self.deps.sink.waiting().and_then(|cell| cell.get());
+        let message = audio::waiting_message(input.as_ref(), output.as_ref());
+        self.audio_waiting.send_if_modified(|current| {
+            if *current == message {
+                false
+            } else {
+                *current = message;
+                true
+            }
+        });
     }
 
     pub fn default_tool_deadline() -> std::time::Duration {
@@ -438,6 +466,73 @@ impl Session {
         self.control.note_prompt_swap_applied(swap.tag);
         self.mark_activity();
         true
+    }
+
+    /// Adopt a pending audio swap. Returns whether there was one.
+    ///
+    /// The threshold always applies. With an opener, the old pair is dropped
+    /// *before* the new one opens (VPIO allows one unit per process), both on
+    /// a blocking thread because closing and opening a real device blocks.
+    /// The engine connection is untouched: a connected session keeps talking
+    /// and only its audio moves.
+    ///
+    /// An opener that fails or panics leaves the session on a detached pair
+    /// -- silent, but alive and still able to take the next swap -- and says
+    /// why on `error_tx`. Stranding the session would leave the user no way
+    /// back short of a restart.
+    async fn apply_pending_audio_swap(&mut self) -> bool {
+        let Some(swap) = self.control.take_audio_swap() else {
+            return false;
+        };
+        self.barge_in_threshold = swap
+            .barge_in_threshold
+            .unwrap_or(DEFAULT_BARGE_IN_THRESHOLD);
+        let Some(open) = swap.open else {
+            return true;
+        };
+
+        let source = self.capture.stop().await;
+        let source_format = source.format();
+        let sink_format = self.deps.sink.format();
+        let sink = std::mem::replace(
+            &mut self.deps.sink,
+            Box::new(DetachedSink::new(sink_format)),
+        );
+        let opened = tokio::task::spawn_blocking(move || {
+            drop(source);
+            drop(sink);
+            open()
+        })
+        .await;
+
+        let (source, sink): AudioPair = match opened {
+            Ok(Ok(pair)) => pair,
+            Ok(Err(e)) => self.detached_pair(source_format, sink_format, &e),
+            Err(e) => self.detached_pair(source_format, sink_format, &e),
+        };
+        self.capture = audio::Capture::new(source);
+        self.deps.sink = sink;
+        // Both resamplers were keyed to the old devices' rates and carry
+        // their filter state; the new devices start clean.
+        self.capture_resampler = None;
+        self.playback_resampler = None;
+        let _ = self.level_tx.send(0.0);
+        self.publish_audio_waiting();
+        true
+    }
+
+    /// The pair a failed swap leaves behind, after reporting why.
+    fn detached_pair(
+        &self,
+        source_format: crate::audio::AudioFormat,
+        sink_format: crate::audio::AudioFormat,
+        cause: &dyn std::fmt::Display,
+    ) -> AudioPair {
+        let _ = self.error_tx.send(format!("audio devices: {cause}"));
+        (
+            Box::new(DetachedSource::new(source_format)),
+            Box::new(DetachedSink::new(sink_format)),
+        )
     }
 
     /// Something was said. Resets the idle countdown.
@@ -973,18 +1068,19 @@ impl Session {
     /// **Why it `select!`s.** Each pass first runs, in a fixed order, every
     /// check whose ordering carries meaning: drain the engine, drain typed
     /// turns, reconnect, close, reset the backoff, park, swap the prompt,
-    /// rotate, idle out. Then it waits on one biased `select!` over the
-    /// engine's events, typed turns, the connection-wanted switch, the next
-    /// captured frame and a `POLL_INTERVAL` tick, handles the one that came,
-    /// and goes round again. Capture runs on its own task (`session/audio.rs`)
+    /// swap the audio, rotate, idle out. Then it waits on one biased
+    /// `select!` over the engine's events, typed turns, the connection-wanted
+    /// switch, the next captured frame and a `POLL_INTERVAL` tick, handles
+    /// the one that came, and goes round again. Capture runs on its own task (`session/audio.rs`)
     /// precisely so it can be one arm among these: when the loop awaited the
     /// microphone directly, a device that yielded nothing froze engine
     /// playback, parking, rotation and the idle deadline with it.
     ///
-    /// The arms only *receive*; the handling stays in the pass. An engine
-    /// event goes into `stashed_event` for the next drain rather than being
-    /// handled in the arm, so the reconnect and barge-in ordering below is
-    /// the same whichever input woke the loop. The tick exists for the passes
+    /// An engine event is not handled in its arm: it goes into
+    /// `stashed_event` for the next drain, so the reconnect and barge-in
+    /// ordering below is the same whichever input woke the loop. A typed turn
+    /// and a captured frame are handled in their arms, since neither changes
+    /// what the checks in the pass decide. The tick exists for the passes
     /// nothing else would trigger -- a silent microphone with a quiet engine
     /// -- and publishes the playback level so the meter still follows the
     /// assistant's voice with no frames arriving to clock it.
@@ -1013,6 +1109,10 @@ impl Session {
                 }
             }
 
+            // Settings closing is what woke the park, and Settings is what
+            // asks for new devices, so they open here, before the reconnect.
+            self.apply_pending_audio_swap().await;
+
             // Captured BEFORE the first connect: that connect can itself fail
             // transiently, and the loop below must see that as a retry to make.
             let mut attempts = self.reconnect_attempts;
@@ -1023,6 +1123,7 @@ impl Session {
             self.mark_activity();
 
             loop {
+                self.publish_audio_waiting();
                 let mut closed = false;
                 loop {
                     match self.pump_buffered_engine().await {
@@ -1092,6 +1193,13 @@ impl Session {
                     if self.terminal {
                         return RunOutcome::Terminal;
                     }
+                    continue;
+                }
+
+                // Not expected from the UI, which swaps while parked, but a
+                // swap can arrive while connected; it moves the audio without
+                // touching the connection.
+                if self.apply_pending_audio_swap().await {
                     continue;
                 }
 
@@ -1645,5 +1753,194 @@ mod prompt_swap_tests {
             Some("You are a pirate."),
             "the rotation must reconnect with the swapped persona, not the original"
         );
+    }
+}
+
+#[cfg(test)]
+mod audio_swap_tests {
+    use super::*;
+    use crate::audio::{AudioError, AudioFormat, FixtureSource, VecSink};
+    use crate::engine::FakeEngine;
+    use crate::memory::NullMemory;
+    use crate::tools::FakeExecutor;
+    use async_trait::async_trait;
+    use std::sync::Mutex;
+
+    type Log = Arc<Mutex<Vec<&'static str>>>;
+
+    /// A device that notes when it closes, which for a real device is when
+    /// it is dropped.
+    struct LoggedSource(Log);
+
+    impl Drop for LoggedSource {
+        fn drop(&mut self) {
+            self.0.lock().unwrap().push("source dropped");
+        }
+    }
+
+    #[async_trait]
+    impl AudioSource for LoggedSource {
+        fn format(&self) -> AudioFormat {
+            AudioFormat::mono_pcm16(16_000)
+        }
+        async fn next_frame(&mut self) -> Option<Vec<i16>> {
+            std::future::pending().await
+        }
+    }
+
+    struct LoggedSink(Log);
+
+    impl Drop for LoggedSink {
+        fn drop(&mut self) {
+            self.0.lock().unwrap().push("sink dropped");
+        }
+    }
+
+    #[async_trait]
+    impl AudioSink for LoggedSink {
+        fn format(&self) -> AudioFormat {
+            AudioFormat::mono_pcm16(24_000)
+        }
+        async fn write(&mut self, _frame: &[i16]) -> Result<(), AudioError> {
+            Ok(())
+        }
+        fn clear(&mut self) {}
+    }
+
+    fn session_with(
+        source: Box<dyn AudioSource>,
+        sink: Box<dyn AudioSink>,
+        engine: FakeEngine,
+    ) -> Session {
+        let (activation, _tx) = crate::activation::ChannelActivation::new();
+        Session::new(SessionDeps {
+            source,
+            sink,
+            engine: Box::new(engine),
+            executor: Arc::new(FakeExecutor::new()),
+            memory: Arc::new(NullMemory),
+            activation: Box::new(activation),
+            ctx: MemoryContext {
+                user_id: "u".into(),
+                conversation_id: "c".into(),
+            },
+        })
+    }
+
+    fn a_silent_pair() -> AudioPair {
+        (
+            Box::new(FixtureSource::new(AudioFormat::mono_pcm16(16_000), vec![])),
+            Box::new(VecSink::new(AudioFormat::mono_pcm16(24_000))),
+        )
+    }
+
+    /// VPIO allows one unit per process, so the old pair must be closed
+    /// before the new one is opened -- never the other way round.
+    #[tokio::test]
+    async fn an_audio_swap_waits_for_the_old_pair_to_drop_before_opening_the_new_one() {
+        let log: Log = Arc::default();
+        let mut session = session_with(
+            Box::new(LoggedSource(log.clone())),
+            Box::new(LoggedSink(log.clone())),
+            FakeEngine::new(vec![]),
+        );
+        let opener_log = log.clone();
+        session.control.request_audio_swap(AudioSwap {
+            open: Some(Box::new(move || {
+                opener_log.lock().unwrap().push("opened");
+                Ok(a_silent_pair())
+            })),
+            barge_in_threshold: None,
+        });
+
+        assert!(session.apply_pending_audio_swap().await);
+
+        let log = log.lock().unwrap().clone();
+        assert_eq!(log.last(), Some(&"opened"), "log: {log:?}");
+        assert_eq!(log.len(), 3, "both devices drop, then one open: {log:?}");
+        assert!(log.contains(&"source dropped") && log.contains(&"sink dropped"));
+    }
+
+    #[tokio::test]
+    async fn the_swap_carries_the_barge_in_threshold() {
+        let mut session = session_with(
+            Box::new(FixtureSource::new(AudioFormat::mono_pcm16(16_000), vec![])),
+            Box::new(VecSink::new(AudioFormat::mono_pcm16(24_000))),
+            FakeEngine::new(vec![]),
+        );
+        session.control.request_audio_swap(AudioSwap {
+            open: None,
+            barge_in_threshold: Some(0.2),
+        });
+        session.apply_pending_audio_swap().await;
+        assert_eq!(session.barge_in_threshold, 0.2);
+
+        session.control.request_audio_swap(AudioSwap {
+            open: None,
+            barge_in_threshold: None,
+        });
+        session.apply_pending_audio_swap().await;
+        assert_eq!(session.barge_in_threshold, DEFAULT_BARGE_IN_THRESHOLD);
+    }
+
+    #[tokio::test]
+    async fn a_threshold_only_swap_keeps_the_open_devices() {
+        let log: Log = Arc::default();
+        let mut session = session_with(
+            Box::new(LoggedSource(log.clone())),
+            Box::new(LoggedSink(log.clone())),
+            FakeEngine::new(vec![]),
+        );
+        session.control.request_audio_swap(AudioSwap {
+            open: None,
+            barge_in_threshold: Some(0.2),
+        });
+
+        assert!(session.apply_pending_audio_swap().await);
+
+        assert!(
+            log.lock().unwrap().is_empty(),
+            "a threshold change closed a device"
+        );
+    }
+
+    #[tokio::test]
+    async fn a_swap_while_connected_sends_later_audio_only_to_the_new_sink_without_reconnecting() {
+        let old = VecSink::new(AudioFormat::mono_pcm16(24_000));
+        let old_probe = old.probe();
+        let engine = FakeEngine::new(vec![]);
+        let configs = engine.config_probe();
+        let mut session = session_with(
+            Box::new(FixtureSource::new(AudioFormat::mono_pcm16(16_000), vec![])),
+            Box::new(old),
+            engine,
+        );
+        session.connect().await;
+        let old_len = old_probe.written().len();
+
+        let new = VecSink::new(AudioFormat::mono_pcm16(24_000));
+        let new_probe = new.probe();
+        session.control.request_audio_swap(AudioSwap {
+            open: Some(Box::new(move || {
+                Ok((
+                    Box::new(FixtureSource::new(AudioFormat::mono_pcm16(16_000), vec![]))
+                        as Box<dyn AudioSource>,
+                    Box::new(new) as Box<dyn AudioSink>,
+                ))
+            })),
+            barge_in_threshold: None,
+        });
+        session.apply_pending_audio_swap().await;
+        session
+            .handle_event(EngineEvent::AudioChunk(vec![8_000; 480]))
+            .await;
+
+        assert!(!new_probe.written().is_empty(), "the new sink got nothing");
+        assert_eq!(
+            old_probe.written().len(),
+            old_len,
+            "the old sink still played"
+        );
+        assert_eq!(configs.count(), 1, "a device swap must not reconnect");
     }
 }

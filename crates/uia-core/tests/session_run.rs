@@ -9,15 +9,22 @@
 //! unobservable from outside the crate, and `Backoff` (S6) existed but nothing
 //! ever called it. These tests pin all three.
 
+use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::{Arc, Mutex};
 use std::time::Duration;
 use tokio::sync::mpsc::Sender;
 use uia_core::activation::{ActivationEvent, ChannelActivation};
-use uia_core::audio::{AudioFormat, DetachedSource, FixtureSource, SinkProbe, VecSink};
+use uia_core::audio::{
+    AudioError, AudioFormat, AudioSource, DetachedSource, FixtureSource, SinkProbe, VecSink,
+    WaitingCell, WaitingFor,
+};
 use uia_core::engine::{
     EngineError, EngineEvent, EngineId, FakeEngine, S2sEngine, SessionConfig, ToolCallId,
 };
 use uia_core::memory::{MemoryContext, NullMemory};
-use uia_core::session::{RunOutcome, Session, SessionDeps, State};
+use uia_core::session::{
+    AudioOpener, AudioPair, AudioSwap, RunOutcome, Session, SessionDeps, State,
+};
 use uia_core::tools::{FakeExecutor, ToolResult};
 
 fn ctx() -> MemoryContext {
@@ -777,4 +784,175 @@ async fn engine_audio_sent_after_the_session_is_waiting_reaches_the_speaker_whil
             );
         } => {}
     }
+}
+
+/// A fresh speaker and the probe that watches it, as an opener would hand
+/// them over.
+fn a_fresh_pair() -> (AudioPair, SinkProbe) {
+    let sink = VecSink::new(AudioFormat::mono_pcm16(24_000));
+    let probe = sink.probe();
+    (
+        (
+            Box::new(DetachedSource::new(AudioFormat::mono_pcm16(16_000))),
+            Box::new(sink),
+        ),
+        probe,
+    )
+}
+
+#[tokio::test]
+async fn an_audio_swap_requested_while_parked_applies_before_the_reconnect() {
+    let engine = an_engine_with_a_scripted_turn();
+    let configs = engine.config_probe();
+    let (mut session, _old_speaker, act_tx) = a_session_with_a_silent_microphone(engine);
+    let control = session.control();
+    let mut states = session.subscribe_state();
+    act_tx.send(ActivationEvent::Show).await.unwrap();
+
+    let (pair, new_speaker) = a_fresh_pair();
+    let connects_at_open = Arc::new(Mutex::new(None));
+
+    let swapped = tokio::time::timeout(RUN_LOOP_BUDGET, async {
+        tokio::select! {
+            outcome = session.run() => panic!("run() ended with {outcome:?}"),
+            () = async {
+                while states.recv().await.unwrap() != State::Listening {}
+                control.request_disconnect();
+                while states.recv().await.unwrap() != State::Idle {}
+
+                let seen = connects_at_open.clone();
+                let configs = configs.clone();
+                control.request_audio_swap(AudioSwap {
+                    open: Some(Box::new(move || {
+                        *seen.lock().unwrap() = Some(configs.count());
+                        Ok(pair)
+                    })),
+                    barge_in_threshold: None,
+                });
+                control.request_connect();
+                until(|| !new_speaker.written().is_empty()).await;
+            } => {}
+        }
+    })
+    .await;
+
+    assert!(swapped.is_ok(), "the new speaker never played");
+    assert_eq!(
+        *connects_at_open.lock().unwrap(),
+        Some(1),
+        "the pair must open while parked, before the reconnect"
+    );
+}
+
+/// Run a session whose first audio swap fails through `failing`, and check
+/// it reports, keeps talking on a silent pair, and takes a later swap.
+async fn a_failed_swap_is_survived(failing: AudioOpener, cause: &str) {
+    let (mut session, _speaker, act_tx) =
+        a_session_with_a_silent_microphone(an_engine_with_a_scripted_turn());
+    let control = session.control();
+    let mut errors = session.subscribe_error();
+    let mut states = session.subscribe_state();
+    control.request_audio_swap(AudioSwap {
+        open: Some(failing),
+        barge_in_threshold: None,
+    });
+    act_tx.send(ActivationEvent::Show).await.unwrap();
+
+    let reopened = Arc::new(AtomicBool::new(false));
+    let survived = tokio::time::timeout(RUN_LOOP_BUDGET, async {
+        tokio::select! {
+            outcome = session.run() => panic!("run() ended with {outcome:?}"),
+            () = async {
+                let message = errors.recv().await.unwrap();
+                assert!(
+                    message.contains("audio devices") && message.contains(cause),
+                    "unexpected error: {message}"
+                );
+                while states.recv().await.unwrap() != State::Listening {}
+
+                let flag = reopened.clone();
+                control.request_audio_swap(AudioSwap {
+                    open: Some(Box::new(move || {
+                        flag.store(true, Ordering::SeqCst);
+                        Ok(a_fresh_pair().0)
+                    })),
+                    barge_in_threshold: None,
+                });
+                until(|| reopened.load(Ordering::SeqCst)).await;
+            } => {}
+        }
+    })
+    .await;
+
+    assert!(
+        survived.is_ok(),
+        "the session did not survive the failed swap"
+    );
+}
+
+#[tokio::test]
+async fn a_failed_or_panicking_opener_leaves_a_silent_pair_and_reports_the_error() {
+    a_failed_swap_is_survived(
+        Box::new(|| Err(AudioError::DeviceUnavailable("gone".into()))),
+        "gone",
+    )
+    .await;
+    a_failed_swap_is_survived(Box::new(|| panic!("the driver fell over")), "").await;
+}
+
+/// A microphone that never delivers and says it is waiting through a cell
+/// the test keeps.
+struct WaitingMicrophone(WaitingCell);
+
+#[async_trait::async_trait]
+impl AudioSource for WaitingMicrophone {
+    fn format(&self) -> AudioFormat {
+        AudioFormat::mono_pcm16(16_000)
+    }
+    async fn next_frame(&mut self) -> Option<Vec<i16>> {
+        std::future::pending().await
+    }
+    fn waiting(&self) -> Option<WaitingCell> {
+        Some(self.0.clone())
+    }
+}
+
+#[tokio::test]
+async fn a_waiting_microphone_is_published_naming_the_device() {
+    let cell = WaitingCell::default();
+    let (activation, act_tx) = ChannelActivation::new();
+    let mut session = Session::new(SessionDeps {
+        source: Box::new(WaitingMicrophone(cell.clone())),
+        sink: Box::new(VecSink::new(AudioFormat::mono_pcm16(24_000))),
+        engine: Box::new(an_engine_with_a_scripted_turn()),
+        executor: std::sync::Arc::new(FakeExecutor::new()),
+        memory: std::sync::Arc::new(NullMemory),
+        activation: Box::new(activation),
+        ctx: ctx(),
+    });
+    let mut waiting = session.subscribe_audio_waiting();
+    let mut states = session.subscribe_state();
+    act_tx.send(ActivationEvent::Show).await.unwrap();
+
+    let published = tokio::time::timeout(RUN_LOOP_BUDGET, async {
+        tokio::select! {
+            outcome = session.run() => panic!("run() ended with {outcome:?}"),
+            () = async {
+                while states.recv().await.unwrap() != State::Listening {}
+                cell.set(Some(WaitingFor::Named("Jabra".into())));
+                waiting
+                    .wait_for(|w| w.as_deref() == Some("Waiting for the microphone \"Jabra\""))
+                    .await
+                    .unwrap();
+                cell.set(None);
+                waiting.wait_for(Option::is_none).await.unwrap();
+            } => {}
+        }
+    })
+    .await;
+
+    assert!(
+        published.is_ok(),
+        "the wait was never published, or never cleared"
+    );
 }
