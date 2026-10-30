@@ -238,6 +238,21 @@ fn waiting_after(
     }
 }
 
+/// Once nothing runs in either direction, a direction still reporting no
+/// wait would look healthy on the HUD. It reports what it is configured
+/// for instead, as a cpal leg does after a failed reopen. A direction
+/// already waiting for a pinned name keeps that name.
+fn report_nothing_running(shared: &Shared, wanted: &Wanted) {
+    for (cell, pinned) in [
+        (&shared.input_waiting, wanted.input.as_deref()),
+        (&shared.output_waiting, wanted.output.as_deref()),
+    ] {
+        if cell.get().is_none() {
+            cell.set(Some(follow::waiting_for(pinned)));
+        }
+    }
+}
+
 /// The error a failed plan reports: the OS failure, in preference to a
 /// missing name the plan would otherwise have waited for.
 fn plan_error(
@@ -552,7 +567,13 @@ fn supervise(
                 split_listeners = None;
                 split_logged = false;
                 match open_unit(&wake, &shared, &frames_tx, input, output, &mut raise_log) {
-                    Some(opened) => opened,
+                    Some(Ok(opened)) => Ok(opened),
+                    Some(Err(e)) => {
+                        // A split's cells still name the device that has
+                        // since arrived; nothing runs now.
+                        report_nothing_running(&shared, &wanted);
+                        Err(e)
+                    }
                     None => return,
                 }
             }
@@ -590,7 +611,13 @@ fn supervise(
                         attempt = attempt.saturating_add(1);
                         continue;
                     }
-                    Err(e) => Err(e),
+                    Err(e) => {
+                        // A leg that failed to open had cleared its cell,
+                        // and one already running stops with the others.
+                        legs = Legs::default();
+                        report_nothing_running(&shared, &wanted);
+                        Err(e)
+                    }
                 }
             }
             (_, input, output) => {
@@ -1043,6 +1070,38 @@ mod tests {
             "the source would wait forever on a dead microphone"
         );
         drop(shared);
+    }
+
+    /// After a failed rebuild nothing runs, so a direction with no wait
+    /// reports what it is configured for, and a named wait is kept.
+    #[test]
+    fn nothing_running_reports_every_direction_waiting() {
+        let shared = Shared::new();
+        shared
+            .output_waiting
+            .set(Some(WaitingFor::Named("Jabra".to_string())));
+        let wanted = Wanted {
+            input: None,
+            output: Some("Jabra".to_string()),
+        };
+        report_nothing_running(&shared, &wanted);
+        assert_eq!(shared.input_waiting.get(), Some(WaitingFor::Default));
+        assert_eq!(
+            shared.output_waiting.get(),
+            Some(WaitingFor::Named("Jabra".to_string()))
+        );
+
+        let pinned = Shared::new();
+        let wanted = Wanted {
+            input: Some("MacBook Pro Microphone".to_string()),
+            output: None,
+        };
+        report_nothing_running(&pinned, &wanted);
+        assert_eq!(
+            pinned.input_waiting.get(),
+            Some(WaitingFor::Named("MacBook Pro Microphone".to_string()))
+        );
+        assert_eq!(pinned.output_waiting.get(), Some(WaitingFor::Default));
     }
 
     /// The session shows which device a split unit waits for, by name.
