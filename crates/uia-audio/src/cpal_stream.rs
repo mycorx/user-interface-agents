@@ -16,7 +16,7 @@ use cpal::traits::{DeviceTrait, HostTrait, StreamTrait};
 use std::sync::Arc;
 use std::sync::mpsc::{self, RecvTimeoutError};
 use std::thread::JoinHandle;
-use std::time::Duration;
+use std::time::{Duration, Instant};
 use uia_core::audio::{AudioError, WaitingCell, downmix_to_mono, f32_to_i16};
 
 /// How often an unpinned direction checks whether the OS default moved, on a
@@ -45,6 +45,37 @@ pub(crate) fn stream_error_action(kind: cpal::ErrorKind) -> StreamAction {
         | cpal::ErrorKind::Xrun
         | cpal::ErrorKind::RealtimeDenied => StreamAction::Ignore,
         _ => StreamAction::Reopen,
+    }
+}
+
+/// When an unpinned direction next checks the OS default.
+///
+/// A deadline rather than a receive timeout: ignored stream errors (xruns,
+/// reroutes) can arrive faster than [`DEFAULT_POLL`], and restarting a full
+/// wait on each one would put the check off for as long as they keep coming.
+struct PollClock {
+    next: Instant,
+}
+
+impl PollClock {
+    fn new(now: Instant) -> Self {
+        Self {
+            next: now + DEFAULT_POLL,
+        }
+    }
+
+    /// How long to wait for a message before the check is due.
+    fn wait(&self, now: Instant) -> Duration {
+        self.next.saturating_duration_since(now)
+    }
+
+    /// Is the check due at `now`? If so, the next one is a poll later.
+    fn take_due(&mut self, now: Instant) -> bool {
+        if now < self.next {
+            return false;
+        }
+        self.next = now + DEFAULT_POLL;
+        true
     }
 }
 
@@ -246,28 +277,28 @@ impl Supervisor {
         // waiting has already made one.
         let mut attempt: u32 = u32::from(bound.is_none());
         let mut retry_now = false;
+        let mut poll = PollClock::new(Instant::now());
 
         loop {
             if let Some(current) = &bound {
-                match self.rx.recv_timeout(DEFAULT_POLL) {
+                let mut reopen = false;
+                match self.rx.recv_timeout(poll.wait(Instant::now())) {
                     Ok(Msg::Stop) | Err(RecvTimeoutError::Disconnected) => return,
                     Ok(Msg::Error { generation, kind }) => {
-                        if generation == self.generation
-                            && stream_error_action(kind) == StreamAction::Reopen
-                        {
-                            bound = None;
-                            retry_now = true;
-                        }
+                        reopen = generation == self.generation
+                            && stream_error_action(kind) == StreamAction::Reopen;
                     }
-                    Err(RecvTimeoutError::Timeout) => {
-                        if self.pinned.is_none() && !follows {
-                            let now = self.direction.default_id(&host);
-                            if now.is_some() && current.id.is_some() && now != current.id {
-                                bound = None;
-                                retry_now = true;
-                            }
-                        }
-                    }
+                    Err(RecvTimeoutError::Timeout) => {}
+                }
+                // Whatever arrived: a stream of ignored errors must not keep
+                // putting the check off.
+                if !reopen && self.pinned.is_none() && !follows && poll.take_due(Instant::now()) {
+                    let now = self.direction.default_id(&host);
+                    reopen = now.is_some() && current.id.is_some() && now != current.id;
+                }
+                if reopen {
+                    bound = None;
+                    retry_now = true;
                 }
                 continue;
             }
@@ -310,9 +341,9 @@ impl Supervisor {
     /// Waits `ms` unless told to stop first; `false` means stop. Errors that
     /// arrive meanwhile are from a stream already dropped.
     fn pause(&self, ms: u32) -> bool {
-        let deadline = std::time::Instant::now() + Duration::from_millis(u64::from(ms));
+        let deadline = Instant::now() + Duration::from_millis(u64::from(ms));
         loop {
-            let left = deadline.saturating_duration_since(std::time::Instant::now());
+            let left = deadline.saturating_duration_since(Instant::now());
             match self.rx.recv_timeout(left) {
                 Ok(Msg::Stop) | Err(RecvTimeoutError::Disconnected) => return false,
                 Ok(Msg::Error { .. }) => {}
@@ -376,8 +407,8 @@ impl Supervisor {
             }
         }
         .map_err(other)?;
-        self.format.store(rate, channels);
         stream.play().map_err(other)?;
+        self.format.store(rate, channels);
         Ok(Bound {
             _stream: stream,
             id: device.id().ok(),
@@ -389,6 +420,34 @@ impl Supervisor {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// Errors that need no reopen arriving faster than the poll must not put
+    /// the default check off: it stays due a poll after the last one.
+    #[test]
+    fn the_default_check_stays_due_while_ignored_errors_keep_arriving() {
+        let start = Instant::now();
+        let mut clock = PollClock::new(start);
+        let ms = |n| start + Duration::from_millis(n);
+        for at in [300, 600, 900] {
+            assert!(!clock.take_due(ms(at)), "not due at {at} ms");
+            assert_eq!(
+                clock.wait(ms(at)),
+                DEFAULT_POLL - Duration::from_millis(at),
+                "the wait counts down to the deadline, at {at} ms"
+            );
+        }
+        assert!(clock.take_due(ms(1_200)), "due once a poll has passed");
+        assert_eq!(
+            clock.wait(ms(1_200)),
+            DEFAULT_POLL,
+            "and the next is a poll later"
+        );
+        assert_eq!(
+            clock.wait(ms(5_000)),
+            Duration::ZERO,
+            "an overdue check waits for nothing"
+        );
+    }
 
     #[test]
     fn device_changed_needs_no_reopen() {
