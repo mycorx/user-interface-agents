@@ -265,12 +265,13 @@ impl AlertEnv for AppAlertEnv {
 /// whenever the queue empties. A freshly built page misses this event, which
 /// is why it reads the queue with `take_pending_alerts` on load.
 fn show_alert_card(app: &AppHandle, alert: Alert) {
-    let payload = alert_payload(&alert);
-    app.state::<AlertCards>()
+    let cards = app.state::<AlertCards>();
+    let card_id = cards
         .0
         .lock()
         .unwrap_or_else(|e| e.into_inner())
-        .push(alert);
+        .push(alert.clone());
+    let payload = alert_payload(card_id, &alert);
     let window = match app.get_webview_window(ALERT_WINDOW) {
         Some(window) => window,
         None => match build_alert_window(app) {
@@ -289,7 +290,14 @@ fn show_alert_card(app: &AppHandle, alert: Alert) {
 
 /// Undecorated, transparent, always on top, on every workspace, never
 /// focused and absent from the taskbar, in the top-right corner of the
-/// primary monitor's work area, sized for three stacked cards.
+/// primary monitor's work area, sized for three stacked cards (the page
+/// shrinks it to its content with `setSize`, granted in
+/// `capabilities/alert.json`).
+///
+/// v1 limitation: on macOS it is visible on all desktops/Spaces but not
+/// guaranteed over another app's full-screen Space. That needs the
+/// full-screen-auxiliary collection behaviour or a non-activating panel,
+/// which Tauri does not expose, and no AppKit code is added for it.
 fn build_alert_window(app: &AppHandle) -> tauri::Result<tauri::WebviewWindow> {
     let mut builder = tauri::WebviewWindowBuilder::new(
         app,
@@ -2070,17 +2078,17 @@ fn take_pending_alerts(cards: tauri::State<AlertCards>) -> Vec<serde_json::Value
         .lock()
         .unwrap_or_else(|e| e.into_inner())
         .cards()
-        .map(alert_payload)
+        .map(|(card_id, alert)| alert_payload(card_id, alert))
         .collect()
 }
 
-/// Remove the card at `index` (oldest is 0), hiding the window once none
-/// are left.
+/// Remove the card with `card_id` (from its payload) if it is still queued,
+/// hiding the window once none are left. An unknown id changes nothing.
 #[tauri::command]
-fn dismiss_alert(app: AppHandle, cards: tauri::State<AlertCards>, index: usize) {
+fn dismiss_alert(app: AppHandle, cards: tauri::State<AlertCards>, card_id: u64) {
     let empty = {
         let mut cards = cards.0.lock().unwrap_or_else(|e| e.into_inner());
-        cards.dismiss(index);
+        cards.dismiss(card_id);
         cards.is_empty()
     };
     if empty && let Some(window) = app.get_webview_window(ALERT_WINDOW) {

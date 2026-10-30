@@ -156,8 +156,9 @@ pub fn text_turn_support_payload(support: &TextTurnSupport) -> serde_json::Value
     serde_json::json!({ "support": label, "reason": support.reason() })
 }
 
-/// `{ server, title, summary, details, action: null | { label, url, host } }`,
-/// the shape the alert card destructures.
+/// `{ card_id, server, title, summary, details, action: null | { label, url, host } }`,
+/// the shape the alert card destructures. `card_id` is the opaque id the card
+/// passes back to `dismiss_alert`.
 ///
 /// A whitelist on purpose: `kind`, `id`, `stage` and `created_at` steer
 /// routing and deduplication and are never shown, and nothing of the raw feed
@@ -165,7 +166,7 @@ pub fn text_turn_support_payload(support: &TextTurnSupport) -> serde_json::Value
 /// parser already restricted to `https`, so the card can always show where a
 /// button leads next to the server-written label. An action whose URL is not
 /// `https` or has no host is dropped rather than shown without one.
-pub fn alert_payload(alert: &uia_mcp::alert::Alert) -> serde_json::Value {
+pub fn alert_payload(card_id: u64, alert: &uia_mcp::alert::Alert) -> serde_json::Value {
     let action = alert.action.as_ref().and_then(|action| {
         let url = url::Url::parse(&action.url).ok()?;
         if url.scheme() != "https" {
@@ -179,6 +180,7 @@ pub fn alert_payload(alert: &uia_mcp::alert::Alert) -> serde_json::Value {
         }))
     });
     serde_json::json!({
+        "card_id": card_id,
         "server": alert.server,
         "title": alert.title,
         "summary": alert.summary,
@@ -442,13 +444,14 @@ mod tests {
 
     #[test]
     fn the_alert_payload_carries_server_summary_and_a_validated_action_only() {
-        let payload = alert_payload(&calendar_alert(Some((
-            "Join",
-            "https://meet.example.com/abc?x=1",
-        ))));
+        let payload = alert_payload(
+            7,
+            &calendar_alert(Some(("Join", "https://meet.example.com/abc?x=1"))),
+        );
         assert_eq!(
             payload,
             serde_json::json!({
+                "card_id": 7,
                 "server": "calendar",
                 "title": "Standup",
                 "summary": "Starts in 5 minutes",
@@ -471,8 +474,9 @@ mod tests {
         alert.title = None;
         alert.details = None;
         assert_eq!(
-            alert_payload(&alert),
+            alert_payload(0, &alert),
             serde_json::json!({
+                "card_id": 0,
                 "server": "calendar",
                 "title": null,
                 "summary": "Starts in 5 minutes",
@@ -484,9 +488,9 @@ mod tests {
 
     #[test]
     fn an_action_whose_url_has_no_host_is_dropped_rather_than_shown_without_one() {
-        let payload = alert_payload(&calendar_alert(Some(("Open", "https://"))));
+        let payload = alert_payload(0, &calendar_alert(Some(("Open", "https://"))));
         assert_eq!(payload["action"], serde_json::Value::Null);
-        let payload = alert_payload(&calendar_alert(Some(("Open", "http://example.com"))));
+        let payload = alert_payload(0, &calendar_alert(Some(("Open", "http://example.com"))));
         assert_eq!(payload["action"], serde_json::Value::Null, "https only");
     }
 

@@ -217,12 +217,13 @@ Only `title`, `summary` and `details` go in; never the raw `data`, `kind`,
 ### 7. Show the card
 
 - New secondary window `alert`, built lazily on the first card and then kept
-  hidden when empty (my call), visible on all desktops/Spaces and above
-  full-screen apps on macOS: undecorated, transparent, always on top,
-  top-right of the primary display, shown without taking keyboard focus.
-  Add its label and the specific `core:window:allow-*` grants to
-  `capabilities/default.json`, following the file's existing documentation
-  convention. Today only `hud` exists and nothing creates secondary windows.
+  hidden when empty (my call), visible on all desktops/Spaces (on macOS not
+  guaranteed over another app's full-screen Space in v1): undecorated,
+  transparent, always on top, top-right of the primary display, shown
+  without taking keyboard focus. Give it its own `capabilities/alert.json`
+  (label `alert`, only the specific event, window and https-only opener
+  grants the card needs), documented the way `capabilities/default.json` is.
+  Today only `hud` exists and nothing creates secondary windows.
 - Backend emits `uia://mcp-alert` (constant and payload builder in `hud.rs`,
   with a unit test). Because Tauri does not buffer events for late
   listeners, also add a command `take_pending_alerts` that the card calls on

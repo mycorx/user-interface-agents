@@ -3,7 +3,9 @@
 
 //! The alert cards waiting in, or shown by, the `alert` window. The window
 //! reads them on load (Tauri does not buffer events for late listeners) and
-//! dismisses them one at a time by position.
+//! dismisses them one at a time by card id. Ids are opaque and never reused
+//! within a run, so a dismiss can never hit a card that arrived after the
+//! page last read the list.
 
 use std::collections::VecDeque;
 
@@ -14,26 +16,34 @@ pub const MAX_CARDS: usize = 3;
 
 #[derive(Debug, Default)]
 pub struct CardQueue {
-    cards: VecDeque<Alert>,
+    cards: VecDeque<(u64, Alert)>,
+    next_id: u64,
 }
 
 impl CardQueue {
     /// Add a card at the end, dropping the oldest beyond [`MAX_CARDS`].
-    pub fn push(&mut self, alert: Alert) {
-        self.cards.push_back(alert);
+    /// Returns the new card's id.
+    pub fn push(&mut self, alert: Alert) -> u64 {
+        let id = self.next_id;
+        self.next_id += 1;
+        self.cards.push_back((id, alert));
         while self.cards.len() > MAX_CARDS {
             self.cards.pop_front();
         }
+        id
     }
 
-    /// The cards, oldest first. Reading does not clear them.
-    pub fn cards(&self) -> impl Iterator<Item = &Alert> {
-        self.cards.iter()
+    /// The cards with their ids, oldest first. Reading does not clear them.
+    pub fn cards(&self) -> impl Iterator<Item = (u64, &Alert)> {
+        self.cards.iter().map(|(id, alert)| (*id, alert))
     }
 
-    /// Remove the card at `index` (oldest is 0). False when there is none.
-    pub fn dismiss(&mut self, index: usize) -> bool {
-        self.cards.remove(index).is_some()
+    /// Remove the card with `id`. False when there is none.
+    pub fn dismiss(&mut self, id: u64) -> bool {
+        match self.cards.iter().position(|(card, _)| *card == id) {
+            Some(index) => self.cards.remove(index).is_some(),
+            None => false,
+        }
     }
 
     pub fn is_empty(&self) -> bool {
@@ -60,7 +70,7 @@ mod tests {
     }
 
     fn summaries(queue: &CardQueue) -> Vec<&str> {
-        queue.cards().map(|a| a.summary.as_str()).collect()
+        queue.cards().map(|(_, a)| a.summary.as_str()).collect()
     }
 
     #[test]
@@ -82,30 +92,44 @@ mod tests {
     }
 
     #[test]
-    fn dismissing_a_card_removes_only_that_one() {
+    fn dismissing_a_card_by_id_removes_only_that_card_even_after_a_new_one_arrives() {
         let mut queue = CardQueue::default();
-        for summary in ["one", "two", "three"] {
-            queue.push(alert(summary));
-        }
-        assert!(queue.dismiss(1));
-        assert_eq!(summaries(&queue), ["one", "three"]);
+        queue.push(alert("one"));
+        let two = queue.push(alert("two"));
+        queue.push(alert("three"));
+        // The page read [one, two, three]; "four" pushes "one" out before
+        // the dismiss for "two" lands. A position would now hit "three".
+        queue.push(alert("four"));
+        assert!(queue.dismiss(two));
+        assert_eq!(summaries(&queue), ["three", "four"]);
     }
 
     #[test]
-    fn dismissing_a_card_that_is_not_there_changes_nothing() {
+    fn dismissing_an_unknown_id_changes_nothing() {
         let mut queue = CardQueue::default();
-        queue.push(alert("one"));
-        assert!(!queue.dismiss(1));
+        let one = queue.push(alert("one"));
+        assert!(!queue.dismiss(one + 1));
         assert_eq!(summaries(&queue), ["one"]);
+    }
+
+    #[test]
+    fn card_ids_are_never_reused_after_a_dismiss() {
+        let mut queue = CardQueue::default();
+        let one = queue.push(alert("one"));
+        assert!(queue.dismiss(one));
+        let two = queue.push(alert("two"));
+        assert_ne!(one, two);
+        assert!(!queue.dismiss(one));
+        assert_eq!(summaries(&queue), ["two"]);
     }
 
     #[test]
     fn the_queue_is_empty_once_the_last_card_is_dismissed() {
         let mut queue = CardQueue::default();
         assert!(queue.is_empty());
-        queue.push(alert("one"));
+        let one = queue.push(alert("one"));
         assert!(!queue.is_empty());
-        assert!(queue.dismiss(0));
+        assert!(queue.dismiss(one));
         assert!(queue.is_empty());
     }
 }
