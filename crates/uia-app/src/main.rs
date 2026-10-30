@@ -129,6 +129,12 @@ struct AudioSettingsPath(PathBuf);
 /// call, the same split as [`ConfiguredFoundryEndpoint`].
 struct ConfiguredAudioSettings(AudioSection);
 
+/// The audio settings the running session uses: the resolved `[audio]` at
+/// launch, then whatever the last Save that changed something switched it
+/// to. `set_audio_settings` compares a Save against it to decide what the
+/// session has to redo.
+struct CurrentAudioSettings(Mutex<AudioSection>);
+
 /// The path `set_agent_settings` persists to — same
 /// rationale as [`SettingsPath`]/[`FoundrySettingsPath`]/[`AudioSettingsPath`].
 struct AgentSettingsPath(PathBuf);
@@ -453,22 +459,12 @@ fn main() {
     // to `config.audio` itself, in place, before `build_session` ever reads
     // it below: no second code path through the audio stack for "did the UI
     // override this," just the one `Config` `build_session` already trusted.
-    // Enumerated once here and handed to the resolver so a persisted device
-    // that is no longer plugged in degrades to the OS default, rather than
-    // failing the whole session in `build_session`. A failed enumeration
-    // yields an empty list, which disables the filter rather than discarding
-    // every audio setting the user has.
+    // A persisted device that is not plugged in stays pinned: the backends
+    // open it in a waiting state rather than failing the session.
     let configured_audio_settings = config.audio.clone();
-    let available_devices: Vec<String> = input_device_names()
-        .unwrap_or_default()
-        .into_iter()
-        .chain(output_device_names().unwrap_or_default())
-        .collect();
-    config.audio = settings::resolve_audio_settings(
-        &config.audio,
-        settings::load(&audio_settings_path),
-        &available_devices,
-    );
+    config.audio =
+        settings::resolve_audio_settings(&config.audio, settings::load(&audio_settings_path));
+    let current_audio_settings = CurrentAudioSettings(Mutex::new(config.audio.clone()));
 
     let model_settings_path = model_settings_path_for(&config_path);
     // Same restart-to-switch tier as the engine choice (S18) and FD5: all
@@ -641,6 +637,7 @@ fn main() {
         .manage(ConfiguredFoundryEndpoint(configured_foundry_endpoint))
         .manage(AudioSettingsPath(audio_settings_path))
         .manage(ConfiguredAudioSettings(configured_audio_settings))
+        .manage(current_audio_settings)
         .manage(AgentSettingsPath(agent_settings_path))
         .manage(ModelSettingsPath(model_settings_path))
         .manage(current_model_settings)
@@ -1469,9 +1466,9 @@ fn set_start_at_login(app: tauri::AppHandle, enabled: bool) -> Result<(), String
 }
 
 /// The Audio tab's initial values: what is saved, read fresh on every call
-/// (see [`settings::saved_audio_settings`]). After a save this is the choice
-/// for the next launch, which may differ from the devices the running session
-/// opened; the Settings restart notice covers that gap.
+/// (see [`settings::saved_audio_settings`]). A Save is also what the running
+/// session switches to, so this matches the devices in use once Settings
+/// has closed.
 #[tauri::command]
 fn get_audio_settings(
     configured: tauri::State<ConfiguredAudioSettings>,
@@ -1480,23 +1477,33 @@ fn get_audio_settings(
     settings::saved_audio_settings(&configured.0, &path.0)
 }
 
-/// Writes the sidecar file `settings::resolve_audio_settings` reads at the
-/// *next* startup - same restart-to-switch rule as the engine choice
-/// (S18): a running session already opened its devices and set its
-/// barge-in threshold, and this command does not reach into it live.
+/// Writes the sidecar file, then hands whatever changed to the running
+/// session. The session applies new devices at the reconnect closing
+/// Settings already triggers (or at its next safe point while connected),
+/// and a threshold-only change without reopening anything. Saving is the
+/// trigger rather than closing, because this is the only place the new
+/// values arrive; the close path knows nothing about what changed.
+///
 /// `input_device`/`output_device` of `None` means "use whatever the OS
 /// calls default" (the picker's "Default" option), not "no change" - the
 /// frontend always sends its full current selection.
+// `#[allow(clippy::too_many_arguments)]`: four are managed states Tauri
+// injects and four are the frontend's unchanged arguments; a struct would
+// change the IPC shape the frontend sends.
 #[tauri::command]
+#[allow(clippy::too_many_arguments)]
 fn set_audio_settings(
-    state: tauri::State<AudioSettingsPath>,
+    path: tauri::State<AudioSettingsPath>,
+    configured: tauri::State<ConfiguredAudioSettings>,
+    current: tauri::State<CurrentAudioSettings>,
+    control: tauri::State<SessionControlState>,
     input_device: Option<String>,
     output_device: Option<String>,
     aec_enabled: bool,
     barge_in_threshold: f32,
 ) -> Result<(), String> {
     settings::save(
-        &state.0,
+        &path.0,
         &settings::AudioSettings {
             input_device,
             output_device,
@@ -1504,10 +1511,19 @@ fn set_audio_settings(
             barge_in_threshold: Some(barge_in_threshold),
         },
     )
-    .map_err(|e| e.to_string())
+    .map_err(|e| e.to_string())?;
+    let next = settings::saved_audio_settings(&configured.0, &path.0);
+    let mut current = current.0.lock().expect("current audio settings mutex");
+    if let Some(swap) =
+        uia_app::session::audio_swap_for(&next, settings::audio_change(&current, &next))
+    {
+        control.0.request_audio_swap(swap);
+        *current = next;
+    }
+    Ok(())
 }
 
-/// Every input device name the UI and the startup filter see, from one place
+/// Every input device name the Audio tab sees, from one place
 /// per OS. On macOS this is CoreAudio's own list rather than cpal's: the app
 /// runs a Voice Processing IO unit, and while it runs cpal lists every
 /// speaker as an input too (the unit's echo-reference taps) plus the unit's

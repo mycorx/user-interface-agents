@@ -156,6 +156,9 @@ jobs:
           key: aec-feature
       - run: cargo build -p uia-audio --features aec
       - run: cargo test -p uia-audio --features aec
+      # The shell's Linux-only `aec` wrapper (`uia-app`'s `open_audio_pair`)
+      # compiles nowhere else, so check it here too.
+      - run: cargo check -p uia-app --features aec
 
   # Every job above runs on Linux, so code that only exists on another OS never
   # compiled in CI: the `cfg(not(unix))` Windows branches, the Credential

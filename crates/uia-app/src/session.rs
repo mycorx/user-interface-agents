@@ -7,14 +7,15 @@
 //! why it is the only place allowed to. `uia-core` still has no idea cpal,
 //! WebRTC, Bedrock, or MCP exist.
 
-use crate::config::{Config, EngineChoice};
+use crate::config::{AudioSection, Config, EngineChoice};
 use crate::mcp_registry::McpRegistry;
+use crate::settings::AudioChange;
 use std::sync::Arc;
 use uia_core::activation::Activation;
-use uia_core::audio::{AudioSink, AudioSource};
+use uia_core::audio::AudioError;
 use uia_core::engine::S2sEngine;
 use uia_core::memory::{MemoryContext, NullMemory};
-use uia_core::session::{Session, SessionDeps};
+use uia_core::session::{AudioOpener, AudioPair, AudioSwap, Session, SessionDeps};
 use uia_core::tools::ToolExecutor;
 use uia_mcp::{McpExecutor, McpRouter, McpServerConfig};
 
@@ -638,22 +639,16 @@ fn record_health(health: &McpHealth, entries: impl IntoIterator<Item = (String, 
     map.extend(entries);
 }
 
-/// The `(source, sink)` pair `build_session` wires into `SessionDeps`.
-///
-/// Named for the same reason `uia-audio`'s `WrappedAudioPair` is: the bare
-/// tuple trips clippy's `type_complexity`.
-type AudioPair = (Box<dyn AudioSource>, Box<dyn AudioSink>);
-
 /// Whether to open the OS's own echo-cancelling devices (WASAPI's
 /// Communications category on Windows, Voice Processing IO on macOS) or plain
 /// devices with none.
 ///
 /// Kept outside the platform `cfg`s deliberately: it is the only part of
-/// [`os_aec_or_fallback_cpal`]'s decision that doesn't touch real hardware,
-/// so it stays testable on every platform, Linux CI included.
+/// [`open_audio_pair`]'s decision that doesn't touch real hardware, so it
+/// stays testable on every platform, Linux CI included.
 #[cfg_attr(not(any(windows, target_os = "macos")), allow(dead_code))]
-fn should_use_os_echo_cancellation(config: &Config) -> bool {
-    config.audio.aec_enabled
+fn should_use_os_echo_cancellation(audio: &AudioSection) -> bool {
+    audio.aec_enabled
 }
 
 /// What the logs call the OS echo-cancellation path on this platform.
@@ -662,85 +657,169 @@ const OS_AEC_NAME: &str = "Windows communications audio devices";
 #[cfg(target_os = "macos")]
 const OS_AEC_NAME: &str = "macOS voice-processing audio devices";
 
+/// Opens both WASAPI directions in one stream category. Either half failing
+/// takes both down: the source opened first is dropped by the `?` on the
+/// sink, so a cancelling capture is never left paired with nothing.
+#[cfg(windows)]
+fn open_wasapi_pair(
+    input: Option<&str>,
+    output: Option<&str>,
+    category: uia_audio::wasapi::StreamCategory,
+) -> Result<AudioPair, AudioError> {
+    use uia_audio::wasapi::{WasapiSink, WasapiSource};
+    let source = WasapiSource::open(input, category)?;
+    let sink = WasapiSink::open(output, category)?;
+    Ok((Box::new(source), Box::new(sink)))
+}
+
 /// Open the OS echo-cancelling pair. Either half failing takes both down: a
 /// cancelling capture paired with a non-cancelling render is the misaligned
 /// case that makes echo worse, not better.
 #[cfg(windows)]
-fn open_os_aec(
-    input: Option<&str>,
-    output: Option<&str>,
-) -> Result<AudioPair, uia_core::audio::AudioError> {
-    use uia_audio::wasapi::{WasapiSink, WasapiSource};
-    let source = WasapiSource::input_communications(input)?;
-    let sink = WasapiSink::output_communications(output)?;
-    Ok((Box::new(source), Box::new(sink)))
+fn open_os_aec(input: Option<&str>, output: Option<&str>) -> Result<AudioPair, AudioError> {
+    open_wasapi_pair(
+        input,
+        output,
+        uia_audio::wasapi::StreamCategory::Communications,
+    )
 }
 
 /// One Voice Processing IO unit serves both directions, so this is one call.
 #[cfg(target_os = "macos")]
-fn open_os_aec(
-    input: Option<&str>,
-    output: Option<&str>,
-) -> Result<AudioPair, uia_core::audio::AudioError> {
+fn open_os_aec(input: Option<&str>, output: Option<&str>) -> Result<AudioPair, AudioError> {
     let (source, sink) = uia_audio::coreaudio::open_voice_processing(input, output)?;
     Ok((Box::new(source), Box::new(sink)))
 }
 
-/// Open the OS-native echo-cancelling devices, falling back to plain cpal
-/// ones if that fails for any reason — or if `config.audio.aec_enabled` is
-/// `false`, in which case plain devices are opened directly and the OS path
-/// is never attempted.
+/// The pair without OS echo cancellation. On Windows these are ordinary
+/// WASAPI streams on the same endpoints, so "Default" still means the
+/// communications default, as it does on the echo-cancelling path.
+#[cfg(windows)]
+fn open_plain(input: Option<&str>, output: Option<&str>) -> Result<AudioPair, AudioError> {
+    open_wasapi_pair(input, output, uia_audio::wasapi::StreamCategory::Plain)
+}
+
+#[cfg(not(windows))]
+fn open_plain(input: Option<&str>, output: Option<&str>) -> Result<AudioPair, AudioError> {
+    Ok((
+        Box::new(uia_audio::input::CpalSource::input(input)?),
+        Box::new(uia_audio::output::CpalSink::output(output)?),
+    ))
+}
+
+/// Opens the audio pair `audio` describes. `build_session` calls it at
+/// launch, and [`audio_swap_for`]'s opener calls it when a Save changes the
+/// devices of a running session.
 ///
-/// The OS applies its own AEC/AGC/NS beneath the app on this path, so there
-/// is nothing for [`wrap_with_aec_if_rates_match`] to do — running AEC3 over
-/// already-cancelled audio would filter it twice. The two are mutually
-/// exclusive, and `build_session` enforces that by construction.
+/// Windows and macOS open the OS's own echo-cancelling devices, falling back
+/// to plain ones if that fails for any reason, or opening plain ones directly
+/// when `audio.aec_enabled` is `false`. The OS applies its own AEC/AGC/NS
+/// beneath the app on that path, so there is nothing for the Linux-only
+/// `aec` feature to do there: running AEC3 over already-cancelled audio
+/// would filter it twice. The `cfg`s below make the two paths mutually
+/// exclusive at compile time, even for a build that passes `--features aec`.
 ///
-/// The fallback is deliberately to *plain* devices, never to the `aec` path
-/// even where it is compiled in: one fallback tier is testable, two is a coin
-/// toss about which engine is actually running. `config.audio.*_device`, if
-/// set, is honoured on the fallback too — a pinned name is a statement about
-/// which physical device to use, not about the echo-cancellation path.
+/// The fallback is deliberately to *plain* devices, never to the `aec` path:
+/// one fallback tier is testable, two is a coin toss about which engine is
+/// actually running. `audio.*_device` is honoured on every path, fallback
+/// included: a pinned name is a statement about which physical device to
+/// use, not about echo cancellation, so it is never swapped for another
+/// device. A pinned device that is not plugged in is no error here either:
+/// every backend opens it in a waiting state and starts it when it appears.
 ///
 /// Gated on the OS alone, deliberately — **not** on `uia-audio`'s
 /// `wasapi-aec`/`coreaudio-aec` features, which this crate cannot see.
 /// `Cargo.toml`'s per-OS target stanzas activate them unconditionally, which
 /// makes "this OS" and "the backend module exists" the same condition.
 /// Remove a stanza and this stops compiling — loudly, which is the intent.
-#[cfg(any(windows, target_os = "macos"))]
-fn os_aec_or_fallback_cpal(config: &Config) -> Result<AudioPair, AppError> {
-    let input_device = config.audio.input_device.as_deref();
-    let output_device = config.audio.output_device.as_deref();
+pub fn open_audio_pair(audio: &AudioSection) -> Result<AudioPair, AudioError> {
+    let input = audio.input_device.as_deref();
+    let output = audio.output_device.as_deref();
 
-    if !should_use_os_echo_cancellation(config) {
-        eprintln!(
-            "uia: OS echo cancellation disabled via config (audio.aec_enabled = false); \
-             opening plain audio devices"
-        );
-        return Ok((
-            Box::new(uia_audio::input::CpalSource::input(input_device)?),
-            Box::new(uia_audio::output::CpalSink::output(output_device)?),
-        ));
+    #[cfg(any(windows, target_os = "macos"))]
+    {
+        if !should_use_os_echo_cancellation(audio) {
+            eprintln!(
+                "uia: OS echo cancellation disabled via config (audio.aec_enabled = false); \
+                 opening plain audio devices"
+            );
+            return open_plain(input, output);
+        }
+        match open_os_aec(input, output) {
+            Ok(pair) => Ok(pair),
+            Err(reason) => {
+                eprintln!(
+                    "uia: could not open the {OS_AEC_NAME} ({reason}); falling back to plain \
+                     devices WITHOUT echo cancellation — the assistant may hear itself through \
+                     speakers"
+                );
+                open_plain(input, output)
+            }
+        }
     }
 
-    match open_os_aec(input_device, output_device) {
-        Ok(pair) => Ok(pair),
-        Err(reason) => {
-            eprintln!(
-                "uia: could not open the {OS_AEC_NAME} ({reason}); falling back to plain \
-                 devices WITHOUT echo cancellation — the assistant may hear itself through \
-                 speakers"
-            );
-            Ok((
-                Box::new(uia_audio::input::CpalSource::input(input_device)?),
-                Box::new(uia_audio::output::CpalSink::output(output_device)?),
-            ))
+    #[cfg(not(any(windows, target_os = "macos")))]
+    {
+        let (source, sink) = open_plain(input, output)?;
+        #[cfg(feature = "aec")]
+        let (source, sink) = wrap_with_aec_if_rates_match(source, sink, audio)?;
+        Ok((source, sink))
+    }
+}
+
+/// The swap a Save asks the running session for, or `None` when it changed
+/// nothing the session uses. A device or echo-cancellation change hands over
+/// an opener for the whole pair, which the session runs only once it has
+/// dropped the old one; a threshold-only change leaves the devices open.
+pub fn audio_swap_for(next: &AudioSection, change: AudioChange) -> Option<AudioSwap> {
+    let open: Option<AudioOpener> = match change {
+        AudioChange::Unchanged => return None,
+        AudioChange::ThresholdOnly => None,
+        AudioChange::Devices => {
+            let audio = next.clone();
+            Some(Box::new(move || open_audio_pair(&audio)))
         }
+    };
+    Some(AudioSwap {
+        open,
+        barge_in_threshold: next.barge_in_threshold,
+    })
+}
+
+/// Why the Linux `aec` feature does or does not wrap a freshly opened pair.
+#[cfg_attr(
+    not(any(test, all(feature = "aec", not(any(windows, target_os = "macos"))))),
+    expect(dead_code)
+)]
+#[derive(Debug, PartialEq, Eq)]
+enum AecWrap {
+    /// Both devices are open at this one rate.
+    At(u32),
+    /// A device is waiting to appear, so its rate is not known yet (a
+    /// waiting port reports 0 Hz). Wrapping at the other side's rate would
+    /// fail, and a failure here used to reopen the defaults instead of the
+    /// pinned devices.
+    DeviceNotOpenYet,
+    /// The devices' native rates disagree.
+    RatesDiffer,
+}
+
+#[cfg_attr(
+    not(any(test, all(feature = "aec", not(any(windows, target_os = "macos"))))),
+    expect(dead_code)
+)]
+fn aec_wrap(capture_hz: u32, playback_hz: u32, either_waiting: bool) -> AecWrap {
+    if either_waiting || capture_hz == 0 || playback_hz == 0 {
+        AecWrap::DeviceNotOpenYet
+    } else if capture_hz != playback_hz {
+        AecWrap::RatesDiffer
+    } else {
+        AecWrap::At(capture_hz)
     }
 }
 
 /// Wraps `source`/`sink` for echo cancellation, unless their devices' native
-/// rates disagree.
+/// rates disagree or either device is still waiting to appear.
 ///
 /// `EchoCancellerConfig` carries one `sample_rate_hz` for both streams: the
 /// far-end reference (`sink.write`) and the near-end capture (`source.next_frame`)
@@ -750,41 +829,61 @@ fn os_aec_or_fallback_cpal(config: &Config) -> Result<AudioPair, AppError> {
 /// speed relative to the near-end signal — worse than no cancellation at all,
 /// since a misaligned reference can suppress the wrong parts of the real
 /// voice. Skipping is silent-safe; mismatched-and-wrapped is not.
+///
+/// The decision is made once, at open: a pair opened while a device waits
+/// runs without AEC3 until the next open (a Save or a restart). The feature
+/// is a developer build only, so that is preferred to a second wrap path.
 #[cfg(all(feature = "aec", not(any(windows, target_os = "macos"))))]
 fn wrap_with_aec_if_rates_match(
-    source: Box<dyn AudioSource>,
-    sink: Box<dyn AudioSink>,
-) -> Result<(Box<dyn AudioSource>, Box<dyn AudioSink>), AppError> {
+    source: Box<dyn uia_core::audio::AudioSource>,
+    sink: Box<dyn uia_core::audio::AudioSink>,
+    audio: &AudioSection,
+) -> Result<AudioPair, AudioError> {
     use uia_audio::aec::{EchoCancellerConfig, wrap_with_echo_cancellation};
 
     let capture_rate = source.format().sample_rate_hz;
     let playback_rate = sink.format().sample_rate_hz;
-    if capture_rate != playback_rate {
-        eprintln!(
-            "uia: AEC needs matching capture/playback device rates (got {capture_rate} Hz \
-             capture vs {playback_rate} Hz playback); skipping echo cancellation"
-        );
-        return Ok((source, sink));
-    }
+    let is_waiting =
+        |cell: Option<uia_core::audio::WaitingCell>| cell.is_some_and(|cell| cell.get().is_some());
+    let either_waiting = is_waiting(source.waiting()) || is_waiting(sink.waiting());
+    let rate = match aec_wrap(capture_rate, playback_rate, either_waiting) {
+        AecWrap::At(rate) => rate,
+        AecWrap::DeviceNotOpenYet => {
+            eprintln!(
+                "uia: an audio device is still waiting to appear; skipping echo cancellation \
+                 until the devices are next opened"
+            );
+            return Ok((source, sink));
+        }
+        AecWrap::RatesDiffer => {
+            eprintln!(
+                "uia: AEC needs matching capture/playback device rates (got {capture_rate} Hz \
+                 capture vs {playback_rate} Hz playback); skipping echo cancellation"
+            );
+            return Ok((source, sink));
+        }
+    };
     let cfg = EchoCancellerConfig {
         enabled: true,
-        sample_rate_hz: capture_rate,
+        sample_rate_hz: rate,
     };
     match wrap_with_echo_cancellation(source, sink, cfg) {
         Ok(wrapped) => Ok(wrapped),
         // `wrap_with_echo_cancellation` consumes `source`/`sink` and does not
         // hand them back on error (`EchoCanceller::new` fails before either
         // wrapper type exists), so recovering means reopening fresh devices
-        // rather than reusing the originals — they are already gone.
+        // rather than reusing the originals — they are already gone. The
+        // same pinned names, never the defaults: a pinned device is never
+        // replaced by another one.
         Err(e) => {
             eprintln!(
                 "uia: echo canceller failed to initialise ({e}), reopening \
                  the audio devices without it"
             );
-            let source: Box<dyn AudioSource> =
-                Box::new(uia_audio::input::CpalSource::default_input()?);
-            let sink: Box<dyn AudioSink> = Box::new(uia_audio::output::CpalSink::default_output()?);
-            Ok((source, sink))
+            open_plain(
+                audio.input_device.as_deref(),
+                audio.output_device.as_deref(),
+            )
         }
     }
 }
@@ -841,27 +940,7 @@ pub async fn build_session(
     // Where each connected server's alerts go.
     alerts: &AlertFeeds,
 ) -> Result<Session, AppError> {
-    // The two echo-cancellation paths are mutually exclusive, and the `not(...)`
-    // here is what makes that a compile-time guarantee rather than a rule
-    // someone has to remember: without it the `aec` call site would still be
-    // compiled in on Windows or macOS for anyone who also passed
-    // `--features aec`, and the assistant's audio would be filtered twice —
-    // once by the OS beneath the app, once by AEC3 on top of it.
-    #[cfg(any(windows, target_os = "macos"))]
-    let (source, sink) = os_aec_or_fallback_cpal(config)?;
-
-    #[cfg(not(any(windows, target_os = "macos")))]
-    let (source, sink): AudioPair = {
-        let source: Box<dyn AudioSource> = Box::new(uia_audio::input::CpalSource::input(
-            config.audio.input_device.as_deref(),
-        )?);
-        let sink: Box<dyn AudioSink> = Box::new(uia_audio::output::CpalSink::output(
-            config.audio.output_device.as_deref(),
-        )?);
-        #[cfg(feature = "aec")]
-        let (source, sink) = wrap_with_aec_if_rates_match(source, sink)?;
-        (source, sink)
-    };
+    let (source, sink) = open_audio_pair(&config.audio)?;
 
     let mut session = Session::new(SessionDeps {
         source,
@@ -2036,16 +2115,67 @@ mod tests {
         );
     }
 
+    fn audio_section(threshold: f32) -> crate::config::AudioSection {
+        crate::config::AudioSection {
+            aec_enabled: true,
+            input_device: Some("A mic that is not plugged in".into()),
+            output_device: None,
+            barge_in_threshold: Some(threshold),
+        }
+    }
+
+    #[test]
+    fn no_change_requests_no_swap() {
+        assert!(audio_swap_for(&audio_section(0.05), AudioChange::Unchanged).is_none());
+    }
+
+    #[test]
+    fn a_threshold_only_change_swaps_the_threshold_alone() {
+        let swap = audio_swap_for(&audio_section(0.07), AudioChange::ThresholdOnly)
+            .expect("a threshold change is a swap");
+        assert!(
+            swap.open.is_none(),
+            "a threshold change must reopen nothing"
+        );
+        assert_eq!(swap.barge_in_threshold, Some(0.07));
+    }
+
+    /// The opener is built but never called here: calling it opens real
+    /// devices, and the session is what decides when that is safe.
+    #[test]
+    fn a_device_change_swaps_in_an_opener() {
+        let swap = audio_swap_for(&audio_section(0.07), AudioChange::Devices)
+            .expect("a device change is a swap");
+        assert!(swap.open.is_some(), "a device change must reopen the pair");
+        assert_eq!(swap.barge_in_threshold, Some(0.07));
+    }
+
+    /// A waiting port reports 0 Hz until its device first opens. Wrapping
+    /// then would fail and reopen the defaults, replacing a pinned device.
+    #[test]
+    fn a_pair_with_a_device_still_waiting_is_not_wrapped_for_echo_cancellation() {
+        assert_eq!(aec_wrap(48_000, 0, true), AecWrap::DeviceNotOpenYet);
+        assert_eq!(aec_wrap(0, 48_000, true), AecWrap::DeviceNotOpenYet);
+        assert_eq!(aec_wrap(48_000, 48_000, true), AecWrap::DeviceNotOpenYet);
+        assert_eq!(aec_wrap(0, 0, false), AecWrap::DeviceNotOpenYet);
+    }
+
+    #[test]
+    fn open_devices_are_wrapped_only_when_their_rates_agree() {
+        assert_eq!(aec_wrap(48_000, 48_000, false), AecWrap::At(48_000));
+        assert_eq!(aec_wrap(48_000, 44_100, false), AecWrap::RatesDiffer);
+    }
+
     #[test]
     fn aec_enabled_defaults_to_using_os_echo_cancellation() {
-        assert!(should_use_os_echo_cancellation(&config("")));
+        assert!(should_use_os_echo_cancellation(&config("").audio));
     }
 
     #[test]
     fn aec_disabled_in_config_reaches_the_os_composition_decision() {
-        assert!(!should_use_os_echo_cancellation(&config(
-            "[audio]\naec_enabled = false\n"
-        )));
+        assert!(!should_use_os_echo_cancellation(
+            &config("[audio]\naec_enabled = false\n").audio
+        ));
     }
 
     fn persona(id: &str, archetype: &str) -> crate::personas::Persona {
