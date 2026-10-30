@@ -359,6 +359,12 @@ UIA listens with `subscriptions/listen` and the server announces changes with
 still connects and its tools work, but it gets no alerts: UIA logs one info
 line and stops. There is no fallback to the deprecated `resources/subscribe`.
 
+A server on 2026-07-28 that has no feed yet is still listened to, for
+`notifications/resources/list_changed` only, so a feed added later is found
+without reconnecting. If an alert stream ends abruptly while the server is
+still connected, UIA reopens it after 5 s (once per outage; a stream that then
+stays up earns a new reopen).
+
 ### Finding the feed
 
 - **Discovery (default).** Every resource whose `resources/list` entry has

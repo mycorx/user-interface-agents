@@ -24,8 +24,8 @@ use tauri::tray::TrayIconBuilder;
 use tauri::{AppHandle, Emitter, Manager};
 use uia_app::activation_desktop::{self, DEFAULT_ACCELERATOR, activation_event_for_menu_id};
 use uia_app::alerts::{
-    AlertEnv, CardQueue, Coordinator, LiveAlertSettings, TextTurns, UiState, text_turns_from,
-    ui_state_from,
+    AlertEnv, CardQueue, Coordinator, LiveAlertSettings, SessionStateFeed, TextTurns, UiState,
+    text_turns_from, ui_state_from,
 };
 use uia_app::config::{AudioSection, Config, EngineChoice};
 use uia_app::hud::{
@@ -198,23 +198,6 @@ struct AlertCards(Mutex<CardQueue>);
 /// engine whose typed-turn support is `Unknown` open a session for an alert.
 struct TypedTurnSeen(Arc<AtomicBool>);
 
-/// The session's current state, and every change of it, for the alert
-/// coordinator. `emit_state` sets and sends under the lock, so a reader that
-/// takes the current value under the same lock and discards what is queued
-/// sees each later change exactly once, in order.
-struct SessionStateFeed {
-    current: Mutex<uia_core::session::State>,
-    changes: tokio::sync::mpsc::UnboundedSender<uia_core::session::State>,
-}
-
-impl SessionStateFeed {
-    fn set(&self, state: uia_core::session::State) {
-        let mut current = self.current.lock().unwrap_or_else(|e| e.into_inner());
-        *current = state;
-        let _ = self.changes.send(state);
-    }
-}
-
 /// The coordinator's window, session and card effects.
 struct AppAlertEnv {
     app: AppHandle,
@@ -350,13 +333,9 @@ async fn run_alert_coordinator(
         typed_turn_seen,
     });
     let mut coordinator = Coordinator::new(env, ALERT_HOLD_TIMEOUT);
-    let current = {
-        let feed = app.state::<SessionStateFeed>();
-        let current = feed.current.lock().unwrap_or_else(|e| e.into_inner());
-        // Everything queued so far is already reflected in `current`.
-        while states.try_recv().is_ok() {}
-        *current
-    };
+    let current = app
+        .state::<SessionStateFeed>()
+        .snapshot_and_drain(&mut states);
     coordinator.on_state(current, std::time::Instant::now());
 
     let mut tick = tokio::time::interval(std::time::Duration::from_secs(1));
@@ -621,7 +600,7 @@ fn main() {
     // and `run_alert_coordinator` (started in `setup`) drains it.
     let live_alerts = Arc::new(LiveAlertSettings::from_registry(&mcp_registry));
     let (alert_tx, alert_rx) = tokio::sync::mpsc::unbounded_channel::<Alert>();
-    let (state_tx, state_rx) = tokio::sync::mpsc::unbounded_channel();
+    let (state_feed, state_rx) = SessionStateFeed::new(uia_core::session::State::Idle);
     let typed_turn_seen = Arc::new(AtomicBool::new(false));
     let alert_feeds = uia_app::session::AlertFeeds {
         settings: live_alerts.clone(),
@@ -677,10 +656,7 @@ fn main() {
         .manage(LiveAlerts(live_alerts))
         .manage(AlertCards(Mutex::new(CardQueue::default())))
         .manage(TypedTurnSeen(typed_turn_seen))
-        .manage(SessionStateFeed {
-            current: Mutex::new(uia_core::session::State::Idle),
-            changes: state_tx,
-        })
+        .manage(state_feed)
         .invoke_handler(tauri::generate_handler![
             set_engine,
             get_engine,

@@ -29,6 +29,8 @@ const TITLE_CAP: usize = 100;
 const SEEN_CAP: usize = 256;
 /// Entries created this recently survive the baseline read.
 const BASELINE_GRACE: Duration = Duration::from_secs(60);
+/// How far ahead of our clock a `created_at` may be and still count as fresh.
+const MAX_CLOCK_SKEW: Duration = Duration::from_secs(60);
 const RATE_LIMIT: usize = 30;
 const RATE_WINDOW: Duration = Duration::from_secs(60);
 
@@ -178,8 +180,10 @@ fn is_recent(created_at: Option<&str>, now: SystemTime) -> bool {
     let created: SystemTime = created.into();
     match now.duration_since(created) {
         Ok(age) => age <= BASELINE_GRACE,
-        // Created in the future (clock skew): fresh.
-        Err(_) => true,
+        // Created slightly in the future (clock skew): fresh. Further ahead
+        // is a broken clock, and counting it fresh would replay the feed on
+        // every start.
+        Err(ahead) => ahead.duration() <= MAX_CLOCK_SKEW,
     }
 }
 
@@ -388,6 +392,26 @@ mod tests {
         let fresh = aged(alert("s", Some("b"), None, "fresh"), 30);
         let shown = gate.admit(vec![old, fresh.clone()], now());
         assert_eq!(shown, vec![fresh]);
+    }
+
+    fn dated_ahead(mut a: Alert, seconds: u64) -> Alert {
+        let at = DateTime::from_timestamp((NOW_SECS + seconds) as i64, 0).unwrap();
+        a.created_at = Some(at.to_rfc3339());
+        a
+    }
+
+    #[test]
+    fn an_entry_dated_slightly_in_the_future_is_still_shown_by_the_baseline() {
+        let mut gate = AlertGate::new();
+        let skewed = dated_ahead(alert("s", Some("a"), None, "skewed"), 30);
+        assert_eq!(gate.admit(vec![skewed.clone()], now()), vec![skewed]);
+    }
+
+    #[test]
+    fn an_entry_dated_far_in_the_future_is_not_shown_by_the_baseline() {
+        let mut gate = AlertGate::new();
+        let broken = dated_ahead(alert("s", Some("a"), None, "broken clock"), 3600);
+        assert!(gate.admit(vec![broken], now()).is_empty());
     }
 
     #[test]

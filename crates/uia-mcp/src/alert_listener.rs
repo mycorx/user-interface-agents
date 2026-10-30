@@ -70,7 +70,7 @@ impl ReopenBudget {
     }
 }
 
-/// Watch `server`'s alert feeds until it has none, rejects
+/// Watch `server`'s alert feeds until it rejects
 /// `subscriptions/listen`, the connection drops or `sink` closes.
 ///
 /// Discovers feeds (the `alert_resource` override, else every resource with

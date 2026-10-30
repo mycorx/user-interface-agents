@@ -113,9 +113,13 @@ whose `resources/list` entry has `mimeType: "application/vnd.uia.alerts+json"`.
 - On `notifications/resources/list_changed`: rediscover and reopen the
   stream with the new feed list.
 - If the server rejects `subscriptions/listen` (older protocol) or
-  acknowledges no feed URIs: log once at info, stop; no retries.
+  acknowledges neither a feed URI nor `resources_list_changed`: log once at
+  info, stop; no retries.
+- A server on 2026-07-28 with no feed yet keeps a list-changed-only listen
+  open, so a feed added later is found on `list_changed`.
 - When the stream ends abruptly while the server is still connected, reopen
-  it once after 5 s (my call); the connection's own reconnect covers the rest.
+  it after 5 s, once per outage (a stream that then stays up earns a new
+  reopen); the connection's own reconnect covers the rest.
 - `McpExecutor` keeps its `()` client handler; listening uses the peer, not
   handler callbacks. Re-export any new rmcp type through `uia-mcp/src/lib.rs`;
   `uia-app` takes no direct rmcp dependency.

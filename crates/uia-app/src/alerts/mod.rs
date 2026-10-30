@@ -7,10 +7,12 @@
 mod cards;
 mod coordinator;
 mod live;
+mod state_feed;
 
 pub use cards::{CardQueue, MAX_CARDS};
 pub use coordinator::{AlertEnv, Coordinator};
 pub use live::{LiveAlertSettings, text_turns_from, ui_state_from};
+pub use state_feed::SessionStateFeed;
 
 use uia_core::session::State;
 use uia_mcp::alert::Alert;

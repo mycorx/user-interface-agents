@@ -198,41 +198,6 @@ pub fn http_transport_config(
     Ok(config)
 }
 
-/// Recovers a `WWW-Authenticate` challenge from a failed `initialize`
-/// handshake, if that is why it failed.
-///
-/// `rmcp::service::ClientInitializeError::TransportError` boxes the transport
-/// error as `Box<dyn std::error::Error + Send + Sync>` (its `DynamicTransportError`
-/// payload's `error` field is public exactly so a caller can walk it), so this
-/// downcasts through the `source()` chain looking for the one concrete type
-/// that carries the header: `StreamableHttpError::AuthRequired`'s own
-/// `#[source] AuthRequiredError`. `StreamableHttpError` never appears in this
-/// function's signature — only the extracted `String` crosses back out — so
-/// nothing about this leaks the boundary this module exists to hold.
-fn auth_challenge_from_initialize_error(
-    err: &rmcp::service::ClientInitializeError,
-) -> Option<String> {
-    let error = match err {
-        rmcp::service::ClientInitializeError::TransportError { error, .. } => error,
-        // Under `Auto`, a legacy HTTP server can reject `server/discover` and
-        // then demand auth at `initialize`; the challenge is in the fallback.
-        rmcp::service::ClientInitializeError::LegacyFallbackFailed { fallback, .. } => {
-            return auth_challenge_from_initialize_error(fallback);
-        }
-        _ => return None,
-    };
-    let mut current: Option<&(dyn std::error::Error + 'static)> = Some(error.error.as_ref());
-    while let Some(e) = current {
-        if let Some(auth_required) =
-            e.downcast_ref::<rmcp::transport::streamable_http_client::AuthRequiredError>()
-        {
-            return Some(auth_required.www_authenticate_header.clone());
-        }
-        current = e.source();
-    }
-    None
-}
-
 /// The error's text, using the fallback's own message for
 /// `LegacyFallbackFailed` (whose `Display` is only "both failed").
 fn initialize_error_text(err: &ClientInitializeError) -> String {
@@ -407,8 +372,8 @@ impl McpExecutor {
                     // than report "unreachable") needs that header, so it is
                     // recovered here, behind the one boundary that already
                     // depends on rmcp, and handed across as a plain `String`.
-                    auth_challenge_from_initialize_error(&e)
-                        .map(ToolError::AuthRequired)
+                    e.auth_challenge()
+                        .map(|header| ToolError::AuthRequired(header.to_owned()))
                         .unwrap_or_else(|| ToolError::Transport(initialize_error_text(&e)))
                 })?;
                 Ok(Self {
@@ -714,10 +679,7 @@ mod tests {
         }
     }
 
-    /// The HTTP transport must be built through `AuthedHttpClient`, or the provider is
-    /// decorative: a token that is fetched but never reaches a request changes nothing.
-    /// This asserts the wiring exists at the type level, which is what a later OAuth
-    /// provider depends on.
+    /// A 401 during the legacy `initialize` fallback still yields the challenge.
     #[test]
     fn an_auth_challenge_in_the_legacy_fallback_phase_is_still_recovered() {
         use rmcp::transport::streamable_http_client::{AuthRequiredError, StreamableHttpError};
@@ -733,10 +695,7 @@ mod tests {
             discover: Box::new(discover),
             fallback: Box::new(auth),
         };
-        assert_eq!(
-            auth_challenge_from_initialize_error(&err).as_deref(),
-            Some("Bearer realm=\"x\"")
-        );
+        assert_eq!(err.auth_challenge(), Some("Bearer realm=\"x\""));
         // The message keeps the fallback's detail, not just "both failed".
         assert!(initialize_error_text(&err).contains("send initialize"));
     }
@@ -755,6 +714,10 @@ mod tests {
         );
     }
 
+    /// The HTTP transport must be built through `AuthedHttpClient`, or the provider is
+    /// decorative: a token that is fetched but never reaches a request changes nothing.
+    /// This asserts the wiring exists at the type level, which is what a later OAuth
+    /// provider depends on.
     #[tokio::test]
     async fn connect_with_a_token_provider_is_available_for_http() {
         // A dead port: this test is about the construction path, not about reaching a
