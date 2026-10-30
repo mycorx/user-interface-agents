@@ -274,7 +274,7 @@ unsafe extern "C-unwind" fn render_callback(
         let out = unsafe { std::slice::from_raw_parts_mut(buffer.mData.cast::<f32>(), floats) };
         if index == 0 {
             // The client format is mono (see `client_format`).
-            ctx.shared.playback.fill(out, 1);
+            ctx.shared.playback.try_fill(out, 1);
         } else {
             out.fill(0.0);
         }

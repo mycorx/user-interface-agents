@@ -7,7 +7,7 @@
 use crate::level::PlaybackLevel;
 use std::collections::VecDeque;
 use std::sync::atomic::{AtomicU64, Ordering};
-use std::sync::{Arc, Mutex};
+use std::sync::{Arc, Mutex, MutexGuard, PoisonError, TryLockError};
 
 /// A device's sample rate and channel count, published as one word.
 ///
@@ -54,16 +54,23 @@ pub(crate) struct PlaybackQueue {
 // Only the cpal legs consume this so far.
 #[cfg_attr(not(feature = "cpal-io"), allow(dead_code))]
 impl PlaybackQueue {
+    /// The queue, recovered if a panicking holder poisoned it: a `VecDeque`
+    /// of samples has no invariant a half-finished `extend` can break, and a
+    /// panic here would take the session (or the audio thread) down with it.
+    fn samples(&self) -> MutexGuard<'_, VecDeque<i16>> {
+        self.samples.lock().unwrap_or_else(PoisonError::into_inner)
+    }
+
     pub(crate) fn push(&self, frame: &[i16]) {
-        self.samples.lock().unwrap().extend(frame.iter().copied());
+        self.samples().extend(frame.iter().copied());
     }
 
     pub(crate) fn clear(&self) {
-        self.samples.lock().unwrap().clear();
+        self.samples().clear();
     }
 
     pub(crate) fn len(&self) -> usize {
-        self.samples.lock().unwrap().len()
+        self.samples().len()
     }
 
     pub(crate) fn level(&self) -> f32 {
@@ -72,24 +79,33 @@ impl PlaybackQueue {
 
     /// The device callback body: fill `out`, interleaved over `channels`.
     ///
+    /// Runs on the device's real-time thread, so it never blocks: when
+    /// `push` or `clear` holds the queue (an `extend` can reallocate), this
+    /// period plays silence and records level 0 rather than waiting on a
+    /// tokio thread. A poisoned queue is recovered, never unwrapped -- a
+    /// panic here would unwind into an `extern "C-unwind"` callback.
+    ///
     /// The engine speaks mono, one queued sample per audio frame. A stereo
     /// (or wider) device interleaves N slots per frame, so each queued sample
     /// fans out to every slot in its frame -- popping one per *slot* would
     /// play two mono samples across L/R, halving playback duration and
     /// pitching the voice up like an unresampled rate mismatch does.
-    pub(crate) fn fill(&self, out: &mut [f32], channels: usize) {
-        let mut queue = self.samples.lock().unwrap();
-        for frame in out.chunks_mut(channels.max(1)) {
-            let sample = match queue.pop_front() {
-                Some(s) => f32::from(s) / 32768.0,
-                // Starved: pad with silence rather than block.
-                None => 0.0,
-            };
-            for slot in frame {
-                *slot = sample;
+    pub(crate) fn try_fill(&self, out: &mut [f32], channels: usize) {
+        let queue = match self.samples.try_lock() {
+            Ok(queue) => Some(queue),
+            Err(TryLockError::Poisoned(poisoned)) => Some(poisoned.into_inner()),
+            Err(TryLockError::WouldBlock) => None,
+        };
+        match queue {
+            Some(mut queue) => {
+                for frame in out.chunks_mut(channels.max(1)) {
+                    // Starved: pad with silence rather than block.
+                    let sample = queue.pop_front().map_or(0.0, |s| f32::from(s) / 32768.0);
+                    frame.fill(sample);
+                }
             }
+            None => out.fill(0.0),
         }
-        drop(queue);
         self.level.record(out);
     }
 }
@@ -111,25 +127,78 @@ mod tests {
     }
 
     #[test]
-    fn fill_fans_one_sample_across_every_channel_of_a_frame() {
+    fn try_fill_fans_one_sample_across_every_channel_of_a_frame() {
         let queue = PlaybackQueue::default();
         queue.push(&[16_384, -16_384]);
         let mut out = [9.0f32; 6];
-        queue.fill(&mut out, 3);
+        queue.try_fill(&mut out, 3);
         assert_eq!(out, [0.5, 0.5, 0.5, -0.5, -0.5, -0.5]);
         assert_eq!(queue.len(), 0, "one sample consumed per frame");
         assert!(queue.level() > 0.0);
     }
 
     #[test]
-    fn fill_pads_with_silence_when_starved_and_records_zero_level() {
+    fn try_fill_pads_with_silence_when_starved_and_records_zero_level() {
         let queue = PlaybackQueue::default();
         queue.push(&[16_384]);
         let mut out = [0.0f32; 4];
-        queue.fill(&mut out, 2);
+        queue.try_fill(&mut out, 2);
         assert!(queue.level() > 0.0);
-        queue.fill(&mut out, 2);
+        queue.try_fill(&mut out, 2);
         assert_eq!(out, [0.0; 4]);
+        assert_eq!(queue.level(), 0.0);
+    }
+
+    /// `push` or `clear` holding the queue when the callback fires means
+    /// silence for one period, never a blocked audio thread.
+    #[test]
+    fn a_contended_queue_plays_silence_and_records_zero_level() {
+        let queue = PlaybackQueue::default();
+        queue.push(&[16_384, 16_384]);
+        let mut out = [0.0f32; 2];
+        queue.try_fill(&mut out[..1], 1);
+        assert!(queue.level() > 0.0);
+        let held = queue.samples.lock().unwrap();
+        let mut out = [9.0f32; 4];
+        queue.try_fill(&mut out, 2);
+        drop(held);
+        assert_eq!(out, [0.0; 4]);
+        assert_eq!(queue.level(), 0.0);
+        assert_eq!(queue.len(), 1, "a contended period consumes nothing");
+    }
+
+    /// A holder that panicked must not silence playback for good, nor panic
+    /// the real-time thread.
+    #[test]
+    fn a_poisoned_queue_keeps_playing() {
+        let queue = PlaybackQueue::default();
+        queue.push(&[16_384]);
+        let poisoner = queue.clone();
+        let _ = std::thread::spawn(move || {
+            let _held = poisoner.samples.lock().unwrap();
+            panic!("poison the playback queue");
+        })
+        .join();
+        assert!(queue.samples.is_poisoned());
+        let mut out = [0.0f32; 1];
+        queue.try_fill(&mut out, 1);
+        assert_eq!(out, [0.5]);
+        queue.push(&[-16_384]);
+        assert_eq!(queue.len(), 1);
+        queue.clear();
+        assert_eq!(queue.len(), 0);
+    }
+
+    /// Barge-in: everything queued is dropped, so the next period is silence.
+    #[test]
+    fn clear_drops_every_queued_sample() {
+        let queue = PlaybackQueue::default();
+        queue.push(&[16_384, 16_384, 16_384]);
+        queue.clear();
+        assert_eq!(queue.len(), 0);
+        let mut out = [9.0f32; 3];
+        queue.try_fill(&mut out, 1);
+        assert_eq!(out, [0.0; 3]);
         assert_eq!(queue.level(), 0.0);
     }
 }

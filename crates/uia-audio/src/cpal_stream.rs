@@ -400,7 +400,9 @@ impl Supervisor {
                 let slots = usize::from(channels.max(1));
                 device.build_output_stream(
                     stream_config,
-                    move |data: &mut [f32], _: &cpal::OutputCallbackInfo| queue.fill(data, slots),
+                    move |data: &mut [f32], _: &cpal::OutputCallbackInfo| {
+                        queue.try_fill(data, slots)
+                    },
                     on_error,
                     None,
                 )
