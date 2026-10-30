@@ -55,6 +55,34 @@ pub struct DeclaredTool {
     pub description: String,
 }
 
+fn default_show() -> bool {
+    true
+}
+
+/// What to do with the alerts one server pushes. `show` off silences the
+/// server completely, even if `wake_agent` is on; `wake_agent` only applies
+/// while `show` is on. `alert_resource` overrides the feed resource URI and
+/// has no UI, it is edited in the JSON.
+#[derive(Debug, Serialize, Deserialize, PartialEq, Clone)]
+pub struct AlertSettings {
+    #[serde(default = "default_show")]
+    pub show: bool,
+    #[serde(default)]
+    pub wake_agent: bool,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub alert_resource: Option<String>,
+}
+
+impl Default for AlertSettings {
+    fn default() -> Self {
+        Self {
+            show: true,
+            wake_agent: false,
+            alert_resource: None,
+        }
+    }
+}
+
 /// A local server installed from a `.mcpb`. The bundle's own files live in
 /// `mcp_local_servers_dir_for(..)/<name>/`; this is only the record that it was
 /// installed and whether the user has enabled it.
@@ -74,6 +102,8 @@ pub struct LocalServerEntry {
     /// is already gone.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub sensitive_keys: Vec<String>,
+    #[serde(default)]
+    pub alerts: AlertSettings,
 }
 
 /// How a remote server authenticates. `Static` is a pasted header (the
@@ -126,6 +156,8 @@ pub struct RemoteEntry {
     /// redaction. Populated only when `auth == RemoteAuth::OAuth`.
     #[serde(default)]
     pub oauth_client_id: Option<String>,
+    #[serde(default)]
+    pub alerts: AlertSettings,
 }
 
 /// The placeholder a set header value is printed as — the same literal
@@ -164,6 +196,7 @@ impl std::fmt::Debug for RemoteEntry {
             .field("tools", &self.tools)
             .field("auth", &self.auth)
             .field("oauth_client_id", &self.oauth_client_id)
+            .field("alerts", &self.alerts)
             .finish()
     }
 }
@@ -745,6 +778,40 @@ impl McpRegistry {
         Ok(())
     }
 
+    /// Stores the alert settings of the server called `server`, local or
+    /// remote (names are unique across both, see `name_taken`). Returns
+    /// false when there is no such server. `wake_agent` is forced off while
+    /// `show` is off, so the file never holds a combination that means nothing.
+    pub fn set_alerts(&mut self, server: &str, mut alerts: AlertSettings) -> bool {
+        if !alerts.show {
+            alerts.wake_agent = false;
+        }
+        if let Some(l) = self.local_servers.iter_mut().find(|l| l.name == server) {
+            l.alerts = alerts;
+            true
+        } else if let Some(r) = self.remote_servers.iter_mut().find(|r| r.name == server) {
+            r.alerts = alerts;
+            true
+        } else {
+            false
+        }
+    }
+
+    /// The alert settings of `server`, or the defaults when it is unknown.
+    pub fn alerts_for(&self, server: &str) -> AlertSettings {
+        self.local_servers
+            .iter()
+            .find(|l| l.name == server)
+            .map(|l| l.alerts.clone())
+            .or_else(|| {
+                self.remote_servers
+                    .iter()
+                    .find(|r| r.name == server)
+                    .map(|r| r.alerts.clone())
+            })
+            .unwrap_or_default()
+    }
+
     pub fn remove_remote(&mut self, name: &str) -> Result<(), RegistryError> {
         let before = self.remote_servers.len();
         self.remote_servers.retain(|r| r.name != name);
@@ -817,6 +884,7 @@ pub fn remote_entry_from(
         // already describe a pasted-header (or no-auth) server.
         auth: RemoteAuth::Static,
         oauth_client_id: None,
+        alerts: AlertSettings::default(),
     })
 }
 
@@ -1548,6 +1616,7 @@ mod tests {
             }],
             auth: RemoteAuth::Static,
             oauth_client_id: None,
+            alerts: AlertSettings::default(),
         }
     }
 
@@ -1636,6 +1705,90 @@ mod tests {
         let loaded = load(&path);
         std::fs::remove_dir_all(path.parent().unwrap()).ok();
         assert_eq!(loaded, McpRegistry::default());
+    }
+
+    #[test]
+    fn an_old_registry_file_without_alerts_loads_with_show_on_and_wake_off() {
+        let old = r#"{"local_servers":[{"name":"clock","enabled":true}],
+            "remote_servers":[{"name":"docs","url":"https://docs.test/mcp"}]}"#;
+        let reg: McpRegistry = serde_json::from_str(old).unwrap();
+        let expected = AlertSettings {
+            show: true,
+            wake_agent: false,
+            alert_resource: None,
+        };
+        assert_eq!(reg.local_servers[0].alerts, expected);
+        assert_eq!(reg.remote_servers[0].alerts, expected);
+    }
+
+    #[test]
+    fn a_saved_registry_round_trips_the_alert_settings() {
+        let path = temp_path("alerts-roundtrip");
+        let mut reg = McpRegistry {
+            local_servers: vec![LocalServerEntry {
+                name: "clock".into(),
+                ..Default::default()
+            }],
+            remote_servers: vec![remote("docs")],
+        };
+        assert!(reg.set_alerts(
+            "clock",
+            AlertSettings {
+                show: true,
+                wake_agent: true,
+                alert_resource: Some("mcp://clock/feed".into()),
+            }
+        ));
+        assert!(reg.set_alerts(
+            "docs",
+            AlertSettings {
+                show: false,
+                wake_agent: false,
+                alert_resource: None,
+            }
+        ));
+
+        save(&path, &reg).unwrap();
+        let back = load(&path);
+        std::fs::remove_dir_all(path.parent().unwrap()).ok();
+
+        assert_eq!(back, reg);
+        assert!(back.local_servers[0].alerts.wake_agent);
+        assert!(!back.remote_servers[0].alerts.show);
+    }
+
+    #[test]
+    fn wake_agent_is_forced_off_when_show_is_off_on_save() {
+        let mut reg = McpRegistry {
+            local_servers: vec![LocalServerEntry {
+                name: "clock".into(),
+                ..Default::default()
+            }],
+            remote_servers: vec![remote("docs")],
+        };
+        let silent_but_waking = AlertSettings {
+            show: false,
+            wake_agent: true,
+            alert_resource: None,
+        };
+        assert!(reg.set_alerts("clock", silent_but_waking.clone()));
+        assert!(reg.set_alerts("docs", silent_but_waking));
+        assert!(!reg.local_servers[0].alerts.wake_agent);
+        assert!(!reg.remote_servers[0].alerts.wake_agent);
+    }
+
+    #[test]
+    fn set_alerts_on_an_unknown_server_returns_false() {
+        let mut reg = McpRegistry {
+            local_servers: vec![LocalServerEntry {
+                name: "clock".into(),
+                ..Default::default()
+            }],
+            remote_servers: vec![remote("docs")],
+        };
+        let before = reg.clone();
+        assert!(!reg.set_alerts("ghost", AlertSettings::default()));
+        assert_eq!(reg, before);
     }
 
     #[test]

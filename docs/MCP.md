@@ -343,3 +343,152 @@ stderr as well, for a run with no Settings panel open to read them.
 takes a trait; the app supplies the handle that writes into `McpHealth`. That
 is what keeps this crate free of app state, and it is why the observer is
 optional — a router built without one lists tools exactly as it did before.
+
+## Alerts: a server tells you something happened
+
+A server can raise a popup card, and optionally have the agent speak it, by
+serving an **alert feed**: a resource UIA watches. Nothing about it is
+specific to one server. The design is in
+`docs/superpowers/specs/2026-10-27-mcp-alerts-design.md`; the manual test list
+is [`MCP-alerts-manual-test.md`](MCP-alerts-manual-test.md).
+
+### Requires protocol 2026-07-28
+
+UIA listens with `subscriptions/listen` and the server announces changes with
+`notifications/resources/updated`. A server that only speaks an older protocol
+still connects and its tools work, but it gets no alerts: UIA logs one info
+line and stops. There is no fallback to the deprecated `resources/subscribe`.
+
+A server on 2026-07-28 that has no feed yet is still listened to, for
+`notifications/resources/list_changed` only, so a feed added later is found
+without reconnecting. If an alert stream ends abruptly while the server is
+still connected, UIA reopens it after 5 s (once per outage; a stream that then
+stays up earns a new reopen).
+
+### Finding the feed
+
+- **Discovery (default).** Every resource whose `resources/list` entry has
+  `mimeType: "application/vnd.uia.alerts+json"` is a feed. A server may have
+  several. Discovery re-runs on every (re)connect and when the server sends
+  `notifications/resources/list_changed`.
+- **Override.** If the server's entry in `uia-mcp.json` has
+  `"alerts": { "alert_resource": "<uri>" }`, exactly that URI is used and
+  discovery is skipped. For a server that cannot set the MIME type. There is no
+  UI for it; edit the JSON.
+
+### The feed's contents
+
+The resource's text is JSON, newest entry last, the server keeping a bounded
+list:
+
+```json
+{ "alerts": [
+  { "kind": "meeting", "id": "evt-42", "stage": "T-5",
+    "title": "Weekly sync", "summary": "Weekly sync starts in 5 minutes",
+    "details": "Room 4", "created_at": "2026-10-30T09:55:00Z",
+    "action": { "label": "Join", "url": "https://meet.google.com/abc-defg-hij" } }
+] }
+```
+
+| Field | Required | Cap | Meaning |
+| --- | --- | --- | --- |
+| `summary` | yes | 200 chars | The alert text. An entry without it (or that is not an object) is skipped; the rest of the list still counts. |
+| `title` | no | 100 | Heading on the card. |
+| `details` | no | 500 | Extra text. |
+| `kind` | no | 200 | Free label such as `meeting`. Informational: nothing behaves differently by value. |
+| `id` | no | 200 | The server's identifier for what this is about. |
+| `stage` | no | 200 | Tells repeats about one `id` apart (`T-10`, `T-5`, `invited`). |
+| `created_at` | no | 200 | RFC 3339. Used only for the startup grace below. |
+| `action` | no | label 24 | `{label, url}`. Kept only if `url` is an `https` URL; otherwise the action is dropped and the alert stays. The card shows the link's host on the button. |
+
+Everything is rendered as plain text, never HTML. No button appears unless
+`action` is present; a link inside `summary` is just text.
+
+### What counts as new
+
+Every read returns the whole list, so UIA decides what is new:
+
+- **Dedupe** on `(server, id, stage)`, or `(server, summary)` when there is no
+  `id`, over the last 256 keys.
+- **Baseline.** The first read after (re)connecting marks everything seen and
+  shows nothing, except entries whose `created_at` is within the last 60 s
+  (the **grace**), so an alert raised just before UIA connected is not lost.
+  Old events are never announced at startup.
+- **Rate limit.** At most 30 alerts per server per minute are accepted; the
+  rest are dropped with a warning in the log, not queued.
+
+### Settings and safety
+
+Two toggles per server under **Settings → MCP**, applied immediately without a
+restart (a failed save reverts the toggle and shows the error):
+
+- **Show alerts** (default on). Off silences the server completely: its
+  alerts are dropped, even if the other toggle is on.
+- **Let the agent speak alerts** (default off, needs Show alerts). The agent
+  speaks the alert instead of a card appearing, following the routing below.
+
+Safety note: the server controls the alert text. With the second toggle on,
+that text reaches the model, which has tools. UIA frames it as data, sends only
+`title`, `summary` and `details`, caps lengths and rate-limits, but the risk
+remains, so the toggle is per server and off by default. Enable it only for
+servers you trust. An action only ever opens an `https` link the server
+declared, only when you click it, and always shows the host.
+
+### Routing when the agent speaks alerts
+
+With Show on and the second toggle off, every alert is a **Card**. With both
+on, it is decided from the live state when the alert arrives:
+
+| Situation | Result |
+| --- | --- |
+| Main window hidden or minimised | Card |
+| No session open and text turns are supported | Open a session, speak the alert, close the session once she has finished |
+| Session open and she is waiting (`Listening`) | Speak now |
+| Session open and she is busy (`Thinking`, `ToolRunning`, `Speaking`, `Interrupting`) | Hold; speak after her current reply |
+| Held for more than 30 s, or the engine does not support typed turns, or opening the session fails | Card |
+
+A spoken alert does not also show a card. A newer stage for the same
+`(server, id)` replaces a held older one.
+
+Cards stack up to 3 at the top right, auto-dismiss after 30 s (hovering
+pauses), and clicking the body brings the main window forward. Known limit: on
+macOS the card is not guaranteed to appear over another app's full-screen
+Space.
+
+### Trying alerts with the test server
+
+`crates/uia-mcp/examples/alert_feed_server.rs` is a stdio server on protocol
+2026-07-28 that serves `uia-test://alerts` with the feed MIME type and a
+`ping` tool. Every `ALERT_FEED_INTERVAL_SECS` seconds (default 15) it appends
+the next entry and publishes `resources/updated`: T-10, T-5, T-2 and T-0 for
+one fake meeting (with a Join action), an `invited` alert, an alert without an
+action, and an entry without a `summary` (which must be ignored). Then it goes
+quiet; restart UIA's connection to replay.
+
+Local servers are installed as `.mcpb` bundles, so package the built binary:
+
+```sh
+cargo build -p uia-mcp --example alert_feed_server
+mkdir -p /tmp/alert-feed/bin
+cp target/debug/examples/alert_feed_server /tmp/alert-feed/bin/
+cat > /tmp/alert-feed/manifest.json <<'JSON'
+{
+  "name": "alert-feed-test",
+  "version": "0.1.0",
+  "server": {
+    "type": "binary",
+    "entry_point": "bin/alert_feed_server",
+    "mcp_config": {
+      "command": "${__dirname}/bin/alert_feed_server",
+      "env": { "ALERT_FEED_INTERVAL_SECS": "15" }
+    }
+  },
+  "compatibility": { "platforms": ["darwin"] }
+}
+JSON
+(cd /tmp/alert-feed && zip -r ../alert-feed-test.mcpb manifest.json bin)
+```
+
+Install `/tmp/alert-feed-test.mcpb` from Settings → MCP (adjust `platforms`
+for Linux or Windows; on Windows use the `.exe`), enable it, and start a
+session. The first entry arrives one interval after the server starts.

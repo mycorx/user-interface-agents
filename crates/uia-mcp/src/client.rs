@@ -2,15 +2,18 @@
 // PolyForm Internal Use 1.0.0 OR PolyForm Noncommercial 1.0.0 — see LICENSE.md.
 
 use async_trait::async_trait;
-use rmcp::model::CallToolRequestParams;
-use rmcp::service::RunningService;
+use rmcp::model::{CallToolRequestParams, ProtocolVersion};
+use rmcp::service::{ClientInitializeError, RunningService};
+use rmcp::transport::IntoTransport;
 use rmcp::transport::streamable_http_client::StreamableHttpClientTransportConfig;
 use rmcp::transport::{StreamableHttpClientTransport, TokioChildProcess};
-use rmcp::{RoleClient, ServiceExt};
+use rmcp::{ClientLifecycleMode, ClientServiceExt, RoleClient};
 use std::sync::Arc;
 use std::time::Duration;
 use uia_core::tools::{ToolDescriptor, ToolError, ToolExecutor, ToolResult};
 
+use crate::alert::Alert;
+use crate::alert_listener::{SharedAlertSettings, spawn_alert_listener};
 use crate::authed_client::AuthedHttpClient;
 use crate::stderr_tail::{StderrTail, spawn_drain};
 use crate::token::{NoToken, TokenProvider};
@@ -195,33 +198,40 @@ pub fn http_transport_config(
     Ok(config)
 }
 
-/// Recovers a `WWW-Authenticate` challenge from a failed `initialize`
-/// handshake, if that is why it failed.
-///
-/// `rmcp::service::ClientInitializeError::TransportError` boxes the transport
-/// error as `Box<dyn std::error::Error + Send + Sync>` (its `DynamicTransportError`
-/// payload's `error` field is public exactly so a caller can walk it), so this
-/// downcasts through the `source()` chain looking for the one concrete type
-/// that carries the header: `StreamableHttpError::AuthRequired`'s own
-/// `#[source] AuthRequiredError`. `StreamableHttpError` never appears in this
-/// function's signature — only the extracted `String` crosses back out — so
-/// nothing about this leaks the boundary this module exists to hold.
-fn auth_challenge_from_initialize_error(
-    err: &rmcp::service::ClientInitializeError,
-) -> Option<String> {
-    let rmcp::service::ClientInitializeError::TransportError { error, .. } = err else {
-        return None;
-    };
-    let mut current: Option<&(dyn std::error::Error + 'static)> = Some(error.error.as_ref());
-    while let Some(e) = current {
-        if let Some(auth_required) =
-            e.downcast_ref::<rmcp::transport::streamable_http_client::AuthRequiredError>()
-        {
-            return Some(auth_required.www_authenticate_header.clone());
+/// The error's text, using the fallback's own message for
+/// `LegacyFallbackFailed` (whose `Display` is only "both failed").
+fn initialize_error_text(err: &ClientInitializeError) -> String {
+    match err {
+        ClientInitializeError::LegacyFallbackFailed { fallback, .. } => {
+            initialize_error_text(fallback)
         }
-        current = e.source();
+        other => other.to_string(),
     }
-    None
+}
+
+/// Run the MCP handshake. Every production connect goes through here.
+///
+/// `().serve` is the legacy `initialize` handshake and tops out at 2025-11-25,
+/// where `subscriptions/listen` (alerts) does not exist. `Auto` probes
+/// `server/discover` for 2026-07-28 and falls back to 2025-11-25 for servers
+/// that predate it, so their tools keep working; they simply get no alerts.
+async fn start<T, E, A>(
+    transport: T,
+    // The error is boxed because `ClientInitializeError` is large (clippy::result_large_err).
+) -> Result<RunningService<RoleClient, ()>, Box<ClientInitializeError>>
+where
+    T: IntoTransport<RoleClient, E, A>,
+    E: std::error::Error + Send + Sync + 'static,
+{
+    ().serve_with_lifecycle(
+        transport,
+        ClientLifecycleMode::Auto {
+            preferred_versions: vec![ProtocolVersion::V_2026_07_28],
+            legacy_version: Some(ProtocolVersion::V_2025_11_25),
+        },
+    )
+    .await
+    .map_err(Box::new)
 }
 
 pub struct McpExecutor {
@@ -293,7 +303,7 @@ impl McpExecutor {
                 let tail = StderrTail::new(redaction_values(&args, &env));
                 let drain =
                     stderr.map(|stderr| spawn_drain(stderr, tail.clone(), server_name.clone()));
-                let service = match ().serve(transport).await {
+                let service = match start(transport).await {
                     Ok(service) => service,
                     Err(e) => {
                         // The child has usually exited by now, so its stream
@@ -303,7 +313,7 @@ impl McpExecutor {
                             let _ = tokio::time::timeout(Duration::from_millis(500), drain).await;
                         }
                         return Err(ToolError::Transport(startup_failure_message(
-                            &e.to_string(),
+                            &initialize_error_text(&e),
                             &tail,
                         )));
                     }
@@ -350,7 +360,7 @@ impl McpExecutor {
                     AuthedHttpClient::new(http_client, provider),
                     config,
                 );
-                let service = ().serve(transport).await.map_err(|e| {
+                let service = start(transport).await.map_err(|e| {
                     // A bare `e.to_string()` throws the `WWW-Authenticate`
                     // header away: `ClientInitializeError::TransportError`'s
                     // `Display` names its context, not the header inside the
@@ -362,9 +372,9 @@ impl McpExecutor {
                     // than report "unreachable") needs that header, so it is
                     // recovered here, behind the one boundary that already
                     // depends on rmcp, and handed across as a plain `String`.
-                    auth_challenge_from_initialize_error(&e)
-                        .map(ToolError::AuthRequired)
-                        .unwrap_or_else(|| ToolError::Transport(e.to_string()))
+                    e.auth_challenge()
+                        .map(|header| ToolError::AuthRequired(header.to_owned()))
+                        .unwrap_or_else(|| ToolError::Transport(initialize_error_text(&e)))
                 })?;
                 Ok(Self {
                     server_name,
@@ -374,12 +384,44 @@ impl McpExecutor {
         }
     }
 
+    /// Connect over an already-open transport (tests drive an in-process server).
+    #[cfg(test)]
+    pub(crate) async fn connect_transport<T, E, A>(name: &str, transport: T) -> Result<Self, String>
+    where
+        T: IntoTransport<RoleClient, E, A>,
+        E: std::error::Error + Send + Sync + 'static,
+    {
+        let service = start(transport).await.map_err(|e| e.to_string())?;
+        Ok(Self {
+            server_name: name.to_string(),
+            service,
+        })
+    }
+
     /// Connect with no bearer token of its own.
     ///
     /// Servers configured with an arbitrary static header are unaffected: that
     /// header travels in `custom_headers`, which this path does not touch.
     pub async fn connect(name: &str, config: McpServerConfig) -> Result<Self, ToolError> {
         Self::connect_with_token_provider(name, config, Arc::new(NoToken)).await
+    }
+
+    /// Start watching this server's alert feeds (see `alert_listener`). Alerts
+    /// that pass the gate and `settings.show` are sent to `sink`. The task ends
+    /// when the server has no feed, rejects `subscriptions/listen` (it speaks an
+    /// older protocol), the sink closes, or the connection drops; abort the
+    /// returned handle to stop it earlier.
+    pub fn start_alert_listener(
+        &self,
+        settings: SharedAlertSettings,
+        sink: tokio::sync::mpsc::UnboundedSender<Alert>,
+    ) -> tokio::task::JoinHandle<()> {
+        spawn_alert_listener(
+            self.server_name.clone(),
+            self.service.peer().clone(),
+            settings,
+            sink,
+        )
     }
 
     /// What this server declared about itself at `initialize`.
@@ -635,6 +677,41 @@ mod tests {
         for name in ["clock", "file-system", "my_tools", "srv2"] {
             assert!(validate_server_name(name).is_ok(), "{name} was rejected");
         }
+    }
+
+    /// A 401 during the legacy `initialize` fallback still yields the challenge.
+    #[test]
+    fn an_auth_challenge_in_the_legacy_fallback_phase_is_still_recovered() {
+        use rmcp::transport::streamable_http_client::{AuthRequiredError, StreamableHttpError};
+        type Http = StreamableHttpClientTransport<reqwest::Client>;
+        let auth = ClientInitializeError::transport::<Http>(
+            StreamableHttpError::<reqwest::Error>::AuthRequired(AuthRequiredError::new(
+                "Bearer realm=\"x\"".into(),
+            )),
+            "send initialize",
+        );
+        let discover = ClientInitializeError::Cancelled;
+        let err = ClientInitializeError::LegacyFallbackFailed {
+            discover: Box::new(discover),
+            fallback: Box::new(auth),
+        };
+        assert_eq!(err.auth_challenge(), Some("Bearer realm=\"x\""));
+        // The message keeps the fallback's detail, not just "both failed".
+        assert!(initialize_error_text(&err).contains("send initialize"));
+    }
+
+    #[tokio::test]
+    async fn a_server_that_only_speaks_2025_11_25_still_connects_and_lists_tools() {
+        let (server_io, client_io) = tokio::io::duplex(16 * 1024);
+        crate::alert_listener::tests::spawn_legacy_server(server_io);
+        let executor = McpExecutor::connect_transport("old", client_io)
+            .await
+            .expect("an older server still connects");
+        let tools = executor.list_tools().await.expect("tools list");
+        assert_eq!(
+            tools.iter().map(|t| t.name.as_str()).collect::<Vec<_>>(),
+            vec!["old.echo"]
+        );
     }
 
     /// The HTTP transport must be built through `AuthedHttpClient`, or the provider is

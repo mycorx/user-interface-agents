@@ -195,6 +195,44 @@
       .catch((e) => console.error('list_mcp_local_servers invoke() failed:', e));
   }
 
+  type AlertSettings = { show: boolean; wake_agent: boolean; alert_resource: string | null };
+  let alerts = $state<Record<string, AlertSettings>>({});
+  const alertsRequested = new Set<string>();
+
+  // Each server's alert settings load on their own, when its row first
+  // appears, so a slow or failing lookup never blocks the rest of the list.
+  $effect(() => {
+    for (const row of rows) {
+      if (alertsRequested.has(row.name)) continue;
+      alertsRequested.add(row.name);
+      invoke<AlertSettings>('get_mcp_alerts', { server: row.name })
+        .then((v) => (alerts[row.name] = v))
+        .catch((e) => {
+          alertsRequested.delete(row.name);
+          console.error('get_mcp_alerts invoke() failed:', e);
+        });
+    }
+  });
+
+  // Applies live (no restart), so unlike the enable toggles it does not call
+  // `onchange`. `alert_resource` is passed back untouched; there is no UI
+  // for it yet.
+  async function saveAlerts(row: Row, patch: Partial<Pick<AlertSettings, 'show' | 'wake_agent'>>) {
+    const previous = alerts[row.name];
+    if (!previous) return;
+    const next = { ...previous, ...patch };
+    if (!next.show) next.wake_agent = false;
+    const setError = (m: string | null) => (row.kind === 'local' ? (installError = m) : (remoteError = m));
+    setError(null);
+    alerts[row.name] = next;
+    try {
+      await invoke('set_mcp_alerts', { server: row.name, alerts: next });
+    } catch (e) {
+      setError(String(e));
+      alerts[row.name] = previous;
+    }
+  }
+
   function refreshRemotes() {
     invoke<RemoteServer[]>('list_mcp_remote_servers')
       .then((v) => (remotes = v))
@@ -733,6 +771,36 @@
                 </button>
               </td>
             </tr>
+
+            {#if alerts[row.name]}
+              {@const a = alerts[row.name]}
+              <tr class="alerts-row">
+                <td colspan="4">
+                  <label class="alert-toggle">
+                    <input
+                      type="checkbox"
+                      role="switch"
+                      checked={a.show}
+                      onchange={(e) => saveAlerts(row, { show: e.currentTarget.checked })}
+                    />
+                    Show alerts
+                  </label>
+                  <label class="alert-toggle">
+                    <input
+                      type="checkbox"
+                      role="switch"
+                      checked={a.show && a.wake_agent}
+                      disabled={!a.show}
+                      onchange={(e) => saveAlerts(row, { wake_agent: e.currentTarget.checked })}
+                    />
+                    Let the agent speak alerts
+                  </label>
+                  <p class="hint">
+                    The agent may act on what this server sends. Only turn this on for servers you trust.
+                  </p>
+                </td>
+              </tr>
+            {/if}
 
             {#if status.kind === 'failed' || status.kind === 'no-tools'}
               <!-- Its own row, always visible: the reason is a sentence, not
@@ -1707,6 +1775,13 @@
     margin: 6px 0 0;
     font-size: 12px;
     color: #8890a0;
+  }
+
+  .alert-toggle {
+    display: flex;
+    align-items: center;
+    gap: 8px;
+    margin: 2px 0;
   }
 
   .field-error {
