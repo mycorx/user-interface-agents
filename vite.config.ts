@@ -25,8 +25,8 @@ export default defineConfig({
     // on demand by the backend with WebviewUrl::App("alert.html")).
     rollupOptions: {
       input: {
-        main: resolve(__dirname, 'index.html'),
-        alert: resolve(__dirname, 'alert.html'),
+        main: resolve(import.meta.dirname, 'index.html'),
+        alert: resolve(import.meta.dirname, 'alert.html'),
       },
     },
     // The old chrome105/safari13 split (from earlier Tauri templates) is too
