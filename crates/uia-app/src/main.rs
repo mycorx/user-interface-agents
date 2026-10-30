@@ -31,8 +31,8 @@ use uia_app::config::{AudioSection, Config, EngineChoice};
 use uia_app::hud::{
     ALERT_WINDOW_HEIGHT, ALERT_WINDOW_WIDTH, CONNECTION_EVENT, ENGINE_EVENT, ERROR_EVENT,
     LEVEL_EVENT, LEVEL_INTERVAL, MCP_ALERT_EVENT, STATE_EVENT, TEXT_TURN_SUPPORT_EVENT, TURN_EVENT,
-    WindowAction, alert_payload, alert_window_position, connection_payload, engine_payload,
-    error_payload, level_payload, state_payload, window_action_for,
+    WaitingNotice, WindowAction, alert_payload, alert_window_position, connection_payload,
+    engine_payload, error_payload, level_payload, state_payload, window_action_for,
 };
 use uia_app::mcp_registry;
 use uia_app::oauth_flow;
@@ -927,16 +927,51 @@ fn main() {
                 let mut errors = session.subscribe_error();
                 let mut turns = session.subscribe_turn();
 
+                let mut waiting = session.subscribe_audio_waiting();
                 let state_handle = session_handle.clone();
                 tauri::async_runtime::spawn(async move {
-                    // A lagged HUD skips to the newest state rather than
-                    // dying: falling behind must never stop the status text
-                    // updating again.
+                    // One task for state, errors and device waits so the emits
+                    // keep their order: the wait notice shares the error line
+                    // and must land after the state change that clears it.
+                    // A lagged HUD skips to the newest value rather than
+                    // dying. Errors also go to stderr: the terminal is
+                    // watched during manual testing (UIA_DUMP_EVENTS lives
+                    // there too), and a crashed/never-opened webview must not
+                    // be the only place this shows up.
+                    use tokio::sync::broadcast::error::RecvError;
+                    let mut notice = WaitingNotice::new();
+                    let mut waiting_open = true;
                     loop {
-                        match states.recv().await {
-                            Ok(s) => emit_state(&state_handle, s),
-                            Err(tokio::sync::broadcast::error::RecvError::Lagged(_)) => continue,
-                            Err(tokio::sync::broadcast::error::RecvError::Closed) => break,
+                        let message = tokio::select! {
+                            state = states.recv() => match state {
+                                Ok(s) => {
+                                    emit_state(&state_handle, s);
+                                    notice.on_state(s)
+                                }
+                                Err(RecvError::Lagged(_)) => continue,
+                                Err(RecvError::Closed) => break,
+                            },
+                            error = errors.recv() => match error {
+                                Ok(msg) => {
+                                    eprintln!("uia: engine error: {msg}");
+                                    notice.on_error();
+                                    let _ = state_handle.emit(ERROR_EVENT, error_payload(&msg));
+                                    None
+                                }
+                                Err(RecvError::Lagged(_)) => continue,
+                                Err(RecvError::Closed) => break,
+                            },
+                            changed = waiting.changed(), if waiting_open => {
+                                if changed.is_err() {
+                                    waiting_open = false;
+                                    continue;
+                                }
+                                let value = waiting.borrow_and_update().clone();
+                                notice.on_waiting(value)
+                            }
+                        };
+                        if let Some(message) = message {
+                            let _ = state_handle.emit(ERROR_EVENT, error_payload(&message));
                         }
                     }
                 });
@@ -949,24 +984,6 @@ fn main() {
                         ticker.tick().await;
                         let rms = *level.borrow_and_update();
                         let _ = level_handle.emit(LEVEL_EVENT, level_payload(rms));
-                    }
-                });
-
-                let error_handle = session_handle.clone();
-                tauri::async_runtime::spawn(async move {
-                    // Also on stderr: the terminal is watched during manual
-                    // testing (UIA_DUMP_EVENTS lives there too), and a
-                    // crashed/never-opened webview must not be the only place
-                    // this shows up.
-                    loop {
-                        match errors.recv().await {
-                            Ok(msg) => {
-                                eprintln!("uia: engine error: {msg}");
-                                let _ = error_handle.emit(ERROR_EVENT, error_payload(&msg));
-                            }
-                            Err(tokio::sync::broadcast::error::RecvError::Lagged(_)) => continue,
-                            Err(tokio::sync::broadcast::error::RecvError::Closed) => break,
-                        }
                     }
                 });
 
