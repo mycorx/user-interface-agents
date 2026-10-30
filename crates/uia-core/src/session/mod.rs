@@ -218,6 +218,12 @@ pub struct Session {
     /// `None` while both are open. A `watch`: it is a state, and only the
     /// current one matters.
     audio_waiting: watch::Sender<Option<String>>,
+    /// Why the last audio swap's opener failed, while the session runs on
+    /// the silent detached pair it left. Held, not only sent on `error_tx`:
+    /// a detached pair waits for nothing, so without this the waiting line
+    /// would read `None` and a HUD that clears its error on reconnect would
+    /// show a healthy session that hears and says nothing.
+    audio_failed: Option<String>,
     /// Set when a terminal error is seen, so the run loop can stop instead of
     /// entering the backoff loop.
     terminal: bool,
@@ -298,6 +304,7 @@ impl Session {
             error_tx: broadcast::channel(ERROR_BROADCAST_CAPACITY).0,
             turn_tx: broadcast::channel(TURN_BROADCAST_CAPACITY).0,
             audio_waiting: watch::channel(None).0,
+            audio_failed: None,
             terminal: false,
             backoff: Backoff::new(),
             system_prompt: None,
@@ -336,6 +343,9 @@ impl Session {
 
     /// Observe what the audio devices are waiting for, e.g. `Waiting for the
     /// microphone "Jabra"`, or `None` while both are open. Always readable.
+    ///
+    /// After a failed audio swap this carries the failure instead (`audio
+    /// devices: ...`) until a later swap opens its devices.
     pub fn subscribe_audio_waiting(&self) -> watch::Receiver<Option<String>> {
         self.audio_waiting.subscribe()
     }
@@ -344,7 +354,10 @@ impl Session {
     fn publish_audio_waiting(&self) {
         let input = self.capture.waiting().and_then(|cell| cell.get());
         let output = self.deps.sink.waiting().and_then(|cell| cell.get());
-        let message = audio::waiting_message(input.as_ref(), output.as_ref());
+        let message = self
+            .audio_failed
+            .clone()
+            .or_else(|| audio::waiting_message(input.as_ref(), output.as_ref()));
         self.audio_waiting.send_if_modified(|current| {
             if *current == message {
                 false
@@ -479,7 +492,9 @@ impl Session {
     /// An opener that fails or panics leaves the session on a detached pair
     /// -- silent, but alive and still able to take the next swap -- and says
     /// why on `error_tx`. Stranding the session would leave the user no way
-    /// back short of a restart.
+    /// back short of a restart. The failure is also held on the waiting line
+    /// and on the handle (`audio_swap_failed`) until a swap opens its
+    /// devices, so the HUD keeps saying it and an unchanged Save retries.
     async fn apply_pending_audio_swap(&mut self) -> bool {
         let Some(swap) = self.control.take_audio_swap() else {
             return false;
@@ -506,10 +521,15 @@ impl Session {
         .await;
 
         let (source, sink): AudioPair = match opened {
-            Ok(Ok(pair)) => pair,
+            Ok(Ok(pair)) => {
+                self.audio_failed = None;
+                pair
+            }
             Ok(Err(e)) => self.detached_pair(source_format, sink_format, &e),
             Err(e) => self.detached_pair(source_format, sink_format, &e),
         };
+        self.control
+            .note_audio_swap_failed(self.audio_failed.is_some());
         self.capture = audio::Capture::new(source);
         self.deps.sink = sink;
         // Both resamplers were keyed to the old devices' rates and carry
@@ -521,14 +541,17 @@ impl Session {
         true
     }
 
-    /// The pair a failed swap leaves behind, after reporting why.
+    /// The pair a failed swap leaves behind, after reporting why and holding
+    /// the failure for the waiting line.
     fn detached_pair(
-        &self,
+        &mut self,
         source_format: crate::audio::AudioFormat,
         sink_format: crate::audio::AudioFormat,
         cause: &dyn std::fmt::Display,
     ) -> AudioPair {
-        let _ = self.error_tx.send(format!("audio devices: {cause}"));
+        let message = format!("audio devices: {cause}");
+        let _ = self.error_tx.send(message.clone());
+        self.audio_failed = Some(message);
         (
             Box::new(DetachedSource::new(source_format)),
             Box::new(DetachedSink::new(sink_format)),

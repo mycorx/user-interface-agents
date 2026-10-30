@@ -132,7 +132,7 @@ struct ConfiguredAudioSettings(AudioSection);
 /// The audio settings the running session uses: the resolved `[audio]` at
 /// launch, then whatever the last Save that changed something switched it
 /// to. `set_audio_settings` compares a Save against it to decide what the
-/// session has to redo.
+/// session has to redo, and reopens anyway while the last swap failed.
 struct CurrentAudioSettings(Mutex<AudioSection>);
 
 /// The path `set_agent_settings` persists to — same
@@ -1531,9 +1531,11 @@ fn set_audio_settings(
     .map_err(|e| e.to_string())?;
     let next = settings::saved_audio_settings(&configured.0, &path.0);
     let mut current = current.0.lock().expect("current audio settings mutex");
-    if let Some(swap) =
-        uia_app::session::audio_swap_for(&next, settings::audio_change(&current, &next))
-    {
+    let change = settings::retrying_a_failed_swap(
+        settings::audio_change(&current, &next),
+        control.0.audio_swap_failed(),
+    );
+    if let Some(swap) = uia_app::session::audio_swap_for(&next, change) {
         control.0.request_audio_swap(swap);
         *current = next;
     }

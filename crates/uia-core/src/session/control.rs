@@ -132,6 +132,10 @@ pub struct SessionControl {
     /// `Some` while an audio swap is waiting for the run loop: the same
     /// consume-once slot as `prompt_swap`, for the same reason.
     audio_swap: Arc<Mutex<Option<AudioSwap>>>,
+    /// Whether the last audio swap's opener failed, leaving the session on a
+    /// silent detached pair. An atomic like `capture_enabled`: the shell only
+    /// reads it when a Save arrives.
+    audio_swap_failed: Arc<AtomicBool>,
 }
 
 impl std::fmt::Debug for SessionControl {
@@ -164,6 +168,7 @@ impl SessionControl {
             prompt_swap: Arc::new(Mutex::new(None)),
             prompt_swap_outcome: Arc::new(watch::channel(None).0),
             audio_swap: Arc::new(Mutex::new(None)),
+            audio_swap_failed: Arc::new(AtomicBool::new(false)),
         }
     }
 
@@ -353,6 +358,19 @@ impl SessionControl {
     /// Consumes the pending audio swap, if any. Called by the run loop only.
     pub fn take_audio_swap(&self) -> Option<AudioSwap> {
         self.audio_swap.lock().expect("audio swap mutex").take()
+    }
+
+    /// Whether the last audio swap failed to open its devices, so the
+    /// session is silent. A Save that changes nothing must still retry then:
+    /// the shell already counts the failed settings as applied.
+    pub fn audio_swap_failed(&self) -> bool {
+        self.audio_swap_failed.load(Ordering::Relaxed)
+    }
+
+    /// Record how the last audio swap's opener went. Called by the run loop
+    /// only.
+    pub(crate) fn note_audio_swap_failed(&self, failed: bool) {
+        self.audio_swap_failed.store(failed, Ordering::Relaxed);
     }
 }
 

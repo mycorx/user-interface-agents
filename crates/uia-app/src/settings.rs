@@ -508,7 +508,7 @@ pub fn resolve_audio_settings(
 
 /// What a Save changed about the audio the running session uses, and so
 /// how much of it has to be redone.
-#[derive(Debug, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum AudioChange {
     /// Nothing to apply.
     Unchanged,
@@ -530,6 +530,18 @@ pub fn audio_change(current: &AudioSection, next: &AudioSection) -> AudioChange 
         AudioChange::ThresholdOnly
     } else {
         AudioChange::Unchanged
+    }
+}
+
+/// `change`, upgraded to a reopen while the session's last audio swap failed
+/// to open its devices. That swap left the session silent, yet its settings
+/// already count as current, so without this a Save of the same values
+/// would be `Unchanged` and the user would have no way to retry.
+pub fn retrying_a_failed_swap(change: AudioChange, last_swap_failed: bool) -> AudioChange {
+    if last_swap_failed {
+        AudioChange::Devices
+    } else {
+        change
     }
 }
 
@@ -744,6 +756,28 @@ mod tests {
             audio_change(&current, &current.clone()),
             AudioChange::Unchanged
         );
+    }
+
+    #[test]
+    fn after_a_failed_swap_any_save_reopens_the_pair() {
+        for change in [
+            AudioChange::Unchanged,
+            AudioChange::ThresholdOnly,
+            AudioChange::Devices,
+        ] {
+            assert_eq!(retrying_a_failed_swap(change, true), AudioChange::Devices);
+        }
+    }
+
+    #[test]
+    fn without_a_failed_swap_the_change_stands() {
+        for change in [
+            AudioChange::Unchanged,
+            AudioChange::ThresholdOnly,
+            AudioChange::Devices,
+        ] {
+            assert_eq!(retrying_a_failed_swap(change, false), change);
+        }
     }
 
     #[test]

@@ -904,6 +904,63 @@ async fn a_failed_or_panicking_opener_leaves_a_silent_pair_and_reports_the_error
     .await;
 }
 
+/// A failed opener leaves the session silent, so the failure is a held
+/// state, not a one-shot error: it stays on the waiting line across a
+/// reconnect (where the HUD clears its error line), the handle says the last
+/// swap failed so the shell can retry an unchanged Save, and the next
+/// successful swap clears both.
+#[tokio::test]
+async fn a_failed_opener_stays_published_until_a_swap_succeeds() {
+    let (mut session, _speaker, act_tx) =
+        a_session_with_a_silent_microphone(an_engine_with_a_scripted_turn());
+    let control = session.control();
+    let mut waiting = session.subscribe_audio_waiting();
+    let mut states = session.subscribe_state();
+    control.request_audio_swap(AudioSwap {
+        open: Some(Box::new(|| {
+            Err(AudioError::DeviceUnavailable("no default device".into()))
+        })),
+        barge_in_threshold: None,
+    });
+    act_tx.send(ActivationEvent::Show).await.unwrap();
+    let failed = |w: &Option<String>| {
+        w.as_deref()
+            .is_some_and(|m| m.contains("audio devices") && m.contains("no default device"))
+    };
+
+    let held = tokio::time::timeout(RUN_LOOP_BUDGET, async {
+        tokio::select! {
+            outcome = session.run() => panic!("run() ended with {outcome:?}"),
+            () = async {
+                while states.recv().await.unwrap() != State::Listening {}
+                assert!(failed(&waiting.borrow()), "got {:?}", *waiting.borrow());
+                assert!(control.audio_swap_failed());
+
+                control.request_disconnect();
+                while states.recv().await.unwrap() != State::Idle {}
+                control.request_connect();
+                while states.recv().await.unwrap() != State::Listening {}
+                assert!(
+                    failed(&waiting.borrow()),
+                    "the failure must outlive a reconnect, got {:?}",
+                    *waiting.borrow()
+                );
+                assert!(control.audio_swap_failed());
+
+                control.request_audio_swap(AudioSwap {
+                    open: Some(Box::new(|| Ok(a_fresh_pair().0))),
+                    barge_in_threshold: None,
+                });
+                waiting.wait_for(Option::is_none).await.unwrap();
+                assert!(!control.audio_swap_failed());
+            } => {}
+        }
+    })
+    .await;
+
+    assert!(held.is_ok(), "the failure was not held, or never cleared");
+}
+
 /// A microphone that never delivers and says it is waiting through a cell
 /// the test keeps.
 struct WaitingMicrophone(WaitingCell);
