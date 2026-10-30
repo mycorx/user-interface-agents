@@ -48,12 +48,12 @@ struct Held {
 }
 
 /// Where the coordinator's own typed turn is.
-#[derive(Clone, Copy, PartialEq, Eq)]
 enum Turn {
     /// No turn of ours is outstanding.
     None,
-    /// Submitted; she has not started on it yet.
-    Sent,
+    /// Submitted at `at`; she has not started on it yet. If she never does,
+    /// `alert` was not heard and goes to the card.
+    Sent { alert: Box<Alert>, at: Instant },
     /// She is on it (`Thinking`, `ToolRunning` or `Speaking` seen). The next
     /// `Listening` ends the reply.
     Answering,
@@ -68,7 +68,8 @@ pub struct Coordinator {
     /// The coordinator opened the current session and the user has not
     /// taken it over, so it closes the session once it is done.
     opened_by_us: bool,
-    /// `connect` was requested and no `Idle` has been seen since.
+    /// `connect` was requested and neither `Idle` nor our own `disconnect`
+    /// has happened since.
     connect_requested: bool,
 }
 
@@ -92,7 +93,7 @@ impl Coordinator {
             Route::Card => self.env.show_card(alert),
             Route::SpeakNow => {
                 self.hold(alert, now);
-                self.speak_next();
+                self.speak_next(now);
             }
             Route::OpenSessionAndSpeak => {
                 self.hold(alert, now);
@@ -107,12 +108,13 @@ impl Coordinator {
     }
 
     /// The session moved to `state`.
-    pub fn on_state(&mut self, state: State, _now: Instant) {
+    pub fn on_state(&mut self, state: State, now: Instant) {
         let previous = std::mem::replace(&mut self.session, state);
         match state {
             // Still idle: a connect just requested has not been answered yet.
             State::Idle if previous == State::Idle => {}
             State::Idle => {
+                self.card_unheard_turn();
                 self.turn = Turn::None;
                 self.opened_by_us = false;
                 self.connect_requested = false;
@@ -121,31 +123,36 @@ impl Coordinator {
                     self.env.show_card(held.alert);
                 }
             }
-            // A reconnect drops whatever turn was in flight.
-            State::Connecting => self.turn = Turn::None,
+            // A reconnect drops whatever turn was in flight. One she had
+            // started answering counts as heard.
+            State::Connecting => {
+                self.card_unheard_turn();
+                self.turn = Turn::None;
+            }
             State::Listening => {
                 match self.turn {
-                    Turn::Sent => return,
+                    Turn::Sent { .. } => return,
                     Turn::Answering => self.turn = Turn::None,
                     Turn::None => {}
                 }
-                self.speak_next();
+                self.speak_next(now);
                 self.close_if_done();
             }
             State::Thinking | State::ToolRunning | State::Speaking => match self.turn {
-                Turn::Sent | Turn::Answering => self.turn = Turn::Answering,
+                Turn::Sent { .. } | Turn::Answering => self.turn = Turn::Answering,
                 Turn::None => self.opened_by_us = false,
             },
             State::Interrupting => {
                 self.opened_by_us = false;
-                if self.turn == Turn::Sent {
+                if matches!(self.turn, Turn::Sent { .. }) {
                     self.turn = Turn::Answering;
                 }
             }
         }
     }
 
-    /// Time passed: alerts held longer than the hold timeout go to the card.
+    /// Time passed: alerts held longer than the hold timeout go to the card,
+    /// and so does a turn of ours she has not started on within it.
     pub fn on_tick(&mut self, now: Instant) {
         let timeout = self.hold_timeout;
         let (expired, kept): (VecDeque<Held>, VecDeque<Held>) = self
@@ -155,6 +162,12 @@ impl Coordinator {
         self.held = kept;
         for held in expired {
             self.env.show_card(held.alert);
+        }
+        if let Turn::Sent { at, .. } = self.turn
+            && now.saturating_duration_since(at) >= timeout
+        {
+            self.card_unheard_turn();
+            self.speak_next(now);
         }
         self.close_if_done();
     }
@@ -179,8 +192,8 @@ impl Coordinator {
 
     /// Speak the oldest held alert if she is free: re-checks the window first
     /// and sends anything that cannot be spoken to the card.
-    fn speak_next(&mut self) {
-        if self.turn != Turn::None || self.session != State::Listening {
+    fn speak_next(&mut self, now: Instant) {
+        if !matches!(self.turn, Turn::None) || self.session != State::Listening {
             return;
         }
         while let Some(held) = self.held.pop_front() {
@@ -191,7 +204,10 @@ impl Coordinator {
             let text = spoken_turn_text(&held.alert.server, &held.alert);
             match self.env.speak(text) {
                 Ok(()) => {
-                    self.turn = Turn::Sent;
+                    self.turn = Turn::Sent {
+                        alert: Box::new(held.alert),
+                        at: now,
+                    };
                     return;
                 }
                 Err(()) => self.env.show_card(held.alert),
@@ -201,9 +217,20 @@ impl Coordinator {
 
     /// Close a session the coordinator opened once it has nothing left to say.
     fn close_if_done(&mut self) {
-        if self.opened_by_us && self.turn == Turn::None && self.held.is_empty() {
+        if self.opened_by_us && matches!(self.turn, Turn::None) && self.held.is_empty() {
             self.opened_by_us = false;
+            self.connect_requested = false;
             self.env.disconnect();
+        }
+    }
+
+    /// End a turn of ours that she never started on, sending its alert to
+    /// the card. A turn she is answering is left alone.
+    fn card_unheard_turn(&mut self) {
+        if matches!(self.turn, Turn::Sent { .. })
+            && let Turn::Sent { alert, .. } = std::mem::replace(&mut self.turn, Turn::None)
+        {
+            self.env.show_card(*alert);
         }
     }
 }
@@ -664,6 +691,109 @@ mod tests {
             env.calls(),
             vec![Call::Connect, spoken(&a), card(&a), Call::Disconnect]
         );
+    }
+
+    #[test]
+    fn a_session_the_coordinator_opened_is_closed_when_its_turn_gets_no_reply() {
+        let env = FakeEnv::new();
+        let t0 = Instant::now();
+        let mut c = Coordinator::new(env.clone(), HOLD);
+        let a = alert(Some("evt-1"), "T-5", "Standup in 5 minutes");
+
+        c.on_alert(a.clone(), true, t0);
+        c.on_state(State::Connecting, t0);
+        let sent = t0 + Duration::from_secs(5);
+        c.on_state(State::Listening, sent);
+        c.on_tick(sent + Duration::from_secs(29));
+        assert_eq!(env.calls(), vec![Call::Connect, spoken(&a)]);
+
+        c.on_tick(sent + HOLD);
+        assert_eq!(
+            env.calls(),
+            vec![Call::Connect, spoken(&a), card(&a), Call::Disconnect]
+        );
+    }
+
+    #[test]
+    fn a_turn_that_gets_no_reply_makes_way_for_the_next_held_alert() {
+        let env = FakeEnv::new();
+        let t0 = Instant::now();
+        let mut c = open_in(&env, State::Listening, t0);
+        let a = alert(Some("evt-1"), "T-5", "Standup in 5 minutes");
+        let b = alert(Some("evt-2"), "T-5", "Lunch in 5 minutes");
+
+        c.on_alert(a.clone(), true, t0);
+        c.on_alert(b.clone(), true, t0 + Duration::from_secs(10));
+        c.on_tick(t0 + HOLD);
+        assert_eq!(env.calls(), vec![spoken(&a), card(&a), spoken(&b)]);
+    }
+
+    #[test]
+    fn a_connect_that_never_happens_does_not_block_the_next_alert_from_opening_a_session() {
+        let env = FakeEnv::new();
+        let t0 = Instant::now();
+        let mut c = Coordinator::new(env.clone(), HOLD);
+        let a = alert(Some("evt-1"), "T-5", "Standup in 5 minutes");
+        let b = alert(Some("evt-2"), "T-5", "Lunch in 5 minutes");
+
+        c.on_alert(a.clone(), true, t0);
+        c.on_tick(t0 + HOLD);
+        let later = t0 + Duration::from_secs(40);
+        c.on_alert(b.clone(), true, later);
+        c.on_state(State::Connecting, later);
+        c.on_state(State::Listening, later);
+        assert_eq!(
+            env.calls(),
+            vec![
+                Call::Connect,
+                card(&a),
+                Call::Disconnect,
+                Call::Connect,
+                spoken(&b)
+            ]
+        );
+    }
+
+    #[test]
+    fn an_alert_whose_turn_is_cut_off_before_she_speaks_goes_to_the_card() {
+        let env = FakeEnv::new();
+        let t0 = Instant::now();
+        let a = alert(Some("evt-1"), "T-5", "Standup in 5 minutes");
+
+        // The session drops.
+        let mut c = open_in(&env, State::Listening, t0);
+        c.on_alert(a.clone(), true, t0);
+        c.on_state(State::Idle, t0);
+        assert_eq!(env.calls(), vec![spoken(&a), card(&a)]);
+
+        // The session reconnects.
+        let env = FakeEnv::new();
+        let mut c = open_in(&env, State::Listening, t0);
+        c.on_alert(a.clone(), true, t0);
+        c.on_state(State::Connecting, t0);
+        c.on_state(State::Listening, t0);
+        c.on_tick(t0 + Duration::from_secs(60));
+        assert_eq!(env.calls(), vec![spoken(&a), card(&a)]);
+    }
+
+    #[test]
+    fn an_alert_she_had_started_speaking_is_not_carded_when_the_session_drops() {
+        let env = FakeEnv::new();
+        let t0 = Instant::now();
+        let a = alert(Some("evt-1"), "T-5", "Standup in 5 minutes");
+
+        let mut c = open_in(&env, State::Listening, t0);
+        c.on_alert(a.clone(), true, t0);
+        c.on_state(State::Speaking, t0);
+        c.on_state(State::Idle, t0);
+
+        let mut c2 = open_in(&env, State::Listening, t0);
+        c2.on_alert(a.clone(), true, t0);
+        c2.on_state(State::Speaking, t0);
+        c2.on_state(State::Connecting, t0);
+        c2.on_state(State::Listening, t0);
+        c2.on_tick(t0 + Duration::from_secs(60));
+        assert_eq!(env.calls(), vec![spoken(&a), spoken(&a)]);
     }
 
     #[test]
