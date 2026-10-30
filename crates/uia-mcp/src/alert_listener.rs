@@ -48,8 +48,26 @@ enum SessionEnd {
     Stop,
     /// The server's resource list changed; discover again.
     Rediscover,
-    /// The stream ended without a final result.
-    Abrupt,
+    /// The stream ended without a final result. `was_open` is true when it
+    /// had been acknowledged first (the connection was healthy), which earns
+    /// a fresh retry.
+    Abrupt { was_open: bool },
+}
+
+/// One reopen per drop: a stream that had been acknowledged before it ended
+/// earns a fresh retry; a reopen that fails before that does not.
+#[derive(Default)]
+struct ReopenBudget {
+    spent: bool,
+}
+
+impl ReopenBudget {
+    fn may_reopen_after_abrupt_end(&mut self, was_open: bool) -> bool {
+        if was_open {
+            self.spent = false;
+        }
+        !std::mem::replace(&mut self.spent, true)
+    }
 }
 
 /// Watch `server`'s alert feeds until it has none, rejects
@@ -75,16 +93,15 @@ pub fn spawn_alert_listener(
             gate: AlertGate::new(),
             known_feeds: HashSet::new(),
         };
-        let mut reopened = false;
+        let mut retry = ReopenBudget::default();
         loop {
             match listener.session().await {
                 SessionEnd::Stop => return,
                 SessionEnd::Rediscover => {}
-                SessionEnd::Abrupt => {
-                    if reopened {
+                SessionEnd::Abrupt { was_open } => {
+                    if !retry.may_reopen_after_abrupt_end(was_open) {
                         return;
                     }
-                    reopened = true;
                     tokio::time::sleep(REOPEN_DELAY).await;
                 }
             }
@@ -190,14 +207,14 @@ impl Listener {
                 Ok(None) => {
                     return match subscription.end() {
                         Some(SubscriptionEnd::Abrupt | SubscriptionEnd::Lagged { .. }) => {
-                            SessionEnd::Abrupt
+                            SessionEnd::Abrupt { was_open: true }
                         }
                         _ => SessionEnd::Stop,
                     };
                 }
                 Err(e) => {
                     tracing::debug!(server = %self.server, error = %e, "alert subscription failed");
-                    return SessionEnd::Abrupt;
+                    return SessionEnd::Abrupt { was_open: true };
                 }
             }
         }
@@ -507,6 +524,17 @@ pub(crate) mod tests {
         if let Ok(Some(alert)) = tokio::time::timeout(wait, alerts.recv()).await {
             panic!("unexpected alert: {alert:?}");
         }
+    }
+
+    #[test]
+    fn two_separate_abrupt_ends_of_a_healthy_stream_are_both_recovered() {
+        let mut budget = ReopenBudget::default();
+        assert!(budget.may_reopen_after_abrupt_end(true));
+        // The reopened stream came up, then was cut again days later.
+        assert!(budget.may_reopen_after_abrupt_end(true));
+        // A reopen that never came up gets no second retry.
+        assert!(budget.may_reopen_after_abrupt_end(true));
+        assert!(!budget.may_reopen_after_abrupt_end(false));
     }
 
     #[tokio::test]

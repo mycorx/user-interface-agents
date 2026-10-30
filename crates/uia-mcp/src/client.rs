@@ -212,8 +212,14 @@ pub fn http_transport_config(
 fn auth_challenge_from_initialize_error(
     err: &rmcp::service::ClientInitializeError,
 ) -> Option<String> {
-    let rmcp::service::ClientInitializeError::TransportError { error, .. } = err else {
-        return None;
+    let error = match err {
+        rmcp::service::ClientInitializeError::TransportError { error, .. } => error,
+        // Under `Auto`, a legacy HTTP server can reject `server/discover` and
+        // then demand auth at `initialize`; the challenge is in the fallback.
+        rmcp::service::ClientInitializeError::LegacyFallbackFailed { fallback, .. } => {
+            return auth_challenge_from_initialize_error(fallback);
+        }
+        _ => return None,
     };
     let mut current: Option<&(dyn std::error::Error + 'static)> = Some(error.error.as_ref());
     while let Some(e) = current {
@@ -225,6 +231,17 @@ fn auth_challenge_from_initialize_error(
         current = e.source();
     }
     None
+}
+
+/// The error's text, using the fallback's own message for
+/// `LegacyFallbackFailed` (whose `Display` is only "both failed").
+fn initialize_error_text(err: &ClientInitializeError) -> String {
+    match err {
+        ClientInitializeError::LegacyFallbackFailed { fallback, .. } => {
+            initialize_error_text(fallback)
+        }
+        other => other.to_string(),
+    }
 }
 
 /// Run the MCP handshake. Every production connect goes through here.
@@ -331,7 +348,7 @@ impl McpExecutor {
                             let _ = tokio::time::timeout(Duration::from_millis(500), drain).await;
                         }
                         return Err(ToolError::Transport(startup_failure_message(
-                            &e.to_string(),
+                            &initialize_error_text(&e),
                             &tail,
                         )));
                     }
@@ -392,7 +409,7 @@ impl McpExecutor {
                     // depends on rmcp, and handed across as a plain `String`.
                     auth_challenge_from_initialize_error(&e)
                         .map(ToolError::AuthRequired)
-                        .unwrap_or_else(|| ToolError::Transport(e.to_string()))
+                        .unwrap_or_else(|| ToolError::Transport(initialize_error_text(&e)))
                 })?;
                 Ok(Self {
                     server_name,
@@ -701,6 +718,29 @@ mod tests {
     /// decorative: a token that is fetched but never reaches a request changes nothing.
     /// This asserts the wiring exists at the type level, which is what a later OAuth
     /// provider depends on.
+    #[test]
+    fn an_auth_challenge_in_the_legacy_fallback_phase_is_still_recovered() {
+        use rmcp::transport::streamable_http_client::{AuthRequiredError, StreamableHttpError};
+        type Http = StreamableHttpClientTransport<reqwest::Client>;
+        let auth = ClientInitializeError::transport::<Http>(
+            StreamableHttpError::<reqwest::Error>::AuthRequired(AuthRequiredError::new(
+                "Bearer realm=\"x\"".into(),
+            )),
+            "send initialize",
+        );
+        let discover = ClientInitializeError::Cancelled;
+        let err = ClientInitializeError::LegacyFallbackFailed {
+            discover: Box::new(discover),
+            fallback: Box::new(auth),
+        };
+        assert_eq!(
+            auth_challenge_from_initialize_error(&err).as_deref(),
+            Some("Bearer realm=\"x\"")
+        );
+        // The message keeps the fallback's detail, not just "both failed".
+        assert!(initialize_error_text(&err).contains("send initialize"));
+    }
+
     #[tokio::test]
     async fn a_server_that_only_speaks_2025_11_25_still_connects_and_lists_tools() {
         let (server_io, client_io) = tokio::io::duplex(16 * 1024);

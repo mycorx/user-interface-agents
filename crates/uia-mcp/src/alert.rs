@@ -202,7 +202,11 @@ impl AlertGate {
     pub fn admit(&mut self, alerts: Vec<Alert>, now: SystemTime) -> Vec<Alert> {
         let mut admitted = Vec::new();
         let mut touched = HashSet::new();
-        for alert in alerts {
+        // The feed is newest last. Only the newest `SEEN_CAP` can be remembered,
+        // so older entries of a longer feed are ignored rather than re-admitted
+        // on every read after eviction.
+        let skip = alerts.len().saturating_sub(SEEN_CAP);
+        for alert in alerts.into_iter().skip(skip) {
             touched.insert(alert.server.clone());
             let state = self.servers.entry(alert.server.clone()).or_default();
             let baseline = !state.baselined;
@@ -439,6 +443,16 @@ mod tests {
         let later = now() + Duration::from_secs(61);
         let again = alert("s", Some("later"), None, "x");
         assert_eq!(gate.admit(vec![again.clone()], later), vec![again]);
+    }
+
+    #[test]
+    fn a_feed_longer_than_the_dedupe_memory_does_not_re_admit_old_entries() {
+        let feed: Vec<Alert> = (0..300)
+            .map(|n| alert("s", Some(&format!("id{n}")), None, "x"))
+            .collect();
+        let mut gate = baselined("s", feed.clone());
+        assert!(gate.admit(feed.clone(), now()).is_empty());
+        assert!(gate.admit(feed, now()).is_empty());
     }
 
     #[test]
