@@ -7037,7 +7037,7 @@ dependencies = [
 
 [[package]]
 name = "uia-app"
-version = "0.1.10"
+version = "0.2.0"
 dependencies = [
  "async-trait",
  "axum",
