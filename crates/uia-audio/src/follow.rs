@@ -134,12 +134,10 @@ pub(crate) fn keep_queue_on_reopen(old_rate_hz: u32, new_rate_hz: u32) -> bool {
 }
 
 /// How looking up one direction's device went.
+// Only the CoreAudio unit consumes this.
 #[cfg_attr(
-    not(test),
-    expect(
-        dead_code,
-        reason = "the split echo-cancelling unit has not landed yet"
-    )
+    not(all(target_os = "macos", feature = "coreaudio-aec")),
+    allow(dead_code)
 )]
 #[derive(Debug, PartialEq, Eq)]
 pub(crate) enum Resolution {
@@ -149,12 +147,10 @@ pub(crate) enum Resolution {
 }
 
 /// How one direction runs when the unit is split.
+// Only the CoreAudio unit consumes this.
 #[cfg_attr(
-    not(test),
-    expect(
-        dead_code,
-        reason = "the split echo-cancelling unit has not landed yet"
-    )
+    not(all(target_os = "macos", feature = "coreaudio-aec")),
+    allow(dead_code)
 )]
 #[derive(Debug, PartialEq, Eq)]
 pub(crate) enum LegPlan {
@@ -165,12 +161,10 @@ pub(crate) enum LegPlan {
 }
 
 /// What the echo-cancelling unit does at open.
+// Only the CoreAudio unit consumes this.
 #[cfg_attr(
-    not(test),
-    expect(
-        dead_code,
-        reason = "the split echo-cancelling unit has not landed yet"
-    )
+    not(all(target_os = "macos", feature = "coreaudio-aec")),
+    allow(dead_code)
 )]
 #[derive(Debug, PartialEq, Eq)]
 pub(crate) enum UnitPlan {
@@ -183,12 +177,10 @@ pub(crate) enum UnitPlan {
 }
 
 /// Decide the unit from how each direction resolved.
+// Only the CoreAudio unit consumes this.
 #[cfg_attr(
-    not(test),
-    expect(
-        dead_code,
-        reason = "the split echo-cancelling unit has not landed yet"
-    )
+    not(all(target_os = "macos", feature = "coreaudio-aec")),
+    allow(dead_code)
 )]
 pub(crate) fn plan_unit(input: &Resolution, output: &Resolution) -> UnitPlan {
     fn leg(r: &Resolution) -> Option<LegPlan> {

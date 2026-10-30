@@ -5,6 +5,7 @@
 //! a bound device is still there, and listening for that to change.
 
 use super::Wake;
+use crate::follow::OpenFailure;
 use objc2_core_audio::{
     AudioDeviceID, AudioObjectAddPropertyListener, AudioObjectGetPropertyData,
     AudioObjectGetPropertyDataSize, AudioObjectID, AudioObjectPropertyAddress,
@@ -56,14 +57,16 @@ pub(crate) struct DeviceInfo {
 ///
 /// Pure, so the rules — pinned names ignore the default, unpinned choices
 /// follow it, a miss is an error rather than a guess — are tested without
-/// hardware. `devices` must already be filtered to `dir`, which is what makes
+/// hardware. A pinned name that matches nothing is
+/// [`OpenFailure::MissingPinned`], which the supervisor waits for; no
+/// default at all is [`OpenFailure::Other`]. `devices` must already be filtered to `dir`, which is what makes
 /// a name shared by a mic and a speaker resolve to the right one of each.
 pub(crate) fn choose(
     devices: &[DeviceInfo],
     default_id: Option<AudioDeviceID>,
     wanted: Option<&str>,
     dir: Direction,
-) -> Result<DeviceInfo, AudioError> {
+) -> Result<DeviceInfo, OpenFailure> {
     match wanted {
         Some(wanted) => devices
             .iter()
@@ -71,19 +74,22 @@ pub(crate) fn choose(
             .cloned()
             .ok_or_else(|| {
                 let available: Vec<&str> = devices.iter().map(|d| d.name.as_str()).collect();
-                AudioError::DeviceUnavailable(format!(
-                    "coreaudio: no audio device matching {wanted:?} among {} devices: {available:?}",
-                    dir.label()
-                ))
+                OpenFailure::MissingPinned {
+                    name: wanted.to_string(),
+                    detail: format!(
+                        "coreaudio: no audio device matching {wanted:?} among {} devices: {available:?}",
+                        dir.label()
+                    ),
+                }
             }),
         None => default_id
             .and_then(|id| devices.iter().find(|d| d.id == id))
             .cloned()
             .ok_or_else(|| {
-                AudioError::DeviceUnavailable(format!(
+                OpenFailure::Other(AudioError::DeviceUnavailable(format!(
                     "coreaudio: no default {} device",
                     dir.label()
-                ))
+                )))
             }),
     }
 }
@@ -403,8 +409,10 @@ pub(crate) fn default_device(dir: Direction) -> Option<AudioDeviceID> {
 }
 
 /// The device `wanted` names in `dir` right now, or the current default.
-pub(crate) fn resolve(dir: Direction, wanted: Option<&str>) -> Result<DeviceInfo, AudioError> {
-    choose(&list(dir)?, default_device(dir), wanted, dir)
+/// A failed device listing is [`OpenFailure::Other`], never a missing name.
+pub(crate) fn resolve(dir: Direction, wanted: Option<&str>) -> Result<DeviceInfo, OpenFailure> {
+    let devices = list(dir).map_err(OpenFailure::Other)?;
+    choose(&devices, default_device(dir), wanted, dir)
 }
 
 /// The private aggregate a running Voice Processing IO unit adds to this
@@ -631,7 +639,11 @@ mod tests {
     #[test]
     fn an_unmatched_name_is_a_clear_error_naming_what_exists() {
         let err = choose(&outputs(), Some(81), Some("AirPods"), Direction::Output).unwrap_err();
-        let text = err.to_string();
+        assert!(
+            matches!(&err, OpenFailure::MissingPinned { name, .. } if name == "AirPods"),
+            "a missing pinned name is waited for, not failed: {err:?}"
+        );
+        let text = AudioError::from(err).to_string();
         assert!(text.contains("no audio device matching"), "got: {text}");
         assert!(
             text.contains("Creative Pebble X"),
@@ -642,10 +654,9 @@ mod tests {
     #[test]
     fn no_default_and_no_name_is_an_error_not_a_guess() {
         let err = choose(&outputs(), None, None, Direction::Output).unwrap_err();
-        assert!(
-            err.to_string().contains("no default output device"),
-            "got: {err}"
-        );
+        assert!(matches!(err, OpenFailure::Other(_)), "got: {err:?}");
+        let text = AudioError::from(err).to_string();
+        assert!(text.contains("no default output device"), "got: {text}");
     }
 
     /// The private aggregate VPIO creates while it runs (measured name:

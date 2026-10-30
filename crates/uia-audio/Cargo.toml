@@ -36,8 +36,11 @@ wasapi-aec = ["dep:windows", "dep:windows-core"]
 # applies Apple's own AEC/AGC/NS to what it records, using what it plays as
 # the reference. No bundled C++, no toolchain. Enabled by default on macOS by
 # uia-app's `[target.'cfg(target_os = "macos")'.dependencies]` stanza; a
-# no-op anywhere else because the crates below are macOS-only.
+# no-op anywhere else because the crates below are macOS-only. Also enables
+# `cpal-io`: while a pinned device is missing, the direction that is present
+# runs on a plain cpal stream until both are there to rebuild the unit.
 coreaudio-aec = [
+  "cpal-io",
   "dep:objc2-audio-toolbox",
   "dep:objc2-core-audio",
   "dep:objc2-core-audio-types",
