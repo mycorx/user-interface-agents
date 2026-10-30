@@ -897,7 +897,11 @@ async fn a_failed_or_panicking_opener_leaves_a_silent_pair_and_reports_the_error
         "gone",
     )
     .await;
-    a_failed_swap_is_survived(Box::new(|| panic!("the driver fell over")), "").await;
+    a_failed_swap_is_survived(
+        Box::new(|| panic!("the driver fell over")),
+        "the driver fell over",
+    )
+    .await;
 }
 
 /// A microphone that never delivers and says it is waiting through a cell
