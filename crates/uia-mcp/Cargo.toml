@@ -40,6 +40,10 @@ tracing = "0.1.44"
 # a loaded `OAuthTokenResponse` — already pinned to this exact version
 # transitively via rmcp's own dependency on it.
 oauth2 = "5.0.0"
+# RFC 3339 `created_at` parsing for the alert baseline grace; already in the tree via reqwest/oauth2.
+chrono = { version = "0.4.45", default-features = false, features = ["std"] }
+# Alert `action.url` validation (https only).
+url = "2.5.8"
 
 [dev-dependencies]
 # The integration tests stand up an in-process rmcp *server* (duplex transport).

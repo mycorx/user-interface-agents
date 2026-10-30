@@ -2,15 +2,18 @@
 // PolyForm Internal Use 1.0.0 OR PolyForm Noncommercial 1.0.0 — see LICENSE.md.
 
 use async_trait::async_trait;
-use rmcp::model::CallToolRequestParams;
-use rmcp::service::RunningService;
+use rmcp::model::{CallToolRequestParams, ProtocolVersion};
+use rmcp::service::{ClientInitializeError, RunningService};
+use rmcp::transport::IntoTransport;
 use rmcp::transport::streamable_http_client::StreamableHttpClientTransportConfig;
 use rmcp::transport::{StreamableHttpClientTransport, TokioChildProcess};
-use rmcp::{RoleClient, ServiceExt};
+use rmcp::{ClientLifecycleMode, ClientServiceExt, RoleClient};
 use std::sync::Arc;
 use std::time::Duration;
 use uia_core::tools::{ToolDescriptor, ToolError, ToolExecutor, ToolResult};
 
+use crate::alert::Alert;
+use crate::alert_listener::{SharedAlertSettings, spawn_alert_listener};
 use crate::authed_client::AuthedHttpClient;
 use crate::stderr_tail::{StderrTail, spawn_drain};
 use crate::token::{NoToken, TokenProvider};
@@ -224,6 +227,31 @@ fn auth_challenge_from_initialize_error(
     None
 }
 
+/// Run the MCP handshake. Every production connect goes through here.
+///
+/// `().serve` is the legacy `initialize` handshake and tops out at 2025-11-25,
+/// where `subscriptions/listen` (alerts) does not exist. `Auto` probes
+/// `server/discover` for 2026-07-28 and falls back to 2025-11-25 for servers
+/// that predate it, so their tools keep working; they simply get no alerts.
+async fn start<T, E, A>(
+    transport: T,
+    // The error is boxed because `ClientInitializeError` is large (clippy::result_large_err).
+) -> Result<RunningService<RoleClient, ()>, Box<ClientInitializeError>>
+where
+    T: IntoTransport<RoleClient, E, A>,
+    E: std::error::Error + Send + Sync + 'static,
+{
+    ().serve_with_lifecycle(
+        transport,
+        ClientLifecycleMode::Auto {
+            preferred_versions: vec![ProtocolVersion::V_2026_07_28],
+            legacy_version: Some(ProtocolVersion::V_2025_11_25),
+        },
+    )
+    .await
+    .map_err(Box::new)
+}
+
 pub struct McpExecutor {
     server_name: String,
     service: RunningService<RoleClient, ()>,
@@ -293,7 +321,7 @@ impl McpExecutor {
                 let tail = StderrTail::new(redaction_values(&args, &env));
                 let drain =
                     stderr.map(|stderr| spawn_drain(stderr, tail.clone(), server_name.clone()));
-                let service = match ().serve(transport).await {
+                let service = match start(transport).await {
                     Ok(service) => service,
                     Err(e) => {
                         // The child has usually exited by now, so its stream
@@ -350,7 +378,7 @@ impl McpExecutor {
                     AuthedHttpClient::new(http_client, provider),
                     config,
                 );
-                let service = ().serve(transport).await.map_err(|e| {
+                let service = start(transport).await.map_err(|e| {
                     // A bare `e.to_string()` throws the `WWW-Authenticate`
                     // header away: `ClientInitializeError::TransportError`'s
                     // `Display` names its context, not the header inside the
@@ -374,12 +402,44 @@ impl McpExecutor {
         }
     }
 
+    /// Connect over an already-open transport (tests drive an in-process server).
+    #[cfg(test)]
+    pub(crate) async fn connect_transport<T, E, A>(name: &str, transport: T) -> Result<Self, String>
+    where
+        T: IntoTransport<RoleClient, E, A>,
+        E: std::error::Error + Send + Sync + 'static,
+    {
+        let service = start(transport).await.map_err(|e| e.to_string())?;
+        Ok(Self {
+            server_name: name.to_string(),
+            service,
+        })
+    }
+
     /// Connect with no bearer token of its own.
     ///
     /// Servers configured with an arbitrary static header are unaffected: that
     /// header travels in `custom_headers`, which this path does not touch.
     pub async fn connect(name: &str, config: McpServerConfig) -> Result<Self, ToolError> {
         Self::connect_with_token_provider(name, config, Arc::new(NoToken)).await
+    }
+
+    /// Start watching this server's alert feeds (see `alert_listener`). Alerts
+    /// that pass the gate and `settings.show` are sent to `sink`. The task ends
+    /// when the server has no feed, rejects `subscriptions/listen` (it speaks an
+    /// older protocol), the sink closes, or the connection drops; abort the
+    /// returned handle to stop it earlier.
+    pub fn start_alert_listener(
+        &self,
+        settings: SharedAlertSettings,
+        sink: tokio::sync::mpsc::UnboundedSender<Alert>,
+    ) -> tokio::task::JoinHandle<()> {
+        spawn_alert_listener(
+            self.server_name.clone(),
+            self.service.peer().clone(),
+            settings,
+            sink,
+        )
     }
 
     /// What this server declared about itself at `initialize`.
@@ -641,6 +701,20 @@ mod tests {
     /// decorative: a token that is fetched but never reaches a request changes nothing.
     /// This asserts the wiring exists at the type level, which is what a later OAuth
     /// provider depends on.
+    #[tokio::test]
+    async fn a_server_that_only_speaks_2025_11_25_still_connects_and_lists_tools() {
+        let (server_io, client_io) = tokio::io::duplex(16 * 1024);
+        crate::alert_listener::tests::spawn_legacy_server(server_io);
+        let executor = McpExecutor::connect_transport("old", client_io)
+            .await
+            .expect("an older server still connects");
+        let tools = executor.list_tools().await.expect("tools list");
+        assert_eq!(
+            tools.iter().map(|t| t.name.as_str()).collect::<Vec<_>>(),
+            vec!["old.echo"]
+        );
+    }
+
     #[tokio::test]
     async fn connect_with_a_token_provider_is_available_for_http() {
         // A dead port: this test is about the construction path, not about reaching a
