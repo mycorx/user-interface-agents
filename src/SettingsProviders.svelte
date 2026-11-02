@@ -152,6 +152,29 @@
   let foundryModelError = $state<string | null>(null);
   const foundryModelDirty = $derived(foundryModel.trim() !== savedFoundryModel);
 
+  // Mirrors `uia_app::config::TranscriptionLanguage`'s wire strings.
+  type TranscriptionLanguage = 'en' | 'auto';
+  let transcriptionLanguage = $state<TranscriptionLanguage | null>(null);
+  let transcriptionLanguageError = $state<string | null>(null);
+
+  invoke<TranscriptionLanguage>('get_transcription_language')
+    .then((value) => {
+      transcriptionLanguage = value;
+    })
+    .catch((e) => console.error('get_transcription_language invoke() failed:', e));
+
+  async function selectTranscriptionLanguage(language: TranscriptionLanguage) {
+    transcriptionLanguageError = null;
+    try {
+      await invoke('set_transcription_language', { language });
+      transcriptionLanguage = language;
+      onchange();
+    } catch (e) {
+      transcriptionLanguageError = String(e);
+      console.error('set_transcription_language invoke() failed:', e);
+    }
+  }
+
   invoke<string>('get_model', { provider: 'openai' })
     .then((value) => {
       openaiModel = value;
@@ -371,6 +394,43 @@
   {/if}
   {#if engineError}
     <p class="field-error">{engineError}</p>
+  {/if}
+</section>
+
+<section class="active-provider">
+  <h2>Transcription Language</h2>
+  <ul class="provider-radio-list">
+    <li>
+      <label>
+        <input
+          type="radio"
+          name="transcription-language"
+          value="en"
+          checked={transcriptionLanguage === 'en'}
+          onchange={() => selectTranscriptionLanguage('en')}
+        />
+        English
+      </label>
+    </li>
+    <li>
+      <label>
+        <input
+          type="radio"
+          name="transcription-language"
+          value="auto"
+          checked={transcriptionLanguage === 'auto'}
+          onchange={() => selectTranscriptionLanguage('auto')}
+        />
+        Auto
+      </label>
+    </li>
+  </ul>
+  <p class="hint">
+    Helps transcribe what you say. Auto lets the model guess the language. Takes effect after a
+    restart. Not used by AWS Bedrock.
+  </p>
+  {#if transcriptionLanguageError}
+    <p class="field-error">{transcriptionLanguageError}</p>
   {/if}
 </section>
 

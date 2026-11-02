@@ -29,6 +29,11 @@ pub struct SessionConfig {
     /// Off by default: transcription costs latency and money, and nothing
     /// consumes it until a memory backend is enabled.
     pub transcription: bool,
+    /// The ISO-639-1 language to transcribe the user in. `None` lets the
+    /// engine guess, which it can get wrong on a short or noisy utterance.
+    /// Only meaningful with `transcription` on; an engine with no such option
+    /// ignores it.
+    pub transcription_language: Option<String>,
     pub voice: Option<String>,
 }
 

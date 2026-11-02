@@ -108,6 +108,7 @@ async fn a_live_session_accepts_the_transcription_option() {
     let (tx, mut rx) = mpsc::channel(64);
     let cfg = SessionConfig {
         transcription: true,
+        transcription_language: Some("en".into()),
         ..SessionConfig::default()
     };
 

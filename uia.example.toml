@@ -10,6 +10,13 @@
 # One of: "openai", "bedrock". Defaults to "openai".
 default = "openai"
 
+[transcription]
+# The language your speech is transcribed in, for the conversation history.
+# One of: "en", "auto". Defaults to "en". "auto" lets the model guess, which it
+# can get wrong on a short or noisy phrase. Settings > Providers overrides this.
+# OpenAI and Microsoft AI Foundry use it; AWS Bedrock has no such option.
+language = "en"
+
 [openai]
 
 # How long one realtime session may last before the app rotates it, in

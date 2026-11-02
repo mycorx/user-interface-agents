@@ -1582,6 +1582,38 @@ pub struct Config {
     pub memory: MemorySection,
     #[serde(default)]
     pub audio: AudioSection,
+    #[serde(default)]
+    pub transcription: TranscriptionSection,
+}
+
+/// `[transcription]` in `uia.toml`.
+#[derive(Debug, Clone, Default, Deserialize)]
+pub struct TranscriptionSection {
+    #[serde(default)]
+    pub language: TranscriptionLanguage,
+}
+
+/// The language hint for transcribing what the user says. English unless told
+/// otherwise: left to guess, a transcription model can hear a short or noisy
+/// utterance as some other language. A new language is a new variant here and
+/// a new option in `SettingsProviders.svelte`.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub enum TranscriptionLanguage {
+    #[default]
+    #[serde(rename = "en")]
+    English,
+    #[serde(rename = "auto")]
+    Auto,
+}
+
+impl TranscriptionLanguage {
+    /// The ISO-639-1 code sent to the engine; `None` lets the model guess.
+    pub fn iso_code(self) -> Option<&'static str> {
+        match self {
+            Self::English => Some("en"),
+            Self::Auto => None,
+        }
+    }
 }
 
 #[derive(Debug, thiserror::Error)]

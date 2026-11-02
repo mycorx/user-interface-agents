@@ -1006,6 +1006,8 @@ pub async fn build_session(
     // this line existed holds assistant replies and not one word the user
     // said. Foundry emits neither half and is unaffected either way.
     session.set_transcription(memory_path.is_some());
+    session
+        .set_transcription_language(config.transcription.language.iso_code().map(str::to_string));
     // Hold the connection for as long as the window is up. Zero is the
     // documented opt-out, not an accident (`Session::set_idle_deadline`).
     //

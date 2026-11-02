@@ -58,7 +58,7 @@ pub fn parse_server_event(raw: &str) -> Result<Vec<EngineEvent>, EngineError> {
                 .to_string(),
         ),
 
-        // What the user said, transcribed by `whisper-1`. Observed live in S16
+        // What the user said, in the transcription model's words. Observed live in S16
         // (S9 could send no audio, so it never saw this): the name is the long
         // `conversation.item.*` form, NOT `input_audio_transcription.completed`,
         // and the text is in `transcript`. Its `.delta` twin is dropped for the
@@ -207,7 +207,7 @@ pub fn session_update(cfg: &SessionConfig) -> Value {
             audio["output"] = json!({"voice": voice});
         }
         if cfg.transcription {
-            audio["input"] = json!({"transcription": {"model": TRANSCRIPTION_MODEL}});
+            audio["input"] = json!({"transcription": transcription(cfg)});
         }
         session["audio"] = audio;
     }
@@ -215,9 +215,37 @@ pub fn session_update(cfg: &SessionConfig) -> Value {
     json!({"type": "session.update", "session": session})
 }
 
-/// UNVERIFIED against a live session — S1 sent no microphone audio, so no
-/// input-transcription event was ever observed. Confirm before relying on it.
-const TRANSCRIPTION_MODEL: &str = "whisper-1";
+/// OpenAI's low-latency replacement for its deprecated Whisper model, accepted
+/// over WebRTC (`gpt-transcribe` needs WebSocket).
+const TRANSCRIPTION_MODEL: &str = "gpt-live-transcribe";
+
+/// The legacy model, for an endpoint where a deployment may not offer
+/// [`TRANSCRIPTION_MODEL`].
+const WHISPER_MODEL: &str = "whisper-1";
+
+/// `audio.input.transcription`. The hint is `languages`, never the singular
+/// `language`, which this model rejects. No language lets the model guess.
+fn transcription(cfg: &SessionConfig) -> Value {
+    let mut transcription = json!({"model": TRANSCRIPTION_MODEL});
+    if let Some(language) = &cfg.transcription_language {
+        transcription["languages"] = json!([language]);
+    }
+    transcription
+}
+
+/// [`session_update`] for an endpoint that transcribes with Whisper, whose
+/// hint is the singular `language`.
+pub fn session_update_with_whisper(cfg: &SessionConfig) -> Value {
+    let mut update = session_update(cfg);
+    if cfg.transcription {
+        let mut transcription = json!({"model": WHISPER_MODEL});
+        if let Some(language) = &cfg.transcription_language {
+            transcription["language"] = json!(language);
+        }
+        update["session"]["audio"]["input"]["transcription"] = transcription;
+    }
+    update
+}
 
 /// A user turn submitted as text rather than audio (PLAN.md S4), using the
 /// same `conversation.item.create` shape `send_tool_result` already sends a
@@ -973,6 +1001,57 @@ mod tests {
             "the selected voice must be passed in the session update, nested \
              under audio.output per the GA gpt-realtime schema"
         );
+    }
+
+    #[test]
+    fn a_language_is_sent_as_languages_with_the_live_transcription_model() {
+        let cfg = SessionConfig {
+            transcription: true,
+            transcription_language: Some("en".into()),
+            ..SessionConfig::default()
+        };
+        assert_eq!(
+            session_update(&cfg)["session"]["audio"]["input"]["transcription"],
+            json!({"model": "gpt-live-transcribe", "languages": ["en"]})
+        );
+    }
+
+    #[test]
+    fn no_language_lets_the_model_guess() {
+        let cfg = SessionConfig {
+            transcription: true,
+            ..SessionConfig::default()
+        };
+        assert_eq!(
+            session_update(&cfg)["session"]["audio"]["input"]["transcription"],
+            json!({"model": "gpt-live-transcribe"})
+        );
+    }
+
+    #[test]
+    fn a_language_without_transcription_sends_nothing() {
+        let cfg = SessionConfig {
+            transcription_language: Some("en".into()),
+            ..SessionConfig::default()
+        };
+        assert!(session_update_with_whisper(&cfg)["session"]["audio"].is_null());
+        assert!(session_update(&cfg)["session"]["audio"].is_null());
+    }
+
+    #[test]
+    fn whisper_takes_the_singular_language() {
+        let cfg = SessionConfig {
+            transcription: true,
+            transcription_language: Some("en".into()),
+            voice: Some("marin".into()),
+            ..SessionConfig::default()
+        };
+        let update = session_update_with_whisper(&cfg);
+        assert_eq!(
+            update["session"]["audio"]["input"]["transcription"],
+            json!({"model": "whisper-1", "language": "en"})
+        );
+        assert_eq!(update["session"]["audio"]["output"]["voice"], "marin");
     }
 
     #[test]

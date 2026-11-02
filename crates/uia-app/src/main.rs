@@ -27,7 +27,7 @@ use uia_app::alerts::{
     AlertEnv, CardQueue, Coordinator, LiveAlertSettings, SessionStateFeed, TextTurns, UiState,
     text_turns_from, ui_state_from,
 };
-use uia_app::config::{AudioSection, Config, EngineChoice};
+use uia_app::config::{AudioSection, Config, EngineChoice, TranscriptionLanguage};
 use uia_app::hud::{
     ALERT_WINDOW_HEIGHT, ALERT_WINDOW_WIDTH, CONNECTION_EVENT, ENGINE_EVENT, ERROR_EVENT,
     LEVEL_EVENT, LEVEL_INTERVAL, MCP_ALERT_EVENT, STATE_EVENT, TEXT_TURN_SUPPORT_EVENT, TURN_EVENT,
@@ -154,6 +154,10 @@ struct ModelSettingsPath(PathBuf);
 /// [`settings::resolve_foundry_model`] have already been applied (see
 /// `main`), so `get_model` hands back the same values `build_session` used.
 /// Same request/response rationale as [`CurrentEngine`].
+/// `uia.toml`'s `[transcription] language`, before the sidecar is applied, so
+/// the picker can show what the next launch will use.
+struct ConfiguredTranscriptionLanguage(TranscriptionLanguage);
+
 struct CurrentModelSettings {
     openai: String,
     bedrock: String,
@@ -511,6 +515,11 @@ fn main() {
     config.openai.model = current_model_settings.openai.clone();
     config.bedrock.model = current_model_settings.bedrock.clone();
     config.foundry.deployment = current_model_settings.foundry.clone();
+    let configured_transcription_language = config.transcription.language;
+    config.transcription.language = settings::resolve_transcription_language(
+        configured_transcription_language,
+        persisted_model_settings.as_ref(),
+    );
 
     let ui_settings_path = ui_settings_path_for(&config_path);
 
@@ -662,6 +671,9 @@ fn main() {
         .manage(current_audio_settings)
         .manage(AgentSettingsPath(agent_settings_path))
         .manage(ModelSettingsPath(model_settings_path))
+        .manage(ConfiguredTranscriptionLanguage(
+            configured_transcription_language,
+        ))
         .manage(current_model_settings)
         .manage(UiSettingsPath(ui_settings_path))
         .manage(SessionControlState(managed_control))
@@ -689,6 +701,8 @@ fn main() {
             list_output_devices,
             get_model,
             set_model,
+            get_transcription_language,
+            set_transcription_language,
             get_ui_settings,
             set_ui_settings,
             get_agent_settings,
@@ -1440,6 +1454,29 @@ fn set_model(
         other => return Err(format!("unknown model provider {other:?}")),
     }
     settings::save(&state.0, &settings).map_err(|e| e.to_string())
+}
+
+/// The transcription language saved for the next launch, read fresh so the
+/// picker shows the saved choice rather than this launch's.
+#[tauri::command]
+fn get_transcription_language(
+    configured: tauri::State<ConfiguredTranscriptionLanguage>,
+    path: tauri::State<ModelSettingsPath>,
+) -> TranscriptionLanguage {
+    let persisted: Option<settings::ModelSettings> = settings::load(&path.0);
+    settings::resolve_transcription_language(configured.0, persisted.as_ref())
+}
+
+/// Same restart-to-switch rule as [`set_model`]: the running session already
+/// baked its language into `build_session`.
+#[tauri::command]
+fn set_transcription_language(
+    path: tauri::State<ModelSettingsPath>,
+    language: TranscriptionLanguage,
+) -> Result<(), String> {
+    let mut settings: settings::ModelSettings = settings::load(&path.0).unwrap_or_default();
+    settings.transcription_language = Some(language);
+    settings::save(&path.0, &settings).map_err(|e| e.to_string())
 }
 
 /// The Visual tab's persisted values, returned raw - no

@@ -47,8 +47,8 @@ use uia_core::engine::{
 use uia_core::tools::ToolResult;
 use uia_openai::creds::parse_client_secret;
 use uia_openai::protocol::{
-    HandshakeCapability, ToolNames, memory_item_events, parse_server_event, session_update,
-    text_turn_event,
+    HandshakeCapability, ToolNames, memory_item_events, parse_server_event,
+    session_update_with_whisper, text_turn_event,
 };
 use webrtc::data_channel::{DataChannel, DataChannelEvent};
 use webrtc::media_stream::MediaStreamTrack;
@@ -434,7 +434,10 @@ impl S2sEngine for FoundryEngine {
         .map_err(|e| EngineError::Transport(e.to_string()))?;
 
         // 6. Read task: poll the data channel, translate, forward.
-        let update = session_update(cfg);
+        // Whisper rather than OpenAI's newer model: which models a Foundry
+        // resource offers depends on its deployment, and this one is what has
+        // been running against Foundry so far.
+        let update = session_update_with_whisper(cfg);
         // Same replay as OpenAI's, from the same builder — this is a transport
         // wrapper around that protocol, not a second implementation of it.
         let history = memory_item_events(cfg);

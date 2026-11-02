@@ -559,6 +559,28 @@ async fn set_transcription_reaches_the_engine_config() {
     );
 }
 
+#[tokio::test]
+async fn the_transcription_language_reaches_the_engine_config() {
+    let engine = FakeEngine::new(vec![EngineEvent::Ready]);
+    let configs = engine.config_probe();
+    let (d, act_tx) = deps(Box::new(engine), vec![]);
+    let mut session = Session::new(d);
+    session.set_transcription_language(Some("en".to_string()));
+
+    act_tx.send(ActivationEvent::Show).await.unwrap();
+    drop(act_tx);
+    session.run().await;
+
+    assert_eq!(
+        configs
+            .last()
+            .expect("the engine was never connected")
+            .transcription_language
+            .as_deref(),
+        Some("en")
+    );
+}
+
 /// An engine with a whole turn already scripted, so everything the run loop
 /// does between frames has work to do from the first pass.
 fn an_engine_with_a_scripted_turn() -> FakeEngine {
