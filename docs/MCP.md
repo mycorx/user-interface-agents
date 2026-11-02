@@ -300,8 +300,26 @@ The limits:
 
 Every stderr line, at any time, is still echoed to UIA's own stderr as
 `mcp[<name>] <line>` (redacted the same way), so a server that dies after
-startup is visible only in that terminal. The reader keeps draining the pipe
-for the life of the process, so a chatty server cannot block on a full buffer.
+startup is visible only in UIA's own log (see below). The reader keeps
+draining the pipe for the life of the process, so a chatty server cannot
+block on a full buffer.
+
+### UIA's own log
+
+A packaged UIA started without a terminal (from the Dock, Start menu or a
+desktop launcher) writes everything it would print to stderr to
+`logs/uia.log` in its per-user directory:
+
+- macOS: `~/Library/Application Support/uia-client/logs/uia.log`
+- Windows: `%LOCALAPPDATA%\uia-client\logs\uia.log`
+- Linux: `~/.config/uia-client/logs/uia.log`
+
+That covers UIA's own messages, each server's `mcp[<name>]` lines, and the
+alert listener's (`listening for alerts`, `alert received` with the route it
+took, and why a server gives no alerts). A log over 5 MB at startup is moved
+to `uia.log.1`. Started from a terminal, or from a checkout, UIA keeps
+printing to the terminal instead. `UIA_LOG` changes what is logged, in
+`tracing` target syntax, for example `UIA_LOG=warn,uia_mcp=debug`.
 
 ## One namespace
 
@@ -357,7 +375,7 @@ is [`MCP-alerts-manual-test.md`](MCP-alerts-manual-test.md).
 UIA listens with `subscriptions/listen` and the server announces changes with
 `notifications/resources/updated`. A server that only speaks an older protocol
 still connects and its tools work, but it gets no alerts: UIA logs one info
-line and stops. There is no fallback to the deprecated `resources/subscribe`.
+line ([UIA's own log](#uias-own-log)) and stops. There is no fallback to the deprecated `resources/subscribe`.
 
 A server on 2026-07-28 that has no feed yet is still listened to, for
 `notifications/resources/list_changed` only, so a feed added later is found

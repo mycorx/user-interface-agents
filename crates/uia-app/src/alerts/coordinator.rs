@@ -89,7 +89,16 @@ impl Coordinator {
     /// A new alert. `show` off is filtered out by the caller before this.
     pub fn on_alert(&mut self, alert: Alert, wake_agent: bool, now: Instant) {
         let ui = self.env.ui_state();
-        match route(wake_agent, ui, self.session, self.env.text_turns()) {
+        let decided = route(wake_agent, ui, self.session, self.env.text_turns());
+        tracing::info!(
+            server = %alert.server,
+            stage = alert.stage.as_deref().unwrap_or(""),
+            route = ?decided,
+            ui = ?ui,
+            session = ?self.session,
+            "alert received"
+        );
+        match decided {
             Route::Card => self.env.show_card(alert),
             Route::SpeakNow => {
                 self.hold(alert, now);
@@ -210,7 +219,10 @@ impl Coordinator {
                     };
                     return;
                 }
-                Err(()) => self.env.show_card(held.alert),
+                Err(()) => {
+                    tracing::info!(server = %held.alert.server, "alert could not be spoken; showing a card");
+                    self.env.show_card(held.alert);
+                }
             }
         }
     }

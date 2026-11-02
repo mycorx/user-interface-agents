@@ -80,6 +80,11 @@ serde_json.workspace = true
 thiserror.workspace = true
 tokio.workspace = true
 toml = "1.1.8"
+# `logging`: the `tracing` events the MCP client emits (why a server gives
+# no alerts, for one) are dropped without a subscriber. Only the `fmt`
+# layer and the regex-free `Targets` filter, so no `env-filter`.
+tracing = "0.1.44"
+tracing-subscriber = { version = "0.3.23", default-features = false, features = ["fmt", "std", "registry"] }
 # `oauth_flow::DeepLinkListener::deliver` routes each incoming callback
 # through `uia_mcp::callback::PendingAuthorizations::route` first (rmcp's own
 # parser and validation, exposed as a plain `rmcp`-free `Routed` struct --
@@ -152,6 +157,12 @@ tauri-plugin-updater = { version = "2.13", optional = true }
 # The `target_os = "macos"` table below does the same for `coreaudio-aec`.
 [target.'cfg(windows)'.dependencies]
 uia-audio = { path = "../uia-audio", features = ["wasapi-aec"] }
+# `logging::redirect_stderr_to`: `SetStdHandle`.
+windows = { version = "0.62", features = ["Win32_Foundation", "Win32_System_Console"] }
+
+[target.'cfg(unix)'.dependencies]
+# `logging::redirect_stderr_to`: `dup2`.
+libc = "0.2.191"
 
 [target.'cfg(target_os = "macos")'.dependencies]
 # macOS-native echo cancellation by default, for the same reasons and by the

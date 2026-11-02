@@ -275,8 +275,12 @@ fn show_alert_card(app: &AppHandle, alert: Alert) {
     };
     // Shown without focus: the window is not focusable, so this cannot take
     // the keyboard from whatever the user is typing into.
-    let _ = window.show();
-    let _ = app.emit_to(ALERT_WINDOW, MCP_ALERT_EVENT, payload);
+    if let Err(e) = window.show() {
+        tracing::warn!(error = %e, "cannot show the alert card window");
+    }
+    if let Err(e) = app.emit_to(ALERT_WINDOW, MCP_ALERT_EVENT, payload) {
+        tracing::warn!(error = %e, "cannot send the alert to its card window");
+    }
 }
 
 /// Undecorated, transparent, always on top, on every workspace, never
@@ -409,6 +413,16 @@ fn main() {
         eprintln!(
             "uia: cannot create {}: {e}",
             location.config_dir().display()
+        );
+    }
+    // Right after the per-user directory exists, before anything else has
+    // much to say: a packaged build launched without a terminal would
+    // otherwise lose every message below. See `logging`.
+    if let Some(log) = uia_app::logging::init(&location) {
+        tracing::info!(
+            version = env!("CARGO_PKG_VERSION"),
+            log = %log.display(),
+            "uia started"
         );
     }
     let config_path = location.config_file();

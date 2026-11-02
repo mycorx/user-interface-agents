@@ -5,6 +5,7 @@ pub mod activation_desktop;
 pub mod alerts;
 pub mod config;
 pub mod hud;
+pub mod logging;
 pub mod mcp_registry;
 pub mod memory;
 pub mod oauth_flow;
