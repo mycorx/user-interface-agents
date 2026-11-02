@@ -25,7 +25,8 @@ paste the results into the PR's "## Testing". Set up with the test server in
       button highlights it, without clicking first and with another app in
       front. The window never takes focus, so on macOS this comes from polling
       the cursor, not from the browser's own hover.
-- [ ] The card's rim and action button use the accent chosen in Settings.
+- [ ] The card follows Settings > Visual on its next alert: theme (light, dark
+      or following the OS), accent on its rim and action button, and glass tint.
 - [ ] The card window is sized to its content: the empty area around the cards
       does not block clicks on whatever is behind it, and the window hides
       when the last card goes.

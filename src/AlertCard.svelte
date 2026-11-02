@@ -30,6 +30,8 @@
   const timers = new Map<number, ReturnType<typeof setTimeout>>();
   const hovered = new Set<number>();
   let accent = $state(DEFAULT_ACCENT);
+  let lightMode = $state(false);
+  let glassWash = $state(false);
 
   // This window never takes focus, and WebKit on macOS only tracks the mouse
   // in the key window, so neither `:hover` nor `mouseenter` fires there until
@@ -75,19 +77,29 @@
     };
   });
 
-  // Read on every alert rather than once: this window outlives a change in
-  // Settings, and an alert is the only time it is seen.
-  async function loadAccent() {
+  // The look chosen in Settings, resolved the way CardDeck.svelte resolves it
+  // (a null theme follows the OS). Read on every alert rather than once: this
+  // window outlives a change in Settings, and an alert is the only time it is
+  // seen.
+  async function loadLook() {
     try {
-      const settings = await invoke<{ accent: string | null }>('get_ui_settings');
+      const settings = await invoke<{
+        theme: string | null;
+        accent: string | null;
+        glass_tint: string | null;
+      }>('get_ui_settings');
       accent = settings.accent ?? DEFAULT_ACCENT;
+      glassWash = settings.glass_tint === 'wash';
+      lightMode =
+        settings.theme === 'light' ||
+        (settings.theme !== 'dark' && window.matchMedia('(prefers-color-scheme: light)').matches);
     } catch (e) {
       console.error('get_ui_settings invoke() failed:', e);
     }
   }
 
   async function refresh() {
-    await loadAccent();
+    await loadLook();
     try {
       alerts = await invoke<Alert[]>('take_pending_alerts');
     } catch (e) {
@@ -187,7 +199,13 @@
 </script>
 
 <span id="open-hint" class="sr-only">Opens the assistant</span>
-<div class="stack" style="--accent: {accent}" bind:this={stack}>
+<div
+  class="stack"
+  class:light-mode={lightMode}
+  class:glass-wash={glassWash}
+  style="--accent: {accent}"
+  bind:this={stack}
+>
   {#each alerts as alert (alert.card_id)}
     <!-- svelte-ignore a11y_no_static_element_interactions -->
     <div
@@ -248,7 +266,6 @@
       'Segoe UI',
       sans-serif;
     font-size: 13px;
-    color: #e8eaf0;
   }
 
   .sr-only {
@@ -267,11 +284,27 @@
     padding: 8px;
     box-sizing: border-box;
     width: 380px;
+
+    /* The main client's tokens (CardDeck.svelte). The fill is denser than its
+       glass because this window has no native acrylic behind it, and the card
+       has to stay readable over whatever is on screen. */
+    --tint: 255, 255, 255;
+    --ink-1: #e8eaf0;
+    --ink-4: #8890a0;
+    --card-fill: rgba(18, 20, 26, 0.92);
+    color: var(--ink-1);
+  }
+
+  .stack.light-mode {
+    --tint: 20, 22, 30;
+    --ink-1: #1b1d24;
+    --ink-4: #6b7080;
+    --card-fill: rgba(255, 255, 255, 0.94);
   }
 
   .card {
-    background: rgba(18, 20, 26, 0.92);
-    border: 1px solid rgba(255, 255, 255, 0.12);
+    background: var(--card-fill);
+    border: 1px solid rgba(var(--tint), 0.12);
     border-radius: 14px;
     padding: 12px 14px;
     /* The accent rim the HUD card wears, so the two read as one app. */
@@ -280,6 +313,14 @@
       0 0 0 1px color-mix(in srgb, var(--accent) 30%, transparent) inset,
       0 0 16px -3px color-mix(in srgb, var(--accent) 50%, transparent) inset;
     animation: appear 160ms ease-out;
+  }
+
+  .glass-wash .card {
+    background-image: linear-gradient(
+      160deg,
+      color-mix(in srgb, var(--accent) 22%, transparent),
+      transparent 65%
+    );
   }
 
   @media (prefers-reduced-motion: reduce) {
@@ -311,7 +352,7 @@
 
   .server {
     font-size: 11px;
-    color: #8890a0;
+    color: var(--ink-4);
     text-transform: uppercase;
     letter-spacing: 0.04em;
   }
@@ -327,7 +368,7 @@
   }
 
   .details {
-    color: #8890a0;
+    color: var(--ink-4);
   }
 
   .actions {
@@ -342,14 +383,14 @@
     border-radius: 8px;
     padding: 5px 12px;
     cursor: pointer;
-    border: 1px solid rgba(255, 255, 255, 0.12);
-    background: rgba(255, 255, 255, 0.06);
-    color: #e8eaf0;
+    border: 1px solid rgba(var(--tint), 0.12);
+    background: rgba(var(--tint), 0.06);
+    color: var(--ink-1);
   }
 
   .actions button:hover,
   .actions button.hover {
-    background: rgba(255, 255, 255, 0.16);
+    background: rgba(var(--tint), 0.16);
     border-color: color-mix(in srgb, var(--accent) 60%, transparent);
   }
 
