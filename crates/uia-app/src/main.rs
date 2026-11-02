@@ -32,8 +32,8 @@ use uia_app::hud::{
     ALERT_WINDOW_HEIGHT, ALERT_WINDOW_WIDTH, CONNECTION_EVENT, ENGINE_EVENT, ERROR_EVENT,
     LEVEL_EVENT, LEVEL_INTERVAL, MCP_ALERT_EVENT, STATE_EVENT, TEXT_TURN_SUPPORT_EVENT, TURN_EVENT,
     WaitingNotice, WindowAction, alert_payload, alert_window_position, connection_payload,
-    engine_payload, error_payload, fit_in_work_area, level_payload, state_payload,
-    window_action_for,
+    cursor_in_window, engine_payload, error_payload, fit_in_work_area, level_payload,
+    state_payload, window_action_for,
 };
 use uia_app::mcp_registry;
 use uia_app::oauth_flow;
@@ -726,7 +726,8 @@ fn main() {
             get_update_status,
             check_for_update,
             install_update,
-            place_hud_window
+            place_hud_window,
+            alert_cursor_position
         ])
         .setup(move |app| {
             let handle = app.handle().clone();
@@ -1150,6 +1151,23 @@ fn place_hud_window(
         .set_position(tauri::PhysicalPosition::new(x, y))
         .map_err(|e| e.to_string())?;
     Ok(WindowPoint { x, y })
+}
+
+/// Where the cursor is inside the calling window, in logical pixels. The
+/// alert window never takes focus, and WebKit on macOS only tracks the mouse
+/// in the key window, so without this its cards never see a hover until they
+/// are clicked. `AlertCard.svelte` polls it while cards are up. The maths is
+/// `hud::cursor_in_window`, tested.
+#[tauri::command]
+fn alert_cursor_position(window: tauri::WebviewWindow) -> Result<(f64, f64), String> {
+    let cursor = window.cursor_position().map_err(|e| e.to_string())?;
+    let position = window.outer_position().map_err(|e| e.to_string())?;
+    let scale = window.scale_factor().map_err(|e| e.to_string())?;
+    Ok(cursor_in_window(
+        (cursor.x, cursor.y),
+        (position.x, position.y),
+        scale,
+    ))
 }
 
 /// Persists the selector's choice for the *next* launch. Restart-to-switch

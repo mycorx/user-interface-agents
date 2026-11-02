@@ -295,6 +295,21 @@ pub fn fit_in_work_area(
     )
 }
 
+/// The cursor's position inside a window, in the logical pixels a page
+/// works in, from the desktop position of the cursor and the window (both
+/// physical). A non-positive or non-finite scale counts as 1.
+pub fn cursor_in_window(cursor: (f64, f64), window: (i32, i32), scale: f64) -> (f64, f64) {
+    let scale = if scale.is_finite() && scale > 0.0 {
+        scale
+    } else {
+        1.0
+    };
+    (
+        (cursor.0 - f64::from(window.0)) / scale,
+        (cursor.1 - f64::from(window.1)) / scale,
+    )
+}
+
 /// What an [`ActivationEvent`] means for the overlay window.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum WindowAction {
@@ -672,6 +687,28 @@ mod tests {
             fit_in_work_area((50, 50), (1200, 900), (0, 0), (1000, 800)),
             (0, 0)
         );
+    }
+
+    #[test]
+    fn the_cursor_is_measured_from_the_window_in_logical_pixels() {
+        assert_eq!(
+            cursor_in_window((2100.0, 300.0), (2000, 100), 2.0),
+            (50.0, 100.0)
+        );
+    }
+
+    #[test]
+    fn a_cursor_left_of_the_window_comes_out_negative() {
+        // The page's `elementFromPoint` then finds nothing, as it should.
+        assert_eq!(
+            cursor_in_window((10.0, 10.0), (20, 20), 1.0),
+            (-10.0, -10.0)
+        );
+    }
+
+    #[test]
+    fn a_nonsensical_scale_does_not_break_the_cursor_position() {
+        assert_eq!(cursor_in_window((30.0, 40.0), (0, 0), 0.0), (30.0, 40.0));
     }
 
     #[test]
