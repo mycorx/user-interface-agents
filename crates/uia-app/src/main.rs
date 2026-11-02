@@ -32,7 +32,8 @@ use uia_app::hud::{
     ALERT_WINDOW_HEIGHT, ALERT_WINDOW_WIDTH, CONNECTION_EVENT, ENGINE_EVENT, ERROR_EVENT,
     LEVEL_EVENT, LEVEL_INTERVAL, MCP_ALERT_EVENT, STATE_EVENT, TEXT_TURN_SUPPORT_EVENT, TURN_EVENT,
     WaitingNotice, WindowAction, alert_payload, alert_window_position, connection_payload,
-    engine_payload, error_payload, level_payload, state_payload, window_action_for,
+    engine_payload, error_payload, fit_in_work_area, level_payload, state_payload,
+    window_action_for,
 };
 use uia_app::mcp_registry;
 use uia_app::oauth_flow;
@@ -724,7 +725,8 @@ fn main() {
             remove_mcp_remote_server,
             get_update_status,
             check_for_update,
-            install_update
+            install_update,
+            place_hud_window
         ])
         .setup(move |app| {
             let handle = app.handle().clone();
@@ -1096,6 +1098,58 @@ async fn check_for_update(app: AppHandle) -> UpdateStatus {
 #[tauri::command]
 async fn install_update(app: AppHandle) -> Result<(), String> {
     updater::install(&app).await
+}
+
+/// A window position in physical pixels, as `outerPosition()` gives it.
+#[derive(Debug, Clone, Copy, serde::Serialize, serde::Deserialize)]
+struct WindowPoint {
+    x: i32,
+    y: i32,
+}
+
+/// Moves the calling window to `to` (or leaves it where it is), then into
+/// its monitor's work area, and returns where it ended up. `CardDeck.svelte`
+/// calls it after every resize: the deck grows from its top-left corner, so
+/// a HUD parked near the right or bottom edge would otherwise open Settings
+/// or History partly off screen, out of reach of the mouse. The geometry is
+/// `hud::fit_in_work_area`, tested.
+#[tauri::command]
+fn place_hud_window(
+    window: tauri::WebviewWindow,
+    to: Option<WindowPoint>,
+) -> Result<WindowPoint, String> {
+    let at = match to {
+        Some(point) => point,
+        None => {
+            let pos = window.outer_position().map_err(|e| e.to_string())?;
+            WindowPoint { x: pos.x, y: pos.y }
+        }
+    };
+    let monitor = match window.monitor_from_point(f64::from(at.x), f64::from(at.y)) {
+        Ok(Some(monitor)) => Some(monitor),
+        _ => window
+            .current_monitor()
+            .ok()
+            .flatten()
+            .or_else(|| window.primary_monitor().ok().flatten()),
+    };
+    let size = window.outer_size().map_err(|e| e.to_string())?;
+    let (x, y) = match monitor {
+        Some(monitor) => {
+            let area = monitor.work_area();
+            fit_in_work_area(
+                (at.x, at.y),
+                (size.width, size.height),
+                (area.position.x, area.position.y),
+                (area.size.width, area.size.height),
+            )
+        }
+        None => (at.x, at.y),
+    };
+    window
+        .set_position(tauri::PhysicalPosition::new(x, y))
+        .map_err(|e| e.to_string())?;
+    Ok(WindowPoint { x, y })
 }
 
 /// Persists the selector's choice for the *next* launch. Restart-to-switch

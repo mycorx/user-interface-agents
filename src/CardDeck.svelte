@@ -286,19 +286,27 @@
   // somewhere other than where our own last call left it. Centering
   // unconditionally would snap a deliberately-placed overlay back to the
   // middle every time Settings opened.
-  let lastAppliedPos: { x: number; y: number } | null = null;
+  //
+  // A resize grows the window from its top-left corner, so after every one
+  // `place_hud_window` pulls it back inside its monitor's work area: a HUD
+  // parked against the right or bottom edge would otherwise open Settings or
+  // History partly off screen, with its close button out of reach. Where
+  // that pull moved it, `homePos` remembers where the HUD was, and closing
+  // the overlay puts it back there unless the user has moved it since.
+  type Point = { x: number; y: number };
+  let lastAppliedPos: Point | null = null;
   let userMovedWindow = false;
   let prevOverlayOpen: boolean | null = null;
+  let homePos: Point | null = null;
 
   async function applyWindowSize(kind: SizeKind, open: boolean) {
     const appWindow = getCurrentWindow();
     try {
-      if (!userMovedWindow && lastAppliedPos) {
-        const pos = await appWindow.outerPosition();
-        if (pos.x !== lastAppliedPos.x || pos.y !== lastAppliedPos.y) {
-          userMovedWindow = true;
-        }
-      }
+      const before = await appWindow.outerPosition();
+      const movedByUser =
+        lastAppliedPos !== null &&
+        (before.x !== lastAppliedPos.x || before.y !== lastAppliedPos.y);
+      if (movedByUser) userMovedWindow = true;
 
       const { w, h } = SIZES[kind];
       await appWindow.setSize(new LogicalSize(w, h));
@@ -310,7 +318,15 @@
       }
       prevOverlayOpen = open;
 
-      const settled = await appWindow.outerPosition();
+      const returnHome = openCloseTransition && !open && homePos !== null && !movedByUser;
+      const settled = await invoke<Point>('place_hud_window', {
+        to: returnHome ? homePos : null,
+      });
+      if (openCloseTransition) {
+        const pushedIn =
+          open && userMovedWindow && (settled.x !== before.x || settled.y !== before.y);
+        homePos = pushedIn ? { x: before.x, y: before.y } : null;
+      }
       lastAppliedPos = { x: settled.x, y: settled.y };
     } catch (e) {
       console.error('window resize failed:', e);

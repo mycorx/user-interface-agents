@@ -272,6 +272,29 @@ impl WaitingNotice {
     }
 }
 
+/// Where a window at `position` with `size` must go to lie inside a
+/// monitor's work area, all in physical pixels. It moves only as far as it
+/// must; a window larger than the area is aligned to the area's top-left
+/// corner, so its title strip and close button stay reachable.
+pub fn fit_in_work_area(
+    position: (i32, i32),
+    size: (u32, u32),
+    area_position: (i32, i32),
+    area_size: (u32, u32),
+) -> (i32, i32) {
+    fn fit(start: i32, len: u32, area_start: i32, area_len: u32) -> i32 {
+        let (start, len) = (i64::from(start), i64::from(len));
+        let (area_start, area_len) = (i64::from(area_start), i64::from(area_len));
+        let fitted = start.min(area_start + area_len - len).max(area_start);
+        // Between two i32 values, so it fits back.
+        i32::try_from(fitted).unwrap_or(i32::MAX)
+    }
+    (
+        fit(position.0, size.0, area_position.0, area_size.0),
+        fit(position.1, size.1, area_position.1, area_size.1),
+    )
+}
+
 /// What an [`ActivationEvent`] means for the overlay window.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum WindowAction {
@@ -598,6 +621,56 @@ mod tests {
         assert_eq!(
             alert_window_position((0, 0), (1000, 800), 0.0),
             alert_window_position((0, 0), (1000, 800), 1.0)
+        );
+    }
+
+    #[test]
+    fn a_window_inside_the_work_area_stays_put() {
+        assert_eq!(
+            fit_in_work_area((100, 200), (600, 584), (0, 25), (1920, 1055)),
+            (100, 200)
+        );
+    }
+
+    #[test]
+    fn a_window_past_the_right_edge_moves_left_just_enough() {
+        // The HUD parked against the right edge, then grown into Settings.
+        assert_eq!(
+            fit_in_work_area((1578, 300), (600, 584), (0, 25), (1920, 1055)),
+            (1320, 300)
+        );
+    }
+
+    #[test]
+    fn a_window_past_the_bottom_edge_moves_up_just_enough() {
+        assert_eq!(
+            fit_in_work_area((100, 800), (600, 584), (0, 25), (1920, 1055)),
+            (100, 496)
+        );
+    }
+
+    #[test]
+    fn a_window_above_or_left_of_the_area_moves_in() {
+        // Above the menu bar, or dragged half off the left edge.
+        assert_eq!(
+            fit_in_work_area((-300, 0), (600, 584), (0, 25), (1920, 1055)),
+            (0, 25)
+        );
+    }
+
+    #[test]
+    fn a_window_on_a_monitor_left_of_the_primary_fits_that_monitor() {
+        assert_eq!(
+            fit_in_work_area((-200, 900), (600, 584), (-1920, 0), (1920, 1080)),
+            (-600, 496)
+        );
+    }
+
+    #[test]
+    fn a_window_larger_than_the_area_keeps_its_top_left_corner_visible() {
+        assert_eq!(
+            fit_in_work_area((50, 50), (1200, 900), (0, 0), (1000, 800)),
+            (0, 0)
         );
     }
 
