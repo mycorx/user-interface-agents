@@ -3,4 +3,4 @@
 
 pub mod engine;
 
-pub use engine::{DEFAULT_DEPLOYMENT, FoundryEngine};
+pub use engine::{DEFAULT_DEPLOYMENT, DEFAULT_TRANSCRIPTION_DEPLOYMENT, FoundryEngine};

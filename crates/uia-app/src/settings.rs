@@ -323,6 +323,9 @@ pub struct ModelSettings {
     pub foundry: Option<String>,
     #[serde(default)]
     pub transcription_language: Option<TranscriptionLanguage>,
+    /// `Some("")` is a deliberate "no transcription", not an unset field.
+    #[serde(default)]
+    pub foundry_transcription: Option<String>,
 }
 
 /// `uia-model.json`, same sibling-of-`uia.toml` convention as
@@ -355,6 +358,17 @@ pub fn resolve_bedrock_model(configured: String, persisted: Option<&ModelSetting
 pub fn resolve_foundry_model(configured: String, persisted: Option<&ModelSettings>) -> String {
     persisted
         .and_then(|s| s.foundry.clone())
+        .unwrap_or(configured)
+}
+
+/// Same precedence rule as [`resolve_openai_model`], for `uia.toml`'s
+/// `[foundry] transcription_deployment`.
+pub fn resolve_foundry_transcription_deployment(
+    configured: String,
+    persisted: Option<&ModelSettings>,
+) -> String {
+    persisted
+        .and_then(|s| s.foundry_transcription.clone())
         .unwrap_or(configured)
 }
 
@@ -581,6 +595,36 @@ pub fn saved_audio_settings(configured: &AudioSection, path: &Path) -> AudioSect
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn foundry_transcribes_with_gpt_live_transcribe_unless_told_otherwise() {
+        let config: crate::config::Config = toml::from_str("").unwrap();
+        assert_eq!(
+            config.foundry.transcription_deployment,
+            "gpt-live-transcribe"
+        );
+        assert_eq!(
+            crate::config::FoundrySection::default().transcription_deployment,
+            "gpt-live-transcribe"
+        );
+    }
+
+    #[test]
+    fn an_empty_foundry_transcription_deployment_in_the_sidecar_is_kept() {
+        // Empty is how the user turns it off, so it must beat the config.
+        let persisted = ModelSettings {
+            foundry_transcription: Some(String::new()),
+            ..ModelSettings::default()
+        };
+        assert_eq!(
+            resolve_foundry_transcription_deployment("from-toml".into(), Some(&persisted)),
+            ""
+        );
+        assert_eq!(
+            resolve_foundry_transcription_deployment("from-toml".into(), None),
+            "from-toml"
+        );
+    }
 
     #[test]
     fn the_transcription_language_defaults_to_english_with_no_config_or_sidecar() {
@@ -1450,6 +1494,7 @@ mod tests {
                 bedrock: Some("amazon.nova-2-sonic-v1:0".into()),
                 foundry: Some("my-deployment".into()),
                 transcription_language: None,
+                foundry_transcription: None,
             },
         )
         .unwrap();
@@ -1463,6 +1508,7 @@ mod tests {
                 bedrock: Some("amazon.nova-2-sonic-v1:0".into()),
                 foundry: Some("my-deployment".into()),
                 transcription_language: None,
+                foundry_transcription: None,
             })
         );
     }
@@ -1483,6 +1529,7 @@ mod tests {
             bedrock: None,
             foundry: None,
             transcription_language: None,
+            foundry_transcription: None,
         };
         assert_eq!(
             resolve_openai_model("gpt-realtime-2.1-mini".into(), Some(&persisted)),
@@ -1505,6 +1552,7 @@ mod tests {
             bedrock: None,
             foundry: Some("ui-deployment".into()),
             transcription_language: None,
+            foundry_transcription: None,
         };
         assert_eq!(
             resolve_foundry_model("configured-deployment".into(), Some(&persisted)),
@@ -1527,6 +1575,7 @@ mod tests {
             bedrock: Some("amazon.nova-9-sonic-v1:0".into()),
             foundry: None,
             transcription_language: None,
+            foundry_transcription: None,
         };
         assert_eq!(
             resolve_bedrock_model("amazon.nova-2-sonic-v1:0".into(), Some(&persisted)),
@@ -1549,6 +1598,7 @@ mod tests {
             bedrock: None,
             foundry: None,
             transcription_language: None,
+            foundry_transcription: None,
         };
         assert_eq!(
             resolve_openai_model("gpt-realtime-2.1-mini".into(), Some(&persisted)),

@@ -15,6 +15,7 @@ default = "openai"
 # One of: "en", "auto". Defaults to "en". "auto" lets the model guess, which it
 # can get wrong on a short or noisy phrase. Settings > Providers overrides this.
 # OpenAI and Microsoft AI Foundry use it; AWS Bedrock has no such option.
+# Foundry also needs [foundry] transcription_deployment.
 language = "en"
 
 [openai]
@@ -98,6 +99,12 @@ region = "ap-northeast-1"
 # like the others on session age rather than idle time. Set 0 to disable
 # rotation.
 # max_session_duration_secs = 1800
+
+# The deployment that transcribes your speech for the conversation history.
+# It is separate from the realtime deployment, so deploy gpt-live-transcribe in
+# your Azure resource, or put your own deployment's name here. Empty turns
+# transcription off: voice still works, but your words are not saved.
+# transcription_deployment = "gpt-live-transcribe"
 
 [memory]
 # "local" (default) keeps transcripts in uia-conversation.json beside this

@@ -162,6 +162,7 @@ struct CurrentModelSettings {
     openai: String,
     bedrock: String,
     foundry: String,
+    foundry_transcription: String,
 }
 
 /// The path `set_ui_settings` persists to — same rationale as
@@ -511,10 +512,15 @@ fn main() {
             config.foundry.deployment.clone(),
             persisted_model_settings.as_ref(),
         ),
+        foundry_transcription: settings::resolve_foundry_transcription_deployment(
+            config.foundry.transcription_deployment.clone(),
+            persisted_model_settings.as_ref(),
+        ),
     };
     config.openai.model = current_model_settings.openai.clone();
     config.bedrock.model = current_model_settings.bedrock.clone();
     config.foundry.deployment = current_model_settings.foundry.clone();
+    config.foundry.transcription_deployment = current_model_settings.foundry_transcription.clone();
     let configured_transcription_language = config.transcription.language;
     config.transcription.language = settings::resolve_transcription_language(
         configured_transcription_language,
@@ -1428,6 +1434,7 @@ fn get_model(
         "openai" => Ok(state.openai.clone()),
         "bedrock" => Ok(state.bedrock.clone()),
         "foundry" => Ok(state.foundry.clone()),
+        "foundry_transcription" => Ok(state.foundry_transcription.clone()),
         other => Err(format!("unknown model provider {other:?}")),
     }
 }
@@ -1443,7 +1450,8 @@ fn set_model(
     value: String,
 ) -> Result<(), String> {
     let trimmed = value.trim();
-    if trimmed.is_empty() {
+    // Empty is meaningful for this one field: it turns transcription off.
+    if trimmed.is_empty() && provider != "foundry_transcription" {
         return Err("model value must not be empty".to_string());
     }
     let mut settings: settings::ModelSettings = settings::load(&state.0).unwrap_or_default();
@@ -1451,6 +1459,7 @@ fn set_model(
         "openai" => settings.openai = Some(trimmed.to_string()),
         "bedrock" => settings.bedrock = Some(trimmed.to_string()),
         "foundry" => settings.foundry = Some(trimmed.to_string()),
+        "foundry_transcription" => settings.foundry_transcription = Some(trimmed.to_string()),
         other => return Err(format!("unknown model provider {other:?}")),
     }
     settings::save(&state.0, &settings).map_err(|e| e.to_string())

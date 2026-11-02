@@ -212,11 +212,16 @@ pub fn engine_for(
                         .into(),
                 )
             })?;
-            Box::new(uia_foundry::FoundryEngine::new(
-                endpoint,
-                config.foundry.resolve_api_key(store)?,
-                config.foundry.deployment.clone(),
-            ))
+            Box::new(
+                uia_foundry::FoundryEngine::new(
+                    endpoint,
+                    config.foundry.resolve_api_key(store)?,
+                    config.foundry.deployment.clone(),
+                )
+                .with_transcription_deployment(Some(
+                    config.foundry.transcription_deployment.clone(),
+                )),
+            )
         }
     })
 }
@@ -1004,7 +1009,8 @@ pub async fn build_session(
     // Only the user's half rides on this. Every engine that speaks emits its
     // own output transcript regardless, which is why a store written before
     // this line existed holds assistant replies and not one word the user
-    // said. Foundry emits neither half and is unaffected either way.
+    // said. Foundry needs a deployment for it as well, `[foundry]
+    // transcription_deployment`; an empty one asks for nothing.
     session.set_transcription(memory_path.is_some());
     session
         .set_transcription_language(config.transcription.language.iso_code().map(str::to_string));

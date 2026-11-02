@@ -7330,6 +7330,7 @@ dependencies = [
  "rtc",
  "serde_json",
  "tokio",
+ "tracing",
  "uia-audio",
  "uia-core",
  "uia-engine-contract",

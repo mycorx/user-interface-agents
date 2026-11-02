@@ -91,6 +91,20 @@ pub fn parse_server_event(raw: &str) -> Result<Vec<EngineEvent>, EngineError> {
                 .unwrap_or(Value::Null),
         },
 
+        // Costs the history this one utterance, not the conversation, so it is
+        // not an `Error`. Logged because nothing else would explain the gap:
+        // on Foundry the usual cause is a misnamed transcription deployment.
+        "conversation.item.input_audio_transcription.failed" => {
+            let err = v.get("error").unwrap_or(&Value::Null);
+            let code = err.get("code").and_then(Value::as_str).unwrap_or_default();
+            let message = err
+                .get("message")
+                .and_then(Value::as_str)
+                .unwrap_or_default();
+            tracing::warn!(code, message, "a user utterance could not be transcribed");
+            return Ok(Vec::new());
+        }
+
         "error" => {
             let err = v.get("error").unwrap_or(&Value::Null);
             if is_benign(err) {
@@ -207,7 +221,7 @@ pub fn session_update(cfg: &SessionConfig) -> Value {
             audio["output"] = json!({"voice": voice});
         }
         if cfg.transcription {
-            audio["input"] = json!({"transcription": transcription(cfg)});
+            audio["input"] = json!({"transcription": transcription(cfg, TRANSCRIPTION_MODEL)});
         }
         session["audio"] = audio;
     }
@@ -219,30 +233,29 @@ pub fn session_update(cfg: &SessionConfig) -> Value {
 /// over WebRTC (`gpt-transcribe` needs WebSocket).
 const TRANSCRIPTION_MODEL: &str = "gpt-live-transcribe";
 
-/// The legacy model, for an endpoint where a deployment may not offer
-/// [`TRANSCRIPTION_MODEL`].
-const WHISPER_MODEL: &str = "whisper-1";
-
 /// `audio.input.transcription`. The hint is `languages`, never the singular
 /// `language`, which this model rejects. No language lets the model guess.
-fn transcription(cfg: &SessionConfig) -> Value {
-    let mut transcription = json!({"model": TRANSCRIPTION_MODEL});
+fn transcription(cfg: &SessionConfig, model: &str) -> Value {
+    let mut transcription = json!({"model": model});
     if let Some(language) = &cfg.transcription_language {
         transcription["languages"] = json!([language]);
     }
     transcription
 }
 
-/// [`session_update`] for an endpoint that transcribes with Whisper, whose
-/// hint is the singular `language`.
-pub fn session_update_with_whisper(cfg: &SessionConfig) -> Value {
+/// [`session_update`] for an endpoint where `model` addresses a deployment the
+/// user named, so transcription depends on one existing (Azure AI Foundry).
+/// `None` requests no transcription, whatever `cfg` asks for.
+pub fn session_update_for_deployment(cfg: &SessionConfig, deployment: Option<&str>) -> Value {
+    let Some(deployment) = deployment else {
+        return session_update(&SessionConfig {
+            transcription: false,
+            ..cfg.clone()
+        });
+    };
     let mut update = session_update(cfg);
     if cfg.transcription {
-        let mut transcription = json!({"model": WHISPER_MODEL});
-        if let Some(language) = &cfg.transcription_language {
-            transcription["language"] = json!(language);
-        }
-        update["session"]["audio"]["input"]["transcription"] = transcription;
+        update["session"]["audio"]["input"]["transcription"] = transcription(cfg, deployment);
     }
     update
 }
@@ -1034,24 +1047,48 @@ mod tests {
             transcription_language: Some("en".into()),
             ..SessionConfig::default()
         };
-        assert!(session_update_with_whisper(&cfg)["session"]["audio"].is_null());
         assert!(session_update(&cfg)["session"]["audio"].is_null());
+        assert!(session_update_for_deployment(&cfg, Some("stt"))["session"]["audio"].is_null());
     }
 
     #[test]
-    fn whisper_takes_the_singular_language() {
+    fn a_deployment_replaces_the_model_and_keeps_the_rest() {
         let cfg = SessionConfig {
             transcription: true,
             transcription_language: Some("en".into()),
             voice: Some("marin".into()),
             ..SessionConfig::default()
         };
-        let update = session_update_with_whisper(&cfg);
+        let update = session_update_for_deployment(&cfg, Some("my-transcriber"));
         assert_eq!(
             update["session"]["audio"]["input"]["transcription"],
-            json!({"model": "whisper-1", "language": "en"})
+            json!({"model": "my-transcriber", "languages": ["en"]})
         );
         assert_eq!(update["session"]["audio"]["output"]["voice"], "marin");
+    }
+
+    #[test]
+    fn no_deployment_requests_no_transcription_and_keeps_the_voice() {
+        let cfg = SessionConfig {
+            transcription: true,
+            transcription_language: Some("en".into()),
+            voice: Some("marin".into()),
+            ..SessionConfig::default()
+        };
+        let update = session_update_for_deployment(&cfg, None);
+        assert!(update["session"]["audio"]["input"].is_null());
+        assert_eq!(update["session"]["audio"]["output"]["voice"], "marin");
+    }
+
+    #[test]
+    fn a_failed_transcription_reaches_no_one_as_an_event() {
+        // A missing transcription deployment must cost the history its user
+        // half, not the voice session: an `Error` here would reconnect it.
+        let raw = r#"{"type":"conversation.item.input_audio_transcription.failed",
+                      "item_id":"item_1","content_index":0,
+                      "error":{"type":"invalid_request_error",
+                      "code":"model_not_found","message":"no such deployment"}}"#;
+        assert!(parse_server_event(raw).unwrap().is_empty());
     }
 
     #[test]
