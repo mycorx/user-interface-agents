@@ -10,6 +10,7 @@
 //! accept different devices and that 48 kHz mono f32 is accepted on both even
 //! when a device runs at 16 kHz (VPIO converts).
 
+use crate::live::{LiveFormat, PlaybackQueue};
 use objc2_audio_toolbox::{
     AURenderCallbackStruct, AUVoiceIOOtherAudioDuckingConfiguration,
     AUVoiceIOOtherAudioDuckingLevel, AudioComponentDescription, AudioComponentFindNext,
@@ -30,16 +31,16 @@ use objc2_core_audio_types::{
     kAudioFormatLinearPCM,
 };
 use std::cell::UnsafeCell;
-use std::collections::VecDeque;
 use std::ffi::c_void;
 use std::mem::size_of;
 use std::ptr::{NonNull, null_mut};
+use std::sync::Arc;
 use std::sync::atomic::{AtomicU64, Ordering};
-use std::sync::{Arc, Mutex};
-use uia_core::audio::{AudioError, f32_to_i16};
+use uia_core::audio::{AudioError, WaitingCell, f32_to_i16};
 
 /// The app-side rate on both elements. Fixed: VPIO converts to whatever the
-/// hardware runs at, so `format()` never changes, even across a reopen.
+/// hardware runs at, so the formats stay put across a unit rebuild. They
+/// change only while the unit is split onto cpal streams.
 pub(crate) const CLIENT_RATE_HZ: u32 = 48_000;
 
 /// The input callback's scratch capacity in frames, and nothing more: requests
@@ -57,14 +58,23 @@ const INPUT_ELEMENT: AudioUnitElement = 1;
 /// ends, normally or by panic.
 pub(crate) type FramesTx = tokio::sync::mpsc::Sender<Vec<i16>>;
 
-/// State shared by the callbacks, the supervisor, and the source/sink.
-/// Outlives any one `VoiceUnit`, which is what lets queued audio survive a
-/// device reopen. Deliberately holds no capture sender: the source and sink
-/// keep this alive, and that must not keep the microphone channel open.
+/// State shared by the callbacks, the supervisor, the cpal legs of a split
+/// unit, and the source/sink. Outlives any one `VoiceUnit` or leg, which is
+/// what lets queued audio survive a device reopen. Deliberately holds no
+/// capture sender: the source and sink keep this alive, and that must not
+/// keep the microphone channel open.
 pub(crate) struct Shared {
-    pub(crate) queue: Mutex<VecDeque<i16>>,
-    /// What `CoreAudioSink::level` reads, recorded by the render callback.
-    pub(crate) level: crate::level::PlaybackLevel,
+    /// Filled by the sink, drained by the unit's render callback or, while
+    /// split, the output leg. Also carries the level `CoreAudioSink::level`
+    /// reads.
+    pub(crate) playback: PlaybackQueue,
+    /// What the source and sink report: [`CLIENT_RATE_HZ`] while a unit
+    /// runs, the leg's device format while split.
+    pub(crate) input_format: Arc<LiveFormat>,
+    pub(crate) output_format: Arc<LiveFormat>,
+    /// What each direction waits for, if anything.
+    pub(crate) input_waiting: WaitingCell,
+    pub(crate) output_waiting: WaitingCell,
     pub(crate) render_calls: AtomicU64,
     pub(crate) render_frames: AtomicU64,
 }
@@ -72,8 +82,11 @@ pub(crate) struct Shared {
 impl Shared {
     pub(crate) fn new() -> Self {
         Self {
-            queue: Mutex::new(VecDeque::new()),
-            level: crate::level::PlaybackLevel::default(),
+            playback: PlaybackQueue::default(),
+            input_format: Arc::new(LiveFormat::new()),
+            output_format: Arc::new(LiveFormat::new()),
+            input_waiting: WaitingCell::default(),
+            output_waiting: WaitingCell::default(),
             render_calls: AtomicU64::new(0),
             render_frames: AtomicU64::new(0),
         }
@@ -170,19 +183,6 @@ pub(crate) fn input_len(frames: u32, capacity: usize) -> Option<usize> {
     usize::try_from(frames).ok().filter(|&n| n <= capacity)
 }
 
-/// Fill `out` from the playback queue, padding with silence on underrun.
-/// `None` means the lock was contended: the whole period is silence.
-pub(crate) fn drain_into(queue: Option<&mut VecDeque<i16>>, out: &mut [f32]) {
-    match queue {
-        Some(queue) => {
-            for slot in out {
-                *slot = queue.pop_front().map_or(0.0, |s| f32::from(s) / 32768.0);
-            }
-        }
-        None => out.fill(0.0),
-    }
-}
-
 /// Element 1's callback: pull the processed (echo-cancelled) microphone
 /// audio and hand it to the source. Never blocks: a full channel drops this
 /// frame, the same policy as `CpalSource` and `WasapiSource`.
@@ -264,7 +264,6 @@ unsafe extern "C-unwind" fn render_callback(
     // SAFETY: CoreAudio's list holds `mNumberBuffers` buffers (C's flexible
     // array), valid and exclusively ours for the duration of the call.
     let buffers = unsafe { std::slice::from_raw_parts_mut(first, count) };
-    let mut queue = ctx.shared.queue.try_lock().ok();
     for (index, buffer) in buffers.iter_mut().enumerate() {
         if buffer.mData.is_null() {
             continue;
@@ -274,8 +273,8 @@ unsafe extern "C-unwind" fn render_callback(
         // SAFETY: the buffer holds `mDataByteSize` bytes of f32 (our format).
         let out = unsafe { std::slice::from_raw_parts_mut(buffer.mData.cast::<f32>(), floats) };
         if index == 0 {
-            drain_into(queue.as_deref_mut(), out);
-            ctx.shared.level.record(out);
+            // The client format is mono (see `client_format`).
+            ctx.shared.playback.try_fill(out, 1);
         } else {
             out.fill(0.0);
         }
@@ -485,34 +484,6 @@ impl Drop for VoiceUnit {
 #[cfg(test)]
 mod tests {
     use super::*;
-
-    #[test]
-    fn draining_converts_queued_samples_to_float() {
-        let mut q: VecDeque<i16> = [16384, -32768].into_iter().collect();
-        let mut out = [9.0f32; 2];
-        drain_into(Some(&mut q), &mut out);
-        assert_eq!(out, [0.5, -1.0]);
-        assert!(q.is_empty());
-    }
-
-    /// Underrun pads with silence rather than leaving stale samples or
-    /// stalling the device.
-    #[test]
-    fn an_underrun_pads_with_silence() {
-        let mut q: VecDeque<i16> = [16384].into_iter().collect();
-        let mut out = [9.0f32; 3];
-        drain_into(Some(&mut q), &mut out);
-        assert_eq!(out, [0.5, 0.0, 0.0]);
-    }
-
-    /// Review focus 5: `write`/`clear` holding the lock when the callback
-    /// fires means silence for one period, never a blocked audio thread.
-    #[test]
-    fn a_contended_queue_plays_silence() {
-        let mut out = [9.0f32; 4];
-        drain_into(None, &mut out);
-        assert_eq!(out, [0.0; 4]);
-    }
 
     /// Review focus 4: CoreAudio asking for more than the scratch buffer
     /// holds is refused, never written past the end.

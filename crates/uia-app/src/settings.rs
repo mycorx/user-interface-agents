@@ -13,7 +13,9 @@
 //! Restart-to-switch, not live switching (S18; PLAN.md amended): the
 //! persisted choice is read once at startup (`resolve_engine_choice`) and
 //! applied before `build_session` connects. Changing it while a session is
-//! running has no effect until the app restarts.
+//! running has no effect until the app restarts. Audio settings are the
+//! exception: `set_audio_settings` hands a Save to the running session,
+//! which switches devices at the reconnect closing Settings triggers.
 
 use crate::config::{AudioSection, EngineChoice};
 use serde::de::DeserializeOwned;
@@ -453,35 +455,6 @@ pub fn resolve_foundry_endpoint(
     persisted.and_then(|s| s.endpoint).or(configured)
 }
 
-/// Same precedence rule as [`resolve_engine_choice`]/[`resolve_foundry_endpoint`]
-/// applied field-by-field: each sidecar field wins over `uia.toml`'s
-/// `[audio]` value when the UI has set it, otherwise `configured`'s value
-/// (already `AudioSection::default`-filled by `Config::load`) passes through
-/// unchanged. Returns a full `AudioSection` — the same struct `build_session`
-/// already reads — so applying the result is one field-for-field
-/// `config.audio = ...` at startup, not a second code path through the audio
-/// stack.
-/// `available` is this machine's enumerated device names (input and output
-/// together -- a name only ever matches one side in practice). A persisted
-/// choice naming nothing in that list is dropped, so a device that has been
-/// unplugged, replaced or renamed degrades to the OS default instead of
-/// reaching `uia_audio`'s deliberate "unmatched device is an error" path,
-/// which fails the whole session and, in a packaged build with no console,
-/// fails it silently.
-///
-/// That strictness is right for a name the user just typed into `uia.toml`
-/// and got wrong. It is wrong for a name the UI persisted months ago against
-/// hardware that has since changed, which is the case this filter covers.
-///
-/// Matching is `uia_audio::device_name_matches`, the same rule the lookup
-/// itself uses. Using anything stricter here -- equality, say -- would drop
-/// working settings: the lookup finds "Webcam" inside "Microphone (HD Pro
-/// Webcam C920)", and a filter that did not would silently move a user off a
-/// device that was about to work.
-///
-/// An empty `available` disables filtering: enumeration failed, and throwing
-/// away every setting on the strength of a failed listing would be worse than
-/// the problem being solved.
 /// The General tab's memory toggle wins over `uia.toml`'s `[memory] backend`
 /// when it has been set, same field-by-field precedence as the audio and
 /// engine sidecars: the UI is the more recent statement of intent.
@@ -499,34 +472,33 @@ pub fn resolve_auto_update_check(persisted: Option<bool>) -> bool {
     persisted.unwrap_or(true)
 }
 
+/// Same precedence rule as [`resolve_engine_choice`]/[`resolve_foundry_endpoint`]
+/// applied field-by-field: each sidecar field wins over `uia.toml`'s
+/// `[audio]` value when the UI has set it, otherwise `configured`'s value
+/// (already `AudioSection::default`-filled by `Config::load`) passes through
+/// unchanged. Returns a full `AudioSection` — the same struct `build_session`
+/// and `session::open_audio_pair` read — so the startup values and the ones
+/// a Save switches the running session to come from this one rule.
+///
+/// A persisted device that is not plugged in right now is kept, not
+/// dropped: a pinned device is never replaced by another one. The audio
+/// backends open a missing pinned name in a waiting state and pick it up
+/// when it appears, so there is no hard error left to protect the session
+/// from.
 pub fn resolve_audio_settings(
     configured: &AudioSection,
     persisted: Option<AudioSettings>,
-    available: &[String],
 ) -> AudioSection {
     let Some(persisted) = persisted else {
         return configured.clone();
     };
-    let still_present = |name: Option<String>| -> Option<String> {
-        let name = name?;
-        if available.is_empty()
-            || available
-                .iter()
-                .any(|a| uia_audio::device_name_matches(a, &name))
-        {
-            return Some(name);
-        }
-        eprintln!(
-            "uia: persisted audio device {name:?} is not present on this machine; \
-             falling back to the default device"
-        );
-        None
-    };
     AudioSection {
         aec_enabled: persisted.aec_enabled.unwrap_or(configured.aec_enabled),
-        input_device: still_present(persisted.input_device)
+        input_device: persisted
+            .input_device
             .or_else(|| configured.input_device.clone()),
-        output_device: still_present(persisted.output_device)
+        output_device: persisted
+            .output_device
             .or_else(|| configured.output_device.clone()),
         barge_in_threshold: persisted
             .barge_in_threshold
@@ -534,14 +506,63 @@ pub fn resolve_audio_settings(
     }
 }
 
+/// What a Save changed about the audio the running session uses, and so
+/// how much of it has to be redone.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum AudioChange {
+    /// Nothing to apply.
+    Unchanged,
+    /// Only the barge-in threshold: the open devices stay as they are.
+    ThresholdOnly,
+    /// A device or the echo-cancellation choice: the pair is reopened. Any
+    /// threshold change goes along with it.
+    Devices,
+}
+
+/// Compares the settings the running session uses with the ones just saved.
+pub fn audio_change(current: &AudioSection, next: &AudioSection) -> AudioChange {
+    if current.input_device != next.input_device
+        || current.output_device != next.output_device
+        || current.aec_enabled != next.aec_enabled
+    {
+        AudioChange::Devices
+    } else if current.barge_in_threshold != next.barge_in_threshold {
+        AudioChange::ThresholdOnly
+    } else {
+        AudioChange::Unchanged
+    }
+}
+
+/// `change`, upgraded to a reopen while the session's last audio swap failed
+/// to open its devices. That swap left the session silent, yet its settings
+/// already count as current, so without this a Save of the same values
+/// would be `Unchanged` and the user would have no way to retry.
+pub fn retrying_a_failed_swap(change: AudioChange, last_swap_failed: bool) -> AudioChange {
+    if last_swap_failed {
+        AudioChange::Devices
+    } else {
+        change
+    }
+}
+
+/// What the Providers tab's engine choice shows: the saved choice, read from
+/// disk on every call, falling back to `uia.toml`'s `engine.default`. Not
+/// the engine this launch runs (`get_engine`): the tab remounts each time
+/// Settings opens, and the launch value made a choice saved for the next
+/// launch look forgotten.
+pub fn saved_engine_choice(configured_default: EngineChoice, path: &Path) -> EngineChoice {
+    resolve_engine_choice(configured_default, load(path))
+}
+
 /// What the Audio tab shows: `uia.toml`'s `[audio]` with the sidecar applied,
 /// read from disk on every call. Not the launch snapshot: the tab remounts
 /// each time it is opened, and showing the startup values after a save made
-/// the picker revert, so the next Save wrote the stale device back. No device
-/// filter either: a pinned device that is unplugged stays visible in the
-/// picker (it appends it), and startup still drops it before opening devices.
+/// the picker revert, so the next Save wrote the stale device back. A pinned
+/// device that is unplugged stays visible in the picker (it appends it) and
+/// stays pinned. `set_audio_settings` calls this too, after saving, to learn
+/// what the running session should switch to.
 pub fn saved_audio_settings(configured: &AudioSection, path: &Path) -> AudioSection {
-    resolve_audio_settings(configured, load(path), &[])
+    resolve_audio_settings(configured, load(path))
 }
 
 #[cfg(test)]
@@ -709,13 +730,11 @@ mod tests {
         assert!(!is_valid_http_url("ftp://example.com"));
     }
 
-    /// The bug this fixes: a device that is gone -- unplugged, replaced,
-    /// renamed by a driver update -- must not be handed to `build_session`.
-    /// `uia_audio` treats an unmatched name as a hard error and the whole
-    /// session fails; in a release build (`windows_subsystem = "windows"`)
-    /// the stderr message goes nowhere, so the app just silently never works.
+    /// A pinned device that is not plugged in right now is still the one
+    /// the user chose. It stays pinned and is waited for, never swapped for
+    /// the OS default, so it comes back the moment it is plugged in.
     #[test]
-    fn a_persisted_device_absent_from_this_machine_is_dropped() {
+    fn a_persisted_device_absent_from_this_machine_is_kept() {
         let configured = AudioSection::default();
         let persisted = AudioSettings {
             aec_enabled: None,
@@ -723,71 +742,78 @@ mod tests {
             output_device: Some("Creative Pebble X".into()),
             barge_in_threshold: None,
         };
-        let available = vec!["Some Other Mic".to_string()];
 
-        let resolved = resolve_audio_settings(&configured, Some(persisted), &available);
+        let resolved = resolve_audio_settings(&configured, Some(persisted));
 
-        assert_eq!(resolved.input_device, None, "absent input must be dropped");
+        assert_eq!(resolved.input_device.as_deref(), Some("HD Pro Webcam C920"));
+        assert_eq!(resolved.output_device.as_deref(), Some("Creative Pebble X"));
+    }
+
+    fn audio(input: Option<&str>, output: Option<&str>, aec: bool, threshold: f32) -> AudioSection {
+        AudioSection {
+            aec_enabled: aec,
+            input_device: input.map(Into::into),
+            output_device: output.map(Into::into),
+            barge_in_threshold: Some(threshold),
+        }
+    }
+
+    #[test]
+    fn identical_settings_need_no_swap() {
+        let current = audio(Some("Mic"), None, true, 0.05);
         assert_eq!(
-            resolved.output_device, None,
-            "absent output must be dropped"
+            audio_change(&current, &current.clone()),
+            AudioChange::Unchanged
         );
     }
 
-    /// The ordinary case must be untouched.
     #[test]
-    fn a_persisted_device_present_on_this_machine_is_kept() {
-        let configured = AudioSection::default();
-        let persisted = AudioSettings {
-            aec_enabled: None,
-            input_device: Some("Some Other Mic".into()),
-            output_device: None,
-            barge_in_threshold: None,
-        };
-        let available = vec!["Some Other Mic".to_string()];
-
-        let resolved = resolve_audio_settings(&configured, Some(persisted), &available);
-
-        assert_eq!(resolved.input_device.as_deref(), Some("Some Other Mic"));
+    fn after_a_failed_swap_any_save_reopens_the_pair() {
+        for change in [
+            AudioChange::Unchanged,
+            AudioChange::ThresholdOnly,
+            AudioChange::Devices,
+        ] {
+            assert_eq!(retrying_a_failed_swap(change, true), AudioChange::Devices);
+        }
     }
 
-    /// The trap. The lookup matches by case-insensitive substring, so a
-    /// persisted "Webcam" really does resolve to "Microphone (HD Pro Webcam
-    /// C920)". A filter using equality would call that unavailable and move
-    /// the user off a device that works -- causing the exact silent switch
-    /// this whole mechanism exists to avoid.
     #[test]
-    fn a_partial_name_the_lookup_would_match_is_not_dropped() {
-        let configured = AudioSection::default();
-        let persisted = AudioSettings {
-            aec_enabled: None,
-            input_device: Some("Webcam".into()),
-            output_device: None,
-            barge_in_threshold: None,
-        };
-        let available = vec!["Microphone (HD Pro Webcam C920)".to_string()];
-
-        let resolved = resolve_audio_settings(&configured, Some(persisted), &available);
-
-        assert_eq!(resolved.input_device.as_deref(), Some("Webcam"));
+    fn without_a_failed_swap_the_change_stands() {
+        for change in [
+            AudioChange::Unchanged,
+            AudioChange::ThresholdOnly,
+            AudioChange::Devices,
+        ] {
+            assert_eq!(retrying_a_failed_swap(change, false), change);
+        }
     }
 
-    /// Enumeration failed or has not run. Dropping every choice on the
-    /// strength of an empty listing would be worse than the problem.
     #[test]
-    fn an_empty_available_list_does_not_filter_anything() {
-        let configured = AudioSection::default();
-        let persisted = AudioSettings {
-            aec_enabled: None,
-            input_device: Some("HD Pro Webcam C920".into()),
-            output_device: None,
-            barge_in_threshold: None,
-        };
-
-        let resolved = resolve_audio_settings(&configured, Some(persisted), &[]);
-
-        assert_eq!(resolved.input_device.as_deref(), Some("HD Pro Webcam C920"));
+    fn a_threshold_only_change_reopens_nothing() {
+        let current = audio(Some("Mic"), None, true, 0.05);
+        let next = audio(Some("Mic"), None, true, 0.07);
+        assert_eq!(audio_change(&current, &next), AudioChange::ThresholdOnly);
     }
+
+    #[test]
+    fn a_device_or_echo_cancellation_change_reopens_the_pair() {
+        let current = audio(Some("Mic"), None, true, 0.05);
+        for next in [
+            audio(None, None, true, 0.05),
+            audio(Some("Mic"), Some("Speakers"), true, 0.05),
+            audio(Some("Mic"), None, false, 0.05),
+            // A device change carries any threshold change with it.
+            audio(Some("Other Mic"), None, true, 0.07),
+        ] {
+            assert_eq!(
+                audio_change(&current, &next),
+                AudioChange::Devices,
+                "{next:?}"
+            );
+        }
+    }
+
     #[test]
     fn a_saved_audio_settings_survives_reload() {
         let dir = std::env::temp_dir().join(format!(
@@ -1242,7 +1268,7 @@ mod tests {
             barge_in_threshold: Some(0.02),
         };
         assert_eq!(
-            resolve_audio_settings(&configured, Some(persisted), &[]),
+            resolve_audio_settings(&configured, Some(persisted)),
             AudioSection {
                 aec_enabled: false,
                 input_device: Some("ui-in".into()),
@@ -1260,7 +1286,7 @@ mod tests {
             output_device: None,
             barge_in_threshold: None,
         };
-        assert_eq!(resolve_audio_settings(&configured, None, &[]), configured);
+        assert_eq!(resolve_audio_settings(&configured, None), configured);
     }
 
     #[test]
@@ -1295,6 +1321,37 @@ mod tests {
         // plugged in: the picker keeps it rather than pretending "Default".
         assert_eq!(shown.input_device.as_deref(), Some("Unplugged USB Mic"));
         assert_eq!(shown.output_device, None);
+    }
+
+    #[test]
+    fn saved_engine_choice_reflects_a_save_made_after_launch() {
+        let dir = std::env::temp_dir().join(format!(
+            "uia-engine-settings-after-save-{}",
+            std::process::id()
+        ));
+        std::fs::create_dir_all(&dir).unwrap();
+        let path = dir.join("uia-engine.json");
+
+        save(
+            &path,
+            &EngineSettings {
+                engine: EngineChoice::Bedrock,
+            },
+        )
+        .unwrap();
+        let shown = saved_engine_choice(EngineChoice::OpenAi, &path);
+
+        std::fs::remove_dir_all(&dir).ok();
+        assert_eq!(shown, EngineChoice::Bedrock);
+    }
+
+    #[test]
+    fn saved_engine_choice_without_a_sidecar_is_the_configured_default() {
+        let missing = std::env::temp_dir().join("uia-engine-settings-does-not-exist.json");
+        assert_eq!(
+            saved_engine_choice(EngineChoice::Foundry, &missing),
+            EngineChoice::Foundry
+        );
     }
 
     #[test]
@@ -1491,7 +1548,7 @@ mod tests {
             barge_in_threshold: None,
         };
         assert_eq!(
-            resolve_audio_settings(&configured, Some(persisted), &[]),
+            resolve_audio_settings(&configured, Some(persisted)),
             AudioSection {
                 aec_enabled: true,
                 input_device: Some("ui-in".into()),

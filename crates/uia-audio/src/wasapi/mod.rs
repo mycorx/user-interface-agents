@@ -20,9 +20,15 @@
 //! corrections a long-lived backend needs and a fixed-duration diagnostic does
 //! not: a real shutdown protocol, MMCSS priority, a barge-in-sized buffer, and
 //! format validation at open time rather than per packet.
+//!
+//! The same workers also serve the plain path (echo cancellation off), opened
+//! with [`StreamCategory::Plain`]: on Windows "Default" means the default
+//! communication device either way, and cpal would follow the console
+//! default instead.
 
 mod capture;
 mod com;
+mod notify;
 mod render;
 
 pub use capture::WasapiSource;
@@ -47,51 +53,92 @@ use windows::core::w;
 /// silent *and* somehow missed the shutdown signal — not the normal path.
 const WAIT_TIMEOUT_MS: u32 = 2000;
 
-/// A device's sample rate and channel count, published as one word.
-///
-/// Two atomics would let a reader pair the new device's rate with the previous
-/// one's channel count during a reopen. The window is microseconds and nothing
-/// currently reads the channel count, but "safe because nobody looks" is the
-/// kind of reasoning that stops being true quietly, and packing them costs a
-/// shift.
-pub(crate) struct LiveFormat(std::sync::atomic::AtomicU64);
+/// How a stream is opened.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum StreamCategory {
+    /// `AudioCategory_Communications`: Windows applies its own AEC/AGC/NS.
+    Communications,
+    /// An ordinary stream on the same endpoint, for when echo cancellation
+    /// is off.
+    Plain,
+}
 
-impl LiveFormat {
-    pub(crate) fn new() -> Self {
-        Self(std::sync::atomic::AtomicU64::new(0))
+impl StreamCategory {
+    /// For the opened-device log line.
+    fn describe(self) -> &'static str {
+        match self {
+            StreamCategory::Communications => {
+                "under AudioCategory_Communications (OS echo cancellation active)"
+            }
+            StreamCategory::Plain => "as a plain stream (no OS echo cancellation)",
+        }
     }
+}
 
-    pub(crate) fn store(&self, sample_rate_hz: u32, channels: u16) {
-        let packed = (u64::from(sample_rate_hz) << 16) | u64::from(channels);
-        self.0.store(packed, Ordering::Relaxed);
-    }
+/// What a worker reports back once its first open has settled, so that a
+/// failure surfaces from the constructor rather than as a port that silently
+/// never works.
+enum Ready {
+    Opened {
+        device_name: String,
+        sample_rate_hz: u32,
+        channels: u16,
+    },
+    /// A pinned device is missing; the worker keeps trying.
+    Waiting,
+}
 
-    pub(crate) fn load(&self) -> (u32, u16) {
-        let packed = self.0.load(Ordering::Relaxed);
-        ((packed >> 16) as u32, packed as u16)
-    }
+/// Why a worker left its pump loop.
+enum PumpExit {
+    /// `stop` was set: done for good.
+    Stopped,
+    /// The communications default moved: reopen at once, no backoff.
+    DefaultChanged,
+    /// The device failed: reopen after a backoff.
+    Lost(String),
 }
 
 /// Park between reopen attempts, waking early if shutdown is signalled.
 ///
 /// Waits on the worker's own wake event rather than sleeping, so `Drop`'s
 /// `SetEvent` cuts a five-second backoff short instead of making the join wait
-/// it out. `None` means the very first open never succeeded, so no event
-/// exists yet and there is nothing to wait on but the clock.
+/// it out, and a default-device change cuts it short to reopen at once. The
+/// constructor creates the event before the worker starts, so there always
+/// is one, even while the first open is waiting for a device.
 ///
 /// Returns false when the caller should stop rather than try again.
-fn wait_before_reopen(event: Option<EventHandle>, stop: &Arc<AtomicBool>, attempt: u32) -> bool {
+fn wait_before_reopen(event: EventHandle, stop: &Arc<AtomicBool>, attempt: u32) -> bool {
     if stop.load(Ordering::SeqCst) {
         return false;
     }
-    let ms = reopen_delay_ms(attempt);
-    match event {
-        Some(event) => unsafe {
-            WaitForSingleObject(event.0, ms);
-        },
-        None => std::thread::sleep(std::time::Duration::from_millis(u64::from(ms))),
+    // SAFETY: the event stays open until `stop_worker` has joined this thread.
+    unsafe {
+        WaitForSingleObject(event.0, reopen_delay_ms(attempt));
     }
     !stop.load(Ordering::SeqCst)
+}
+
+/// Register the default-change watch for an unpinned worker.
+///
+/// A pinned direction never follows the default, so it gets none. A failed
+/// registration is logged and the worker carries on: the stream still works
+/// and still reopens when its device is lost, it only misses the move.
+fn watch_default(
+    pinned: Option<&str>,
+    flow: crate::follow::Flow,
+    event: EventHandle,
+) -> Option<notify::DefaultChangeWatch> {
+    if pinned.is_some() {
+        return None;
+    }
+    notify::DefaultChangeWatch::register(flow, event)
+        .inspect_err(|e| {
+            eprintln!(
+                "uia-audio: wasapi could not watch the default device ({e}); \
+                 it will not follow a new default"
+            );
+        })
+        .ok()
 }
 
 /// Join the "Pro Audio" MMCSS task so the audio thread is scheduled ahead of
@@ -160,18 +207,6 @@ mod tests {
         assert_send::<WasapiSink>();
     }
 
-    /// Rate and channels must survive a round trip together, including the
-    /// rates and channel counts real endpoints actually report.
-    #[test]
-    fn a_live_format_round_trips_rate_and_channels() {
-        let live = LiveFormat::new();
-        assert_eq!(live.load(), (0, 0), "starts unset, not garbage");
-        for (rate, channels) in [(48_000u32, 2u16), (44_100, 1), (16_000, 8), (192_000, 2)] {
-            live.store(rate, channels);
-            assert_eq!(live.load(), (rate, channels));
-        }
-    }
-
     /// Shutdown must not have to wait out a backoff it arrived during. With
     /// the flag already set there is nothing to wait for, so this returns
     /// immediately and says "stop" — checked by the clock, since the whole
@@ -179,9 +214,13 @@ mod tests {
     #[test]
     fn a_stop_signalled_during_backoff_is_not_waited_out() {
         let stop = Arc::new(AtomicBool::new(true));
+        let event = com::create_wake_event().unwrap();
         let started = std::time::Instant::now();
         // The longest delay in the table, so a wait would be unmistakable.
-        let again = wait_before_reopen(None, &stop, u32::MAX);
+        let again = wait_before_reopen(event, &stop, u32::MAX);
+        unsafe {
+            let _ = CloseHandle(event.0);
+        }
         assert!(!again, "a set stop flag must end the loop, not delay it");
         assert!(
             started.elapsed() < std::time::Duration::from_millis(200),
@@ -226,22 +265,39 @@ mod tests {
         assert_eq!(sink.buffered_len(), 0);
     }
 
-    /// A configured device name that matches nothing must be a clear error,
-    /// not a silent fallback to the default — otherwise a `uia.toml` typo
-    /// would look identical to the device just not existing at all.
+    /// A pinned microphone that is not plugged in is waited for, never
+    /// replaced and never an error: the open returns at once, reporting what
+    /// it waits for, so the session can carry on with the other direction.
     #[tokio::test]
-    #[ignore = "requires a real audio device; run manually on Windows"]
-    async fn an_unmatched_input_device_name_is_a_clear_error() {
-        // `.unwrap_err()` needs `T: Debug`, which `WasapiSource` isn't (it
-        // holds a raw WASAPI event handle) - match instead.
-        let Err(err) =
-            WasapiSource::input_communications(Some("definitely-not-a-real-device-9f3a1c"))
-        else {
-            panic!("expected an error for a device name that cannot exist");
-        };
+    #[ignore = "requires the Windows audio service; run manually"]
+    async fn a_pinned_communications_input_missing_at_open_waits() {
+        use uia_core::audio::{AudioSource, WaitingFor};
+        let name = "definitely-not-a-real-device-9f3a1c";
+        let started = std::time::Instant::now();
+        let source = WasapiSource::open(Some(name), StreamCategory::Communications)
+            .unwrap_or_else(|e| panic!("a missing pinned device must wait, got: {e}"));
         assert!(
-            err.to_string().contains("no audio device matching"),
-            "got: {err}"
+            started.elapsed() < std::time::Duration::from_secs(2),
+            "the open must not block waiting for the device"
         );
+        assert_eq!(
+            source.waiting().expect("the source reports waiting").get(),
+            Some(WaitingFor::Named(name.into()))
+        );
+    }
+
+    #[tokio::test]
+    #[ignore = "requires the Windows audio service; run manually"]
+    async fn a_plain_render_endpoint_opens_and_clears_synchronously() {
+        use uia_core::audio::AudioSink;
+        let mut sink = WasapiSink::open(None, StreamCategory::Plain).unwrap();
+        assert!(sink.format().sample_rate_hz > 0);
+        assert_eq!(
+            sink.waiting().expect("the sink reports waiting").get(),
+            None
+        );
+        sink.write(&[1, 2, 3, 4]).await.unwrap();
+        sink.clear();
+        assert_eq!(sink.buffered_len(), 0);
     }
 }

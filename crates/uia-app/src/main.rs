@@ -31,8 +31,8 @@ use uia_app::config::{AudioSection, Config, EngineChoice};
 use uia_app::hud::{
     ALERT_WINDOW_HEIGHT, ALERT_WINDOW_WIDTH, CONNECTION_EVENT, ENGINE_EVENT, ERROR_EVENT,
     LEVEL_EVENT, LEVEL_INTERVAL, MCP_ALERT_EVENT, STATE_EVENT, TEXT_TURN_SUPPORT_EVENT, TURN_EVENT,
-    WindowAction, alert_payload, alert_window_position, connection_payload, engine_payload,
-    error_payload, level_payload, state_payload, window_action_for,
+    WaitingNotice, WindowAction, alert_payload, alert_window_position, connection_payload,
+    engine_payload, error_payload, level_payload, state_payload, window_action_for,
 };
 use uia_app::mcp_registry;
 use uia_app::oauth_flow;
@@ -114,6 +114,10 @@ struct SessionControlState(SessionControl);
 /// it before the value is set.
 struct CurrentEngine(EngineChoice);
 
+/// `uia.toml`'s `engine.default`, read once at startup: what
+/// `get_saved_engine` falls back to when no choice has been saved.
+struct ConfiguredEngine(EngineChoice);
+
 /// `uia.toml`'s inline `[foundry] endpoint`, read once at startup - the
 /// half of `resolve_foundry_endpoint`'s precedence that `get_foundry_endpoint`
 /// can't re-derive on its own since `Config` itself is not `tauri::State`-
@@ -128,6 +132,12 @@ struct AudioSettingsPath(PathBuf);
 /// once at startup. `get_audio_settings` layers the sidecar over it on each
 /// call, the same split as [`ConfiguredFoundryEndpoint`].
 struct ConfiguredAudioSettings(AudioSection);
+
+/// The audio settings the running session uses: the resolved `[audio]` at
+/// launch, then whatever the last Save that changed something switched it
+/// to. `set_audio_settings` compares a Save against it to decide what the
+/// session has to redo, and reopens anyway while the last swap failed.
+struct CurrentAudioSettings(Mutex<AudioSection>);
 
 /// The path `set_agent_settings` persists to — same
 /// rationale as [`SettingsPath`]/[`FoundrySettingsPath`]/[`AudioSettingsPath`].
@@ -429,10 +439,12 @@ fn main() {
     let settings_path = settings_path_for(&config_path);
     // The persisted UI choice wins over `uia.toml`'s `engine.default` —
     // see `settings::resolve_engine_choice`. Read once at startup: this is
-    // restart-to-switch (S18), not live switching, so nothing after this
-    // point needs to watch the settings file again.
+    // restart-to-switch (S18), not live switching: the session never looks
+    // at the file again. Only the Providers tab re-reads it, to show what
+    // was saved (`get_saved_engine`).
+    let configured_engine = config.engine.default;
     let engine_choice =
-        settings::resolve_engine_choice(config.engine.default, settings::load(&settings_path));
+        settings::resolve_engine_choice(configured_engine, settings::load(&settings_path));
 
     let foundry_settings_path = foundry_settings_path_for(&config_path);
     let configured_foundry_endpoint = config.foundry.resolve_endpoint();
@@ -453,22 +465,12 @@ fn main() {
     // to `config.audio` itself, in place, before `build_session` ever reads
     // it below: no second code path through the audio stack for "did the UI
     // override this," just the one `Config` `build_session` already trusted.
-    // Enumerated once here and handed to the resolver so a persisted device
-    // that is no longer plugged in degrades to the OS default, rather than
-    // failing the whole session in `build_session`. A failed enumeration
-    // yields an empty list, which disables the filter rather than discarding
-    // every audio setting the user has.
+    // A persisted device that is not plugged in stays pinned: the backends
+    // open it in a waiting state rather than failing the session.
     let configured_audio_settings = config.audio.clone();
-    let available_devices: Vec<String> = input_device_names()
-        .unwrap_or_default()
-        .into_iter()
-        .chain(output_device_names().unwrap_or_default())
-        .collect();
-    config.audio = settings::resolve_audio_settings(
-        &config.audio,
-        settings::load(&audio_settings_path),
-        &available_devices,
-    );
+    config.audio =
+        settings::resolve_audio_settings(&config.audio, settings::load(&audio_settings_path));
+    let current_audio_settings = CurrentAudioSettings(Mutex::new(config.audio.clone()));
 
     let model_settings_path = model_settings_path_for(&config_path);
     // Same restart-to-switch tier as the engine choice (S18) and FD5: all
@@ -637,10 +639,12 @@ fn main() {
         .manage(mcp_registry::PendingOAuthSessions::default())
         .manage(SettingsPath(settings_path))
         .manage(CurrentEngine(engine_choice))
+        .manage(ConfiguredEngine(configured_engine))
         .manage(FoundrySettingsPath(foundry_settings_path))
         .manage(ConfiguredFoundryEndpoint(configured_foundry_endpoint))
         .manage(AudioSettingsPath(audio_settings_path))
         .manage(ConfiguredAudioSettings(configured_audio_settings))
+        .manage(current_audio_settings)
         .manage(AgentSettingsPath(agent_settings_path))
         .manage(ModelSettingsPath(model_settings_path))
         .manage(current_model_settings)
@@ -658,6 +662,7 @@ fn main() {
         .invoke_handler(tauri::generate_handler![
             set_engine,
             get_engine,
+            get_saved_engine,
             get_secret_status,
             set_secret,
             delete_secret,
@@ -930,16 +935,53 @@ fn main() {
                 let mut errors = session.subscribe_error();
                 let mut turns = session.subscribe_turn();
 
+                let mut waiting = session.subscribe_audio_waiting();
                 let state_handle = session_handle.clone();
                 tauri::async_runtime::spawn(async move {
-                    // A lagged HUD skips to the newest state rather than
-                    // dying: falling behind must never stop the status text
-                    // updating again.
+                    // One task for state, errors and device waits so the emits
+                    // keep their order: the wait notice shares the error line
+                    // and must land after the state change that clears it.
+                    // A lagged HUD skips to the newest value rather than
+                    // dying. Skipping keeps `notice` in step with the HUD:
+                    // both see only what this loop emits, so a skipped
+                    // state or error is one neither of them saw. Errors also go to stderr: the terminal is
+                    // watched during manual testing (UIA_DUMP_EVENTS lives
+                    // there too), and a crashed/never-opened webview must not
+                    // be the only place this shows up.
+                    use tokio::sync::broadcast::error::RecvError;
+                    let mut notice = WaitingNotice::new();
+                    let mut waiting_open = true;
                     loop {
-                        match states.recv().await {
-                            Ok(s) => emit_state(&state_handle, s),
-                            Err(tokio::sync::broadcast::error::RecvError::Lagged(_)) => continue,
-                            Err(tokio::sync::broadcast::error::RecvError::Closed) => break,
+                        let message = tokio::select! {
+                            state = states.recv() => match state {
+                                Ok(s) => {
+                                    emit_state(&state_handle, s);
+                                    notice.on_state(s)
+                                }
+                                Err(RecvError::Lagged(_)) => continue,
+                                Err(RecvError::Closed) => break,
+                            },
+                            error = errors.recv() => match error {
+                                Ok(msg) => {
+                                    eprintln!("uia: engine error: {msg}");
+                                    notice.on_error();
+                                    let _ = state_handle.emit(ERROR_EVENT, error_payload(&msg));
+                                    None
+                                }
+                                Err(RecvError::Lagged(_)) => continue,
+                                Err(RecvError::Closed) => break,
+                            },
+                            changed = waiting.changed(), if waiting_open => {
+                                if changed.is_err() {
+                                    waiting_open = false;
+                                    continue;
+                                }
+                                let value = waiting.borrow_and_update().clone();
+                                notice.on_waiting(value)
+                            }
+                        };
+                        if let Some(message) = message {
+                            let _ = state_handle.emit(ERROR_EVENT, error_payload(&message));
                         }
                     }
                 });
@@ -952,24 +994,6 @@ fn main() {
                         ticker.tick().await;
                         let rms = *level.borrow_and_update();
                         let _ = level_handle.emit(LEVEL_EVENT, level_payload(rms));
-                    }
-                });
-
-                let error_handle = session_handle.clone();
-                tauri::async_runtime::spawn(async move {
-                    // Also on stderr: the terminal is watched during manual
-                    // testing (UIA_DUMP_EVENTS lives there too), and a
-                    // crashed/never-opened webview must not be the only place
-                    // this shows up.
-                    loop {
-                        match errors.recv().await {
-                            Ok(msg) => {
-                                eprintln!("uia: engine error: {msg}");
-                                let _ = error_handle.emit(ERROR_EVENT, error_payload(&msg));
-                            }
-                            Err(tokio::sync::broadcast::error::RecvError::Lagged(_)) => continue,
-                            Err(tokio::sync::broadcast::error::RecvError::Closed) => break,
-                        }
                     }
                 });
 
@@ -1082,6 +1106,17 @@ fn set_engine(state: tauri::State<SettingsPath>, engine: String) -> Result<(), S
 #[tauri::command]
 fn get_engine(state: tauri::State<CurrentEngine>) -> &'static str {
     state.0.as_wire()
+}
+
+/// The engine choice saved for the next launch, read fresh, for the
+/// Providers tab (see [`settings::saved_engine_choice`]). The HUD keeps
+/// `get_engine`: it shows what is connected.
+#[tauri::command]
+fn get_saved_engine(
+    configured: tauri::State<ConfiguredEngine>,
+    path: tauri::State<SettingsPath>,
+) -> &'static str {
+    settings::saved_engine_choice(configured.0, &path.0).as_wire()
 }
 
 /// Gates capture *forwarding* on the running session — the mic button's
@@ -1469,9 +1504,9 @@ fn set_start_at_login(app: tauri::AppHandle, enabled: bool) -> Result<(), String
 }
 
 /// The Audio tab's initial values: what is saved, read fresh on every call
-/// (see [`settings::saved_audio_settings`]). After a save this is the choice
-/// for the next launch, which may differ from the devices the running session
-/// opened; the Settings restart notice covers that gap.
+/// (see [`settings::saved_audio_settings`]). A Save is also what the running
+/// session switches to, so this matches the devices in use once Settings
+/// has closed.
 #[tauri::command]
 fn get_audio_settings(
     configured: tauri::State<ConfiguredAudioSettings>,
@@ -1480,23 +1515,33 @@ fn get_audio_settings(
     settings::saved_audio_settings(&configured.0, &path.0)
 }
 
-/// Writes the sidecar file `settings::resolve_audio_settings` reads at the
-/// *next* startup - same restart-to-switch rule as the engine choice
-/// (S18): a running session already opened its devices and set its
-/// barge-in threshold, and this command does not reach into it live.
+/// Writes the sidecar file, then hands whatever changed to the running
+/// session. The session applies new devices at the reconnect closing
+/// Settings already triggers (or at its next safe point while connected),
+/// and a threshold-only change without reopening anything. Saving is the
+/// trigger rather than closing, because this is the only place the new
+/// values arrive; the close path knows nothing about what changed.
+///
 /// `input_device`/`output_device` of `None` means "use whatever the OS
 /// calls default" (the picker's "Default" option), not "no change" - the
 /// frontend always sends its full current selection.
+// `#[allow(clippy::too_many_arguments)]`: four are managed states Tauri
+// injects and four are the frontend's unchanged arguments; a struct would
+// change the IPC shape the frontend sends.
 #[tauri::command]
+#[allow(clippy::too_many_arguments)]
 fn set_audio_settings(
-    state: tauri::State<AudioSettingsPath>,
+    path: tauri::State<AudioSettingsPath>,
+    configured: tauri::State<ConfiguredAudioSettings>,
+    current: tauri::State<CurrentAudioSettings>,
+    control: tauri::State<SessionControlState>,
     input_device: Option<String>,
     output_device: Option<String>,
     aec_enabled: bool,
     barge_in_threshold: f32,
 ) -> Result<(), String> {
     settings::save(
-        &state.0,
+        &path.0,
         &settings::AudioSettings {
             input_device,
             output_device,
@@ -1504,10 +1549,21 @@ fn set_audio_settings(
             barge_in_threshold: Some(barge_in_threshold),
         },
     )
-    .map_err(|e| e.to_string())
+    .map_err(|e| e.to_string())?;
+    let next = settings::saved_audio_settings(&configured.0, &path.0);
+    let mut current = current.0.lock().expect("current audio settings mutex");
+    let change = settings::retrying_a_failed_swap(
+        settings::audio_change(&current, &next),
+        control.0.audio_swap_failed(),
+    );
+    if let Some(swap) = uia_app::session::audio_swap_for(&next, change) {
+        control.0.request_audio_swap(swap);
+        *current = next;
+    }
+    Ok(())
 }
 
-/// Every input device name the UI and the startup filter see, from one place
+/// Every input device name the Audio tab sees, from one place
 /// per OS. On macOS this is CoreAudio's own list rather than cpal's: the app
 /// runs a Voice Processing IO unit, and while it runs cpal lists every
 /// speaker as an input too (the unit's echo-reference taps) plus the unit's

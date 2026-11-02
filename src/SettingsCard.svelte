@@ -113,10 +113,12 @@
     return () => observer.disconnect();
   });
 
-  // A single page-level notice rather than one per tab: nothing Providers or
-  // Audio persist affects a running session live - it was already
+  // A single page-level notice rather than one per tab: nothing Providers,
+  // MCP or General persist affects a running session live - it was already
   // constructed with whatever resolved at connect time - so one restart
-  // covers every change made during this visit, across both tabs.
+  // covers every change made during this visit, across those tabs. Audio is
+  // not among them: the backend swaps devices itself when Settings closes
+  // (`set_audio_settings` requests the swap), so it never raises this.
   let restartNoticeVisible = $state(false);
 
   // FD5: Visual applies live with no restart, so it does not use the notice
@@ -198,7 +200,7 @@
     {#if activeTab === 'providers'}
       <SettingsProviders onchange={() => (restartNoticeVisible = true)} />
     {:else if activeTab === 'audio'}
-      <SettingsAudio onchange={() => (restartNoticeVisible = true)} />
+      <SettingsAudio />
     {:else if activeTab === 'visual'}
       <SettingsVisual bind:this={visualCard} {uiSettings} onchange={onvisualchange} />
     {:else if activeTab === 'mcp'}

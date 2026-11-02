@@ -5,6 +5,7 @@
 pub mod aec;
 mod backoff;
 pub mod codec;
+mod follow;
 // Only the playback backends record a level, so it compiles with them.
 #[cfg(any(
     feature = "cpal-io",
@@ -12,9 +13,18 @@ pub mod codec;
     all(target_os = "macos", feature = "coreaudio-aec")
 ))]
 mod level;
+// Gated like `level`, which `PlaybackQueue` records into.
+#[cfg(any(
+    feature = "cpal-io",
+    all(windows, feature = "wasapi-aec"),
+    all(target_os = "macos", feature = "coreaudio-aec")
+))]
+mod live;
 // Gated together: these two are the only modules that touch cpal, and the
 // `cpal-io` feature exists purely to keep them (and cpal) out of
 // `uia-openai`'s dependency graph.
+#[cfg(feature = "cpal-io")]
+mod cpal_stream;
 #[cfg(feature = "cpal-io")]
 pub mod input;
 #[cfg(feature = "cpal-io")]
@@ -36,13 +46,12 @@ pub mod coreaudio;
 ///
 /// This lives here, ungated, because four device lookups
 /// (`input::find_input_device_by_name`, `output::find_output_device_by_name`,
-/// `wasapi::com::find_device_by_name`, `coreaudio::device::choose`) and
-/// `uia-app`'s startup filter all have
-/// to agree on it. They previously each spelled it out. A filter that decided
-/// "this persisted name matches nothing" using a *stricter* rule than the
-/// lookup would discard settings that in fact work -- dropping "Webcam" as
-/// unavailable while the lookup would have found it -- so the rule gets one
-/// definition rather than five copies that can drift apart.
+/// `wasapi::com::find_device_by_name`, `coreaudio::device::choose`) all have
+/// to agree on it, and so do the waits for a pinned device that is not
+/// plugged in: a name one backend would wait for while another opens it
+/// would pin different devices on different paths. They previously each
+/// spelled it out; the rule gets one definition rather than four copies
+/// that can drift apart.
 pub fn device_name_matches(device_name: &str, wanted: &str) -> bool {
     device_name.to_lowercase().contains(&wanted.to_lowercase())
 }
@@ -82,8 +91,8 @@ mod device_name_tests {
         assert!(device_name_matches("Same", "same"));
     }
 
-    /// The property the startup filter depends on: a partial name the lookup
-    /// would accept must not be judged "unavailable" and thrown away.
+    /// A partial name, as a user types it from what the OS settings show,
+    /// still finds the device.
     #[test]
     fn a_partial_name_the_lookup_accepts_is_not_a_miss() {
         let available = "Microphone (HD Pro Webcam C920)";

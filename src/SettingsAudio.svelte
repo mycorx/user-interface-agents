@@ -1,5 +1,6 @@
 <script lang="ts">
   import { invoke } from '@tauri-apps/api/core';
+  import { detectPlatform } from './platform';
 
   // Mirrors `uia_app::config::AudioSection` (minus the fields this tab
   // doesn't expose) - duplicated across the IPC boundary like the other
@@ -28,7 +29,10 @@
   // to `''` at this boundary and back on save.
   const DEFAULT_OPTION = '';
 
-  let { onchange }: { onchange: () => void } = $props();
+  // Fixed for the life of the window, so read once. Only the copy and the AEC
+  // toggle depend on it.
+  const platform = detectPlatform();
+
 
   let inputDevice = $state(DEFAULT_OPTION);
   let outputDevice = $state(DEFAULT_OPTION);
@@ -103,7 +107,6 @@
       });
       saved = true;
       savedSettings = { inputDevice, outputDevice, aecEnabled, bargeInThreshold };
-      onchange();
     } catch (e) {
       error = String(e);
       console.error('set_audio_settings invoke() failed:', e);
@@ -115,6 +118,9 @@
   "Default" follows the device your operating system currently uses. Pin an exact device here if
   the default is wrong - Windows can silently hold the wrong device under its "Communications"
   role even when Sound settings shows the right one.
+  {#if platform === 'windows'}
+    On Windows, "Default" follows your default communication device (Sound settings).
+  {/if}
 </p>
 
 <section class="field">
@@ -139,13 +145,17 @@
 
 <section class="field">
   <label class="checkbox-label">
-    <input type="checkbox" bind:checked={aecEnabled} />
+    <input type="checkbox" bind:checked={aecEnabled} disabled={platform === 'linux'} />
     Echo cancellation (AEC)
   </label>
   <p class="hint">
-    Uses your operating system's own noise and echo cancellation (Windows and macOS) on the devices
-    above. Turn off only to diagnose audio issues - without it the assistant will hear itself
-    through speakers.
+    {#if platform === 'linux'}
+      Echo cancellation is not available on Linux.
+    {:else}
+      Uses your operating system's own noise and echo cancellation (Windows and macOS) on the
+      devices above. Turn off only to diagnose audio issues - without it the assistant will hear
+      itself through speakers.
+    {/if}
   </p>
 </section>
 

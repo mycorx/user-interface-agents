@@ -12,7 +12,7 @@
 //!
 //! It is deliberately **not** a command channel for the capture gate — the
 //! push-to-talk mic button has to be read on the capture path, once per
-//! ~20 ms frame, from inside `pump_audio`; a message the run loop drains
+//! ~20 ms frame, from inside `handle_frame`; a message the run loop drains
 //! between frames would add a frame of latency and, worse, could not be read
 //! at all while the loop is parked awaiting engine traffic. An
 //! `Arc<AtomicBool>` is readable from inside the loop at any instant, with no
@@ -26,6 +26,7 @@
 //! *taken* once, by whichever `Session` ends up driving this handle, so two
 //! sessions sharing a stale handle can never both drain it.
 
+use crate::audio::{AudioError, AudioSink, AudioSource};
 use crate::engine::TextTurnSupport;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex};
@@ -71,6 +72,26 @@ pub struct PromptSwapOutcome {
     pub applied: bool,
 }
 
+/// A microphone and a speaker, opened together.
+pub type AudioPair = (Box<dyn AudioSource>, Box<dyn AudioSink>);
+
+/// Opens a new audio pair. Built by the shell, which owns every device type,
+/// and run by the session only once the old pair has been dropped: VPIO
+/// allows a single unit per process, so opening first would fail there.
+pub type AudioOpener = Box<dyn FnOnce() -> Result<AudioPair, AudioError> + Send + 'static>;
+
+/// Audio settings the shell wants the running session to adopt.
+///
+/// `uia-core` holds no device code, so the shell hands over a way to open
+/// the new devices rather than naming them, and the session decides when it
+/// is safe to call it.
+pub struct AudioSwap {
+    /// `None` changes the threshold only and leaves the open devices alone.
+    pub open: Option<AudioOpener>,
+    /// `None` is `DEFAULT_BARGE_IN_THRESHOLD`.
+    pub barge_in_threshold: Option<f32>,
+}
+
 /// Cloneable, `Send + Sync` handle onto a running session. Every clone shares
 /// one set of flags, so the copy `.manage()`d by the shell and the copy held
 /// by the session are the same switch.
@@ -108,6 +129,13 @@ pub struct SessionControl {
     /// persona from here, lazily, and must be able to read the current value
     /// after the fact rather than only at the instant it changed.
     prompt_swap_outcome: Arc<watch::Sender<Option<PromptSwapOutcome>>>,
+    /// `Some` while an audio swap is waiting for the run loop: the same
+    /// consume-once slot as `prompt_swap`, for the same reason.
+    audio_swap: Arc<Mutex<Option<AudioSwap>>>,
+    /// Whether the last audio swap's opener failed, leaving the session on a
+    /// silent detached pair. An atomic like `capture_enabled`: the shell only
+    /// reads it when a Save arrives.
+    audio_swap_failed: Arc<AtomicBool>,
 }
 
 impl std::fmt::Debug for SessionControl {
@@ -139,6 +167,8 @@ impl SessionControl {
             connection_wanted: Arc::new(watch::channel(true).0),
             prompt_swap: Arc::new(Mutex::new(None)),
             prompt_swap_outcome: Arc::new(watch::channel(None).0),
+            audio_swap: Arc::new(Mutex::new(None)),
+            audio_swap_failed: Arc::new(AtomicBool::new(false)),
         }
     }
 
@@ -303,6 +333,44 @@ impl SessionControl {
     /// latest-wins semantics already impose.
     pub fn subscribe_prompt_swap_outcome(&self) -> watch::Receiver<Option<PromptSwapOutcome>> {
         self.prompt_swap_outcome.subscribe()
+    }
+
+    /// Ask the running session to adopt new audio settings. Returns
+    /// immediately. A parked session applies it before it reconnects; a
+    /// connected one at the next pass of its loop, without reconnecting.
+    ///
+    /// Latest wins, like `request_prompt_swap`, for each half separately.
+    /// A swap carrying an opener replaces whatever is pending (and drops an
+    /// unconsumed opener unrun), since only the newest devices are wanted
+    /// and opening each in turn would cycle real hardware for nothing. A
+    /// threshold-only swap takes over the threshold but keeps a pending
+    /// opener: it says "the devices did not change since the last Save",
+    /// not "keep the old devices", so dropping the opener would lose a
+    /// device change the shell already counts as applied.
+    pub fn request_audio_swap(&self, mut swap: AudioSwap) {
+        let mut pending = self.audio_swap.lock().expect("audio swap mutex");
+        if swap.open.is_none() {
+            swap.open = pending.take().and_then(|unconsumed| unconsumed.open);
+        }
+        *pending = Some(swap);
+    }
+
+    /// Consumes the pending audio swap, if any. Called by the run loop only.
+    pub fn take_audio_swap(&self) -> Option<AudioSwap> {
+        self.audio_swap.lock().expect("audio swap mutex").take()
+    }
+
+    /// Whether the last audio swap failed to open its devices, so the
+    /// session is silent. A Save that changes nothing must still retry then:
+    /// the shell already counts the failed settings as applied.
+    pub fn audio_swap_failed(&self) -> bool {
+        self.audio_swap_failed.load(Ordering::Relaxed)
+    }
+
+    /// Record how the last audio swap's opener went. Called by the run loop
+    /// only.
+    pub(crate) fn note_audio_swap_failed(&self, failed: bool) {
+        self.audio_swap_failed.store(failed, Ordering::Relaxed);
     }
 }
 
@@ -488,6 +556,67 @@ mod tests {
             clone.take_prompt_swap().is_some(),
             "a clone is the same switch"
         );
+    }
+
+    #[test]
+    fn an_audio_swap_is_taken_exactly_once() {
+        let control = SessionControl::new();
+        assert!(
+            control.take_audio_swap().is_none(),
+            "nothing pending by default"
+        );
+
+        control.request_audio_swap(AudioSwap {
+            open: None,
+            barge_in_threshold: Some(0.1),
+        });
+        let swap = control.take_audio_swap().expect("pending");
+        assert_eq!(swap.barge_in_threshold, Some(0.1));
+        assert!(control.take_audio_swap().is_none(), "consumed");
+    }
+
+    #[test]
+    fn a_second_audio_swap_replaces_an_unconsumed_first() {
+        // Settings saved twice before the loop gets a turn: only the later
+        // devices are wanted, and opening both would cost a pointless
+        // close-and-reopen of real hardware.
+        let control = SessionControl::new();
+        control.request_audio_swap(AudioSwap {
+            open: None,
+            barge_in_threshold: Some(0.1),
+        });
+        control.request_audio_swap(AudioSwap {
+            open: None,
+            barge_in_threshold: Some(0.2),
+        });
+        assert_eq!(
+            control.take_audio_swap().unwrap().barge_in_threshold,
+            Some(0.2)
+        );
+        assert!(control.take_audio_swap().is_none());
+    }
+
+    #[test]
+    fn a_threshold_only_swap_keeps_a_pending_device_change_and_takes_the_new_threshold() {
+        // Two Saves in one Settings visit: a new mic, then only a new
+        // threshold. Replacing the first would lose the mic change while the
+        // shell believes it was applied.
+        let control = SessionControl::new();
+        control.request_audio_swap(AudioSwap {
+            open: Some(Box::new(|| unreachable!("never opened in this test"))),
+            barge_in_threshold: Some(0.1),
+        });
+        control.request_audio_swap(AudioSwap {
+            open: None,
+            barge_in_threshold: Some(0.2),
+        });
+        let taken = control.take_audio_swap().unwrap();
+        assert!(
+            taken.open.is_some(),
+            "the pending device change must survive"
+        );
+        assert_eq!(taken.barge_in_threshold, Some(0.2));
+        assert!(control.take_audio_swap().is_none());
     }
 
     #[test]

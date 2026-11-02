@@ -1,15 +1,18 @@
 // Copyright (c) 2026 MycorX. All rights reserved.
 // PolyForm Internal Use 1.0.0 OR PolyForm Noncommercial 1.0.0 — see LICENSE.md.
 
+mod audio;
 pub mod backoff;
 pub mod control;
 pub mod state;
 pub use backoff::Backoff;
-pub use control::{PromptSwap, PromptSwapOutcome, SessionControl};
+pub use control::{
+    AudioOpener, AudioPair, AudioSwap, PromptSwap, PromptSwapOutcome, SessionControl,
+};
 pub use state::{SessionInput, State, can_switch_engine, transition};
 
 use crate::activation::{Activation, ActivationEvent};
-use crate::audio::{AudioSink, AudioSource, Resampler};
+use crate::audio::{AudioSink, AudioSource, DetachedSink, DetachedSource, Resampler};
 use crate::engine::{EngineEvent, S2sEngine, SessionConfig, TextTurnSupport};
 use crate::memory::{ConversationMemory, MemoryContext};
 use crate::tools::ToolExecutor;
@@ -25,6 +28,11 @@ pub enum SwitchError {
 /// Upper bound on pump iterations in the test drivers. Purely a hang guard: a
 /// misbehaving engine should fail the suite, never wedge it.
 const MAX_PUMPS: usize = 256;
+
+/// How often the run loop wakes with nothing else to do: to publish the
+/// playback level while the microphone is silent, and to re-run the checks
+/// (rotation, the idle deadline) that only a pass of the loop performs.
+const POLL_INTERVAL: std::time::Duration = std::time::Duration::from_millis(50);
 
 /// Default RMS above which input counts as the user speaking over the
 /// assistant.
@@ -121,9 +129,18 @@ pub struct SessionDeps {
 }
 
 pub struct Session {
+    /// `deps.source` is a placeholder once `new` returns: the real source
+    /// lives in `capture`, which reads it on a task of its own.
     deps: SessionDeps,
+    /// The microphone, read on its own task so a source that yields nothing
+    /// never stalls the run loop (`session/audio.rs`).
+    capture: audio::Capture,
     state: State,
     events: Option<mpsc::Receiver<EngineEvent>>,
+    /// An engine event the run loop's `select!` received while waiting.
+    /// Handled by the next drain ahead of anything still queued, so waiting
+    /// for an event never reorders it.
+    stashed_event: Option<EngineEvent>,
     /// Typed turns (PLAN.md S4) waiting to be sent. Taken from `control`
     /// whenever `control` changes (construction, `set_control`) so the
     /// per-pump drain never has to lock — see `control.rs`'s take-once
@@ -197,6 +214,16 @@ pub struct Session {
     /// exchanges, which are real and should not be hidden from a live view
     /// when the stored history shows them.
     turn_tx: broadcast::Sender<crate::memory::Turn>,
+    /// What the audio devices are waiting for, as the HUD should say it, or
+    /// `None` while both are open. A `watch`: it is a state, and only the
+    /// current one matters.
+    audio_waiting: watch::Sender<Option<String>>,
+    /// Why the last audio swap's opener failed, while the session runs on
+    /// the silent detached pair it left. Held, not only sent on `error_tx`:
+    /// a detached pair waits for nothing, so without this the waiting line
+    /// would read `None` and a HUD that clears its error on reconnect would
+    /// show a healthy session that hears and says nothing.
+    audio_failed: Option<String>,
     /// Set when a terminal error is seen, so the run loop can stop instead of
     /// entering the backoff loop.
     terminal: bool,
@@ -245,13 +272,17 @@ enum Pump {
 }
 
 impl Session {
-    pub fn new(deps: SessionDeps) -> Self {
+    pub fn new(mut deps: SessionDeps) -> Self {
         let control = SessionControl::new();
         let text_rx = control.take_text_rx();
+        let placeholder = Box::new(DetachedSource::new(deps.source.format()));
+        let capture = audio::Capture::new(std::mem::replace(&mut deps.source, placeholder));
         let session = Self {
             deps,
+            capture,
             state: State::Idle,
             events: None,
+            stashed_event: None,
             text_rx,
             barge_in_threshold: DEFAULT_BARGE_IN_THRESHOLD,
             tool_deadline: Self::default_tool_deadline(),
@@ -272,6 +303,8 @@ impl Session {
             level_tx: watch::channel(0.0).0,
             error_tx: broadcast::channel(ERROR_BROADCAST_CAPACITY).0,
             turn_tx: broadcast::channel(TURN_BROADCAST_CAPACITY).0,
+            audio_waiting: watch::channel(None).0,
+            audio_failed: None,
             terminal: false,
             backoff: Backoff::new(),
             system_prompt: None,
@@ -306,6 +339,33 @@ impl Session {
     /// without polling for it.
     pub fn subscribe_turn(&self) -> broadcast::Receiver<crate::memory::Turn> {
         self.turn_tx.subscribe()
+    }
+
+    /// Observe what the audio devices are waiting for, e.g. `Waiting for the
+    /// microphone "Jabra"`, or `None` while both are open. Always readable.
+    ///
+    /// After a failed audio swap this carries the failure instead (`audio
+    /// devices: ...`) until a later swap opens its devices.
+    pub fn subscribe_audio_waiting(&self) -> watch::Receiver<Option<String>> {
+        self.audio_waiting.subscribe()
+    }
+
+    /// Republish the devices' waits, waking subscribers only on a change.
+    fn publish_audio_waiting(&self) {
+        let input = self.capture.waiting().and_then(|cell| cell.get());
+        let output = self.deps.sink.waiting().and_then(|cell| cell.get());
+        let message = self
+            .audio_failed
+            .clone()
+            .or_else(|| audio::waiting_message(input.as_ref(), output.as_ref()));
+        self.audio_waiting.send_if_modified(|current| {
+            if *current == message {
+                false
+            } else {
+                *current = message;
+                true
+            }
+        });
     }
 
     pub fn default_tool_deadline() -> std::time::Duration {
@@ -419,6 +479,83 @@ impl Session {
         self.control.note_prompt_swap_applied(swap.tag);
         self.mark_activity();
         true
+    }
+
+    /// Adopt a pending audio swap. Returns whether there was one.
+    ///
+    /// The threshold always applies. With an opener, the old pair is dropped
+    /// *before* the new one opens (VPIO allows one unit per process), both on
+    /// a blocking thread because closing and opening a real device blocks.
+    /// The engine connection is untouched: a connected session keeps talking
+    /// and only its audio moves.
+    ///
+    /// An opener that fails or panics leaves the session on a detached pair
+    /// -- silent, but alive and still able to take the next swap -- and says
+    /// why on `error_tx`. Stranding the session would leave the user no way
+    /// back short of a restart. The failure is also held on the waiting line
+    /// and on the handle (`audio_swap_failed`) until a swap opens its
+    /// devices, so the HUD keeps saying it and an unchanged Save retries.
+    async fn apply_pending_audio_swap(&mut self) -> bool {
+        let Some(swap) = self.control.take_audio_swap() else {
+            return false;
+        };
+        self.barge_in_threshold = swap
+            .barge_in_threshold
+            .unwrap_or(DEFAULT_BARGE_IN_THRESHOLD);
+        let Some(open) = swap.open else {
+            return true;
+        };
+
+        let source = self.capture.stop().await;
+        let source_format = source.format();
+        let sink_format = self.deps.sink.format();
+        let sink = std::mem::replace(
+            &mut self.deps.sink,
+            Box::new(DetachedSink::new(sink_format)),
+        );
+        let opened = tokio::task::spawn_blocking(move || {
+            drop(source);
+            drop(sink);
+            open()
+        })
+        .await;
+
+        let (source, sink): AudioPair = match opened {
+            Ok(Ok(pair)) => {
+                self.audio_failed = None;
+                pair
+            }
+            Ok(Err(e)) => self.detached_pair(source_format, sink_format, &e),
+            Err(e) => self.detached_pair(source_format, sink_format, &e),
+        };
+        self.control
+            .note_audio_swap_failed(self.audio_failed.is_some());
+        self.capture = audio::Capture::new(source);
+        self.deps.sink = sink;
+        // Both resamplers were keyed to the old devices' rates and carry
+        // their filter state; the new devices start clean.
+        self.capture_resampler = None;
+        self.playback_resampler = None;
+        let _ = self.level_tx.send(0.0);
+        self.publish_audio_waiting();
+        true
+    }
+
+    /// The pair a failed swap leaves behind, after reporting why and holding
+    /// the failure for the waiting line.
+    fn detached_pair(
+        &mut self,
+        source_format: crate::audio::AudioFormat,
+        sink_format: crate::audio::AudioFormat,
+        cause: &dyn std::fmt::Display,
+    ) -> AudioPair {
+        let message = format!("audio devices: {cause}");
+        let _ = self.error_tx.send(message.clone());
+        self.audio_failed = Some(message);
+        (
+            Box::new(DetachedSource::new(source_format)),
+            Box::new(DetachedSink::new(sink_format)),
+        )
     }
 
     /// Something was said. Resets the idle countdown.
@@ -554,7 +691,7 @@ impl Session {
         // else would publish a level for the whole gap and the HUD would hold
         // the last one it was given -- a ribbon frozen mid-shape over a
         // session that is no longer listening to anything. Same rule the
-        // capture gate in `pump_audio` already states: a level that keeps
+        // capture gate in `handle_frame` already states: a level that keeps
         // showing while the audio goes nowhere reads as "you are being
         // heard".
         let _ = self.level_tx.send(0.0);
@@ -785,8 +922,8 @@ impl Session {
     /// when the stream has closed.
     ///
     /// `pub` because the real run loop is composed in `uia-app` (Task 28) —
-    /// a different crate — so this and `pump_audio` are the two halves it
-    /// drives. Nothing inside `uia-core` calls it yet; the deterministic
+    /// a different crate — so this and `pump_audio_once` are the two halves
+    /// it drives. Nothing inside `uia-core` calls it yet; the deterministic
     /// test drivers below use the non-blocking variant instead.
     pub async fn pump_engine(&mut self) -> bool {
         let Some(rx) = self.events.as_mut() else {
@@ -810,7 +947,11 @@ impl Session {
         let Some(rx) = self.events.as_mut() else {
             return Pump::Closed;
         };
-        let ev = match rx.try_recv() {
+        let ev = match self.stashed_event.take() {
+            Some(ev) => Ok(ev),
+            None => rx.try_recv(),
+        };
+        let ev = match ev {
             Ok(ev) => ev,
             Err(mpsc::error::TryRecvError::Empty) => return Pump::Drained,
             Err(mpsc::error::TryRecvError::Disconnected) => return Pump::Closed,
@@ -825,19 +966,27 @@ impl Session {
     /// Drive one captured frame into the engine, resampling to its rate.
     /// Returns false when the source is exhausted.
     pub async fn pump_audio_once(&mut self) -> bool {
-        self.pump_audio().await
-    }
-
-    async fn pump_audio(&mut self) -> bool {
-        let Some(frame) = self.deps.source.next_frame().await else {
+        let Some(frame) = self.capture.recv().await else {
             return false;
         };
+        self.handle_frame(frame).await;
+        true
+    }
+
+    /// Forward one captured frame: meter, capture gate, barge-in, resample,
+    /// send.
+    async fn handle_frame(&mut self, frame: audio::CapturedFrame) {
+        let audio::CapturedFrame {
+            samples: frame,
+            sample_rate_hz: from,
+        } = frame;
 
         // The meter is the assistant's voice, read from the sink once per
-        // captured frame (~20 ms), so the capture pump doubles as its clock.
-        // Published before the capture gate on purpose: muting the mic does
-        // not mute the assistant, and a typed turn answered aloud while muted
-        // must still move the wave.
+        // captured frame (~20 ms) while the microphone delivers, and on the
+        // run loop's `POLL_INTERVAL` tick while it does not. Published before
+        // the capture gate on purpose: muting the mic does not mute the
+        // assistant, and a typed turn answered aloud while muted must still
+        // move the wave.
         let _ = self.level_tx.send(self.deps.sink.level());
 
         // Gated capture (PLAN.md FD15). The frame is read from the device
@@ -845,7 +994,7 @@ impl Session {
         // and hand the engine a burst of stale audio on unmute — and then
         // dropped here, before barge-in, before any resample or `send_audio`.
         if !self.control.capture_enabled() {
-            return true;
+            return;
         }
 
         // Counted here, past the capture gate, on purpose: a muted mic is not
@@ -868,7 +1017,9 @@ impl Session {
             let _ = self.deps.engine.interrupt().await;
         }
 
-        let from = self.deps.source.format().sample_rate_hz;
+        // `from` is the rate this frame was captured at, not what the source
+        // reports now: capture reads ahead, and a device that reopened at a
+        // new rate in between would otherwise be resampled from the old one.
         let to = self.deps.engine.input_format().sample_rate_hz;
         // The resampler buffers until it has a full chunk, so early frames
         // legitimately produce nothing yet — that is not an error, just not
@@ -876,7 +1027,6 @@ impl Session {
         if let Some(frame) = Self::resample(&mut self.capture_resampler, frame, from, to) {
             let _ = self.deps.engine.send_audio(&frame).await;
         }
-        true
     }
 
     /// Drain one already-queued typed turn (PLAN.md S4), if any. Never awaits
@@ -897,19 +1047,25 @@ impl Session {
         };
         match rx.try_recv() {
             Ok(text) => {
-                if let Err(e) = self.deps.engine.send_text(&text).await {
-                    let _ = self.error_tx.send(e.to_string());
-                    // FD3's degrade, in the ONE place every engine's typed
-                    // turns pass through. A turn the engine actually refused
-                    // is the authoritative answer to "can this session take
-                    // typed text?", and it outranks whatever the engine
-                    // claimed — including an optimistic `Unknown`.
-                    self.control.degrade_text_turn_support(e.to_string());
-                }
+                self.send_text_turn(text).await;
                 Pump::Progressed
             }
             Err(mpsc::error::TryRecvError::Empty) => Pump::Drained,
             Err(mpsc::error::TryRecvError::Disconnected) => Pump::Drained,
+        }
+    }
+
+    /// Send one typed turn, whether drained by `pump_text` or received by the
+    /// run loop's `select!`.
+    async fn send_text_turn(&mut self, text: String) {
+        if let Err(e) = self.deps.engine.send_text(&text).await {
+            let _ = self.error_tx.send(e.to_string());
+            // FD3's degrade, in the ONE place every engine's typed turns pass
+            // through. A turn the engine actually refused is the
+            // authoritative answer to "can this session take typed text?",
+            // and it outranks whatever the engine claimed — including an
+            // optimistic `Unknown`.
+            self.control.degrade_text_turn_support(e.to_string());
         }
     }
 
@@ -928,20 +1084,36 @@ impl Session {
         self.deps.activation.next().await
     }
 
-    /// The real run loop: wait to be activated, connect, then alternate
-    /// between draining engine events and pumping one captured frame, until
-    /// something ends the session.
+    /// The real run loop: wait to be activated, connect, then make one pass
+    /// of checks after another, waiting between passes for whichever input
+    /// arrives first, until something ends the session.
     ///
-    /// **Why it alternates rather than `select!`s.** Both halves need
-    /// `&mut self` (the engine receiver, the source, the sink and the state are
-    /// all owned here), so they cannot be two concurrent arms of a `select!`
-    /// without splitting `Session` apart. Alternating is honest about the
-    /// consequence: engine events are handled between capture frames, so
-    /// playback and state changes are delayed by at most one frame period
-    /// — 20 ms at the rates every engine here negotiates. That is inside the
-    /// budget for a turn boundary and well inside it for a state label; it is
-    /// NOT free, and if a future stage wants it gone the fix is to move capture
-    /// into its own task feeding a channel, not to reorder this loop.
+    /// **Why it `select!`s.** Each pass first runs, in a fixed order, every
+    /// check whose ordering carries meaning: drain the engine, drain typed
+    /// turns, reconnect, close, reset the backoff, park, swap the prompt,
+    /// swap the audio, rotate, idle out. Then it waits on one biased
+    /// `select!` over the next captured frame, the engine's events, typed
+    /// turns, the connection-wanted switch and a `POLL_INTERVAL` tick,
+    /// handles the one that came, and goes round again. Capture runs on its
+    /// own task (`session/audio.rs`) precisely so it can be one arm among
+    /// these: when the loop awaited the microphone directly, a device that
+    /// yielded nothing froze engine playback, parking, rotation and the idle
+    /// deadline with it.
+    ///
+    /// Capture is the first arm. Behind a fast-streaming reply the events arm
+    /// was always ready, so barge-in frames piled up in capture's short queue
+    /// and arrived late. Capture first cannot starve the rest: a device
+    /// delivers about one frame per 20 ms, and the drain at the top of every
+    /// pass handles queued engine events whichever arm woke the loop.
+    ///
+    /// An engine event is not handled in its arm: it goes into
+    /// `stashed_event` for the next drain, so the reconnect and barge-in
+    /// ordering below is the same whichever input woke the loop. A typed turn
+    /// and a captured frame are handled in their arms, since neither changes
+    /// what the checks in the pass decide. The tick exists for the passes
+    /// nothing else would trigger -- a silent microphone with a quiet engine
+    /// -- and publishes the playback level so the meter still follows the
+    /// assistant's voice with no frames arriving to clock it.
     ///
     /// Reconnection is driven from `reconnect_attempts` (S6) rather than from
     /// the state, because `Connecting` is also the normal pre-`Ready` state and
@@ -954,6 +1126,8 @@ impl Session {
         }
 
         let mut wanted = self.control.subscribe_connection_wanted();
+        let mut tick = tokio::time::interval(POLL_INTERVAL);
+        tick.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
 
         'connected: loop {
             // Park until a connection is wanted. A closed channel means every
@@ -965,6 +1139,10 @@ impl Session {
                 }
             }
 
+            // Settings closing is what woke the park, and Settings is what
+            // asks for new devices, so they open here, before the reconnect.
+            self.apply_pending_audio_swap().await;
+
             // Captured BEFORE the first connect: that connect can itself fail
             // transiently, and the loop below must see that as a retry to make.
             let mut attempts = self.reconnect_attempts;
@@ -975,6 +1153,7 @@ impl Session {
             self.mark_activity();
 
             loop {
+                self.publish_audio_waiting();
                 let mut closed = false;
                 loop {
                     match self.pump_buffered_engine().await {
@@ -1027,10 +1206,10 @@ impl Session {
                     self.backoff.reset();
                 }
 
-                // Checked once per pump rather than by `select!`ing on the watch:
-                // frames arrive every few milliseconds, so this notices a request
-                // just as promptly, and it does not restructure a pump loop whose
-                // ordering carries the reconnect and barge-in semantics.
+                // Checked here, in its place in the pass, rather than in the
+                // `select!` arm that wakes on the watch: the arm only wakes
+                // the loop, so a request is acted on in the same order as
+                // every other check, after the reconnect and close above.
                 if !*wanted.borrow() {
                     self.disconnect().await;
                     continue 'connected;
@@ -1044,6 +1223,13 @@ impl Session {
                     if self.terminal {
                         return RunOutcome::Terminal;
                     }
+                    continue;
+                }
+
+                // Not expected from the UI, which swaps while parked, but a
+                // swap can arrive while connected; it moves the audio without
+                // touching the connection.
+                if self.apply_pending_audio_swap().await {
                     continue;
                 }
 
@@ -1085,8 +1271,34 @@ impl Session {
                     continue 'connected;
                 }
 
-                if !self.pump_audio().await {
-                    return RunOutcome::SourceExhausted;
+                tokio::select! {
+                    biased;
+                    // First, so a barge-in frame is never queued behind a
+                    // streaming reply. It cannot starve the arms below: the
+                    // device paces it to one frame per ~20 ms.
+                    frame = self.capture.recv() => match frame {
+                        Some(frame) => self.handle_frame(frame).await,
+                        None => return RunOutcome::SourceExhausted,
+                    },
+                    ev = recv_or_never(&mut self.events) => {
+                        // `None` is the stream closing: the next drain sees
+                        // `Closed` and handles it like any other close.
+                        self.stashed_event = ev;
+                    }
+                    text = recv_or_never(&mut self.text_rx) => match text {
+                        Some(text) => self.send_text_turn(text).await,
+                        // Every sender is gone, so nothing can arrive on it
+                        // again; dropping it stops this arm firing forever.
+                        None => self.text_rx = None,
+                    },
+                    changed = wanted.changed() => {
+                        if changed.is_err() {
+                            return RunOutcome::ShutDown;
+                        }
+                    }
+                    _ = tick.tick() => {
+                        let _ = self.level_tx.send(self.deps.sink.level());
+                    }
                 }
             }
         }
@@ -1126,7 +1338,16 @@ impl Session {
         }
         // Drain the Ready event so we are Listening before streaming audio.
         let _ = self.pump_buffered_engine().await;
-        while self.pump_audio().await {}
+        while self.pump_audio_once().await {}
+    }
+}
+
+/// `rx.recv()`, or never for a channel that is not there: a disconnected
+/// session has no engine stream, and its `select!` arm must not fire.
+async fn recv_or_never<T>(rx: &mut Option<mpsc::Receiver<T>>) -> Option<T> {
+    match rx {
+        Some(rx) => rx.recv().await,
+        None => std::future::pending().await,
     }
 }
 
@@ -1195,6 +1416,43 @@ mod idle_tests {
         session.mark_activity();
         std::thread::sleep(Duration::from_millis(2));
         assert!(!session.idle_expired());
+    }
+
+    /// A microphone that reopens at a new rate between two frames, as a
+    /// device switch does: 24 kHz for the first frame, 48 kHz after.
+    struct ReopenedAtANewRate {
+        yielded: usize,
+    }
+
+    #[async_trait::async_trait]
+    impl AudioSource for ReopenedAtANewRate {
+        fn format(&self) -> AudioFormat {
+            let hz = if self.yielded <= 1 { 24_000 } else { 48_000 };
+            AudioFormat::mono_pcm16(hz)
+        }
+        async fn next_frame(&mut self) -> Option<Vec<i16>> {
+            self.yielded += 1;
+            Some(vec![0; 480])
+        }
+    }
+
+    /// Capture reads ahead of the session, so the rate the source reports
+    /// when a frame is handled can already belong to a later frame. The rate
+    /// has to travel with each frame, or a reopened device's audio is
+    /// resampled from the old rate and reaches the engine at the wrong pitch.
+    #[tokio::test]
+    async fn the_capture_rate_is_read_per_frame_so_a_reopened_device_at_a_new_rate_is_resampled() {
+        let mut session = a_session();
+        session.capture = audio::Capture::new(Box::new(ReopenedAtANewRate { yielded: 0 }));
+
+        assert!(session.pump_audio_once().await);
+        assert!(session.pump_audio_once().await);
+
+        let (from, to, _) = session
+            .capture_resampler
+            .as_ref()
+            .expect("both frames needed resampling");
+        assert_eq!((*from, *to), (48_000, 16_000));
     }
 }
 
@@ -1528,5 +1786,194 @@ mod prompt_swap_tests {
             Some("You are a pirate."),
             "the rotation must reconnect with the swapped persona, not the original"
         );
+    }
+}
+
+#[cfg(test)]
+mod audio_swap_tests {
+    use super::*;
+    use crate::audio::{AudioError, AudioFormat, FixtureSource, VecSink};
+    use crate::engine::FakeEngine;
+    use crate::memory::NullMemory;
+    use crate::tools::FakeExecutor;
+    use async_trait::async_trait;
+    use std::sync::Mutex;
+
+    type Log = Arc<Mutex<Vec<&'static str>>>;
+
+    /// A device that notes when it closes, which for a real device is when
+    /// it is dropped.
+    struct LoggedSource(Log);
+
+    impl Drop for LoggedSource {
+        fn drop(&mut self) {
+            self.0.lock().unwrap().push("source dropped");
+        }
+    }
+
+    #[async_trait]
+    impl AudioSource for LoggedSource {
+        fn format(&self) -> AudioFormat {
+            AudioFormat::mono_pcm16(16_000)
+        }
+        async fn next_frame(&mut self) -> Option<Vec<i16>> {
+            std::future::pending().await
+        }
+    }
+
+    struct LoggedSink(Log);
+
+    impl Drop for LoggedSink {
+        fn drop(&mut self) {
+            self.0.lock().unwrap().push("sink dropped");
+        }
+    }
+
+    #[async_trait]
+    impl AudioSink for LoggedSink {
+        fn format(&self) -> AudioFormat {
+            AudioFormat::mono_pcm16(24_000)
+        }
+        async fn write(&mut self, _frame: &[i16]) -> Result<(), AudioError> {
+            Ok(())
+        }
+        fn clear(&mut self) {}
+    }
+
+    fn session_with(
+        source: Box<dyn AudioSource>,
+        sink: Box<dyn AudioSink>,
+        engine: FakeEngine,
+    ) -> Session {
+        let (activation, _tx) = crate::activation::ChannelActivation::new();
+        Session::new(SessionDeps {
+            source,
+            sink,
+            engine: Box::new(engine),
+            executor: Arc::new(FakeExecutor::new()),
+            memory: Arc::new(NullMemory),
+            activation: Box::new(activation),
+            ctx: MemoryContext {
+                user_id: "u".into(),
+                conversation_id: "c".into(),
+            },
+        })
+    }
+
+    fn a_silent_pair() -> AudioPair {
+        (
+            Box::new(FixtureSource::new(AudioFormat::mono_pcm16(16_000), vec![])),
+            Box::new(VecSink::new(AudioFormat::mono_pcm16(24_000))),
+        )
+    }
+
+    /// VPIO allows one unit per process, so the old pair must be closed
+    /// before the new one is opened -- never the other way round.
+    #[tokio::test]
+    async fn an_audio_swap_waits_for_the_old_pair_to_drop_before_opening_the_new_one() {
+        let log: Log = Arc::default();
+        let mut session = session_with(
+            Box::new(LoggedSource(log.clone())),
+            Box::new(LoggedSink(log.clone())),
+            FakeEngine::new(vec![]),
+        );
+        let opener_log = log.clone();
+        session.control.request_audio_swap(AudioSwap {
+            open: Some(Box::new(move || {
+                opener_log.lock().unwrap().push("opened");
+                Ok(a_silent_pair())
+            })),
+            barge_in_threshold: None,
+        });
+
+        assert!(session.apply_pending_audio_swap().await);
+
+        let log = log.lock().unwrap().clone();
+        assert_eq!(log.last(), Some(&"opened"), "log: {log:?}");
+        assert_eq!(log.len(), 3, "both devices drop, then one open: {log:?}");
+        assert!(log.contains(&"source dropped") && log.contains(&"sink dropped"));
+    }
+
+    #[tokio::test]
+    async fn the_swap_carries_the_barge_in_threshold() {
+        let mut session = session_with(
+            Box::new(FixtureSource::new(AudioFormat::mono_pcm16(16_000), vec![])),
+            Box::new(VecSink::new(AudioFormat::mono_pcm16(24_000))),
+            FakeEngine::new(vec![]),
+        );
+        session.control.request_audio_swap(AudioSwap {
+            open: None,
+            barge_in_threshold: Some(0.2),
+        });
+        session.apply_pending_audio_swap().await;
+        assert_eq!(session.barge_in_threshold, 0.2);
+
+        session.control.request_audio_swap(AudioSwap {
+            open: None,
+            barge_in_threshold: None,
+        });
+        session.apply_pending_audio_swap().await;
+        assert_eq!(session.barge_in_threshold, DEFAULT_BARGE_IN_THRESHOLD);
+    }
+
+    #[tokio::test]
+    async fn a_threshold_only_swap_keeps_the_open_devices() {
+        let log: Log = Arc::default();
+        let mut session = session_with(
+            Box::new(LoggedSource(log.clone())),
+            Box::new(LoggedSink(log.clone())),
+            FakeEngine::new(vec![]),
+        );
+        session.control.request_audio_swap(AudioSwap {
+            open: None,
+            barge_in_threshold: Some(0.2),
+        });
+
+        assert!(session.apply_pending_audio_swap().await);
+
+        assert!(
+            log.lock().unwrap().is_empty(),
+            "a threshold change closed a device"
+        );
+    }
+
+    #[tokio::test]
+    async fn a_swap_while_connected_sends_later_audio_only_to_the_new_sink_without_reconnecting() {
+        let old = VecSink::new(AudioFormat::mono_pcm16(24_000));
+        let old_probe = old.probe();
+        let engine = FakeEngine::new(vec![]);
+        let configs = engine.config_probe();
+        let mut session = session_with(
+            Box::new(FixtureSource::new(AudioFormat::mono_pcm16(16_000), vec![])),
+            Box::new(old),
+            engine,
+        );
+        session.connect().await;
+        let old_len = old_probe.written().len();
+
+        let new = VecSink::new(AudioFormat::mono_pcm16(24_000));
+        let new_probe = new.probe();
+        session.control.request_audio_swap(AudioSwap {
+            open: Some(Box::new(move || {
+                Ok((
+                    Box::new(FixtureSource::new(AudioFormat::mono_pcm16(16_000), vec![]))
+                        as Box<dyn AudioSource>,
+                    Box::new(new) as Box<dyn AudioSink>,
+                ))
+            })),
+            barge_in_threshold: None,
+        });
+        session.apply_pending_audio_swap().await;
+        session
+            .handle_event(EngineEvent::AudioChunk(vec![8_000; 480]))
+            .await;
+
+        assert!(!new_probe.written().is_empty(), "the new sink got nothing");
+        assert_eq!(
+            old_probe.written().len(),
+            old_len,
+            "the old sink still played"
+        );
+        assert_eq!(configs.count(), 1, "a device swap must not reconnect");
     }
 }

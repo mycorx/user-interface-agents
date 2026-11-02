@@ -206,6 +206,72 @@ pub fn alert_window_position(position: (i32, i32), size: (u32, u32), scale: f64)
     )
 }
 
+/// Tracks the "Waiting for the microphone ..." notice so it rides the
+/// existing error line of the HUD without wiping or being wiped wrongly.
+///
+/// Each method returns the message to emit on [`ERROR_EVENT`], if any. The
+/// HUD hides an empty message, so `""` clears the line. The HUD also clears
+/// its error line on `Connecting`/`Idle` -> `Listening`, so a wait still in
+/// progress is re-emitted on exactly that transition.
+#[derive(Debug)]
+pub struct WaitingNotice {
+    current: Option<String>,
+    /// An error was emitted after the wait text, so the line no longer shows
+    /// the wait and clearing it would wipe that error.
+    error_since: bool,
+    previous: State,
+}
+
+impl Default for WaitingNotice {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
+impl WaitingNotice {
+    pub fn new() -> Self {
+        Self {
+            current: None,
+            error_since: false,
+            previous: State::Idle,
+        }
+    }
+
+    pub fn on_waiting(&mut self, waiting: Option<String>) -> Option<String> {
+        match waiting {
+            Some(message) => {
+                if self.current.as_ref() == Some(&message) {
+                    return None;
+                }
+                self.current = Some(message.clone());
+                self.error_since = false;
+                Some(message)
+            }
+            None => {
+                let had_wait = self.current.take().is_some();
+                let wipe = had_wait && !self.error_since;
+                self.error_since = false;
+                wipe.then(String::new)
+            }
+        }
+    }
+
+    pub fn on_error(&mut self) {
+        self.error_since = true;
+    }
+
+    pub fn on_state(&mut self, next: State) -> Option<String> {
+        let recovered =
+            matches!(self.previous, State::Connecting | State::Idle) && next == State::Listening;
+        self.previous = next;
+        if recovered && let Some(message) = &self.current {
+            self.error_since = false;
+            return Some(message.clone());
+        }
+        None
+    }
+}
+
 /// What an [`ActivationEvent`] means for the overlay window.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum WindowAction {
@@ -548,5 +614,92 @@ mod tests {
             window_action_for(ActivationEvent::Toggle),
             WindowAction::Toggle
         );
+    }
+
+    fn wait(text: &str) -> Option<String> {
+        Some(text.to_string())
+    }
+
+    #[test]
+    fn a_device_wait_is_shown_naming_the_device() {
+        let mut notice = WaitingNotice::new();
+        assert_eq!(
+            notice.on_waiting(wait("Waiting for the microphone \"Jabra\"")),
+            wait("Waiting for the microphone \"Jabra\"")
+        );
+        assert_eq!(
+            notice.on_waiting(wait("Waiting for a speaker")),
+            wait("Waiting for a speaker"),
+            "a changed wait is shown"
+        );
+    }
+
+    #[test]
+    fn an_unchanged_wait_is_not_shown_again() {
+        let mut notice = WaitingNotice::new();
+        notice.on_waiting(wait("Waiting for a speaker"));
+        assert_eq!(notice.on_waiting(wait("Waiting for a speaker")), None);
+    }
+
+    #[test]
+    fn a_reasserted_wait_is_wiped_when_the_device_returns() {
+        // The reconnect cleared the error line and showed the wait again, so
+        // the line holds the wait and clearing it wipes nothing newer.
+        let mut notice = WaitingNotice::new();
+        notice.on_waiting(wait("Waiting for a speaker"));
+        notice.on_error();
+        notice.on_state(State::Connecting);
+        notice.on_state(State::Listening);
+        assert_eq!(notice.on_waiting(None), wait(""));
+    }
+
+    #[test]
+    fn the_wait_clears_when_the_device_returns() {
+        let mut notice = WaitingNotice::new();
+        notice.on_waiting(wait("Waiting for a speaker"));
+        assert_eq!(notice.on_waiting(None), wait(""));
+        assert_eq!(notice.on_waiting(None), None, "nothing left to clear");
+    }
+
+    #[test]
+    fn a_newer_error_is_not_wiped_when_the_device_returns() {
+        let mut notice = WaitingNotice::new();
+        notice.on_waiting(wait("Waiting for a speaker"));
+        notice.on_error();
+        assert_eq!(notice.on_waiting(None), None);
+    }
+
+    #[test]
+    fn a_reconnect_reasserts_a_wait_still_in_progress() {
+        let mut notice = WaitingNotice::new();
+        notice.on_state(State::Listening);
+        notice.on_waiting(wait("Waiting for a speaker"));
+        assert_eq!(notice.on_state(State::Connecting), None);
+        assert_eq!(
+            notice.on_state(State::Listening),
+            wait("Waiting for a speaker")
+        );
+        let mut from_idle = WaitingNotice::new();
+        from_idle.on_waiting(wait("Waiting for a speaker"));
+        assert_eq!(
+            from_idle.on_state(State::Listening),
+            wait("Waiting for a speaker")
+        );
+    }
+
+    #[test]
+    fn a_reconnect_with_nothing_waiting_emits_nothing() {
+        let mut notice = WaitingNotice::new();
+        assert_eq!(notice.on_state(State::Connecting), None);
+        assert_eq!(notice.on_state(State::Listening), None);
+    }
+
+    #[test]
+    fn the_end_of_a_reply_does_not_reassert_the_wait() {
+        let mut notice = WaitingNotice::new();
+        notice.on_state(State::Listening);
+        notice.on_waiting(wait("Waiting for a speaker"));
+        notice.on_state(State::Speaking);
+        assert_eq!(notice.on_state(State::Listening), None);
     }
 }

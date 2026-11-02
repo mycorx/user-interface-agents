@@ -19,6 +19,7 @@
 /// the user an app that looks fine and cannot hear them.
 #[cfg_attr(
     not(any(
+        feature = "cpal-io",
         all(windows, feature = "wasapi-aec"),
         all(target_os = "macos", feature = "coreaudio-aec")
     )),
@@ -35,6 +36,7 @@ pub(crate) const REOPEN_DELAYS_MS: [u32; 5] = [200, 500, 1_000, 2_000, 5_000];
 /// never returns.
 #[cfg_attr(
     not(any(
+        feature = "cpal-io",
         all(windows, feature = "wasapi-aec"),
         all(target_os = "macos", feature = "coreaudio-aec")
     )),

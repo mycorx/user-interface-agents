@@ -31,13 +31,16 @@ aec = ["webrtc-audio-processing"]
 # opened with `AudioCategory_Communications` - no bundled C++ library needed.
 # Windows-only: `windows` below is gated to `cfg(windows)`, so this feature is
 # a no-op (undefined symbols) anywhere else.
-wasapi-aec = ["dep:windows"]
+wasapi-aec = ["dep:windows", "dep:windows-core"]
 # macOS's equivalent of `wasapi-aec`: the Voice Processing IO audio unit
 # applies Apple's own AEC/AGC/NS to what it records, using what it plays as
 # the reference. No bundled C++, no toolchain. Enabled by default on macOS by
 # uia-app's `[target.'cfg(target_os = "macos")'.dependencies]` stanza; a
-# no-op anywhere else because the crates below are macOS-only.
+# no-op anywhere else because the crates below are macOS-only. Also enables
+# `cpal-io`: while a pinned device is missing, the direction that is present
+# runs on a plain cpal stream until both are there to rebuild the unit.
 coreaudio-aec = [
+  "cpal-io",
   "dep:objc2-audio-toolbox",
   "dep:objc2-core-audio",
   "dep:objc2-core-audio-types",
@@ -52,6 +55,15 @@ tokio.workspace = true
 cpal = { version = "0.18.2", optional = true }
 opus-rs = "0.1.37"
 webrtc-audio-processing = { version = "2.1.0", optional = true, features = ["bundled"] }
+
+[target.'cfg(target_os = "linux")'.dependencies]
+# Same cpal as above, plus its PipeWire host: on the latest Ubuntu cpal then
+# defaults to PipeWire, which reports the default device as a node that follows
+# the desktop's choice, so "Default" can be switched live. Falls back to ALSA
+# where no PipeWire daemon runs (CI runners). Builds pipewire-sys with bindgen.
+# Links libpipewire-0.3 dynamically, so the release .deb declares it in
+# tauri.conf.json's bundle.linux.deb.depends.
+cpal = { version = "0.18.2", optional = true, features = ["pipewire"] }
 
 [target.'cfg(windows)'.dependencies]
 windows = { version = "0.62", optional = true, features = [
@@ -75,6 +87,10 @@ windows = { version = "0.62", optional = true, features = [
   "Win32_UI_Shell_PropertiesSystem",
   "Win32_Devices_FunctionDiscovery",
 ] }
+# `#[windows::core::implement]` (the default-device notification client)
+# expands to `::windows_core` paths, so the crate must be a direct dependency.
+# Already in Cargo.lock at this version through `windows` itself.
+windows-core = { version = "0.62", optional = true }
 
 # All four are already in Cargo.lock at these versions via cpal's own CoreAudio
 # host, so this adds features, not crates.

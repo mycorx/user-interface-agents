@@ -19,6 +19,12 @@
 //! aggregate device, so names are only resolved once a torn-down unit's
 //! aggregate has left the list.
 //!
+//! A pinned device that is missing is waited for, never replaced. Until both
+//! directions are present the unit is split: the direction that is there
+//! runs on a plain cpal [`Leg`] (no echo cancellation) and the missing one
+//! reports what it waits for. Once both resolve, the legs are dropped and
+//! the unit is built — never while a leg or another unit holds the devices.
+//!
 //! VPIO processes both directions at the slower device's rate, so before each
 //! open a bound device below 24 kHz that supports more is raised (to at most
 //! 48 kHz) and restored once the unit releases it — see `rate`. A device that
@@ -36,13 +42,15 @@ pub use capture::CoreAudioSource;
 pub use render::CoreAudioSink;
 
 use crate::backoff::reopen_delay_ms;
+use crate::cpal_stream::Leg;
+use crate::follow::{self, LegPlan, OpenFailure, Resolution, UnitPlan};
 use device::{DeviceInfo, Direction, Listeners};
 use rate::{FULL_VOICE_RATE_HZ, RaiseLog, RateGuard};
 use std::sync::mpsc::{Receiver, RecvTimeoutError, Sender};
-use std::sync::{Arc, Mutex, PoisonError};
+use std::sync::{Arc, Mutex};
 use std::thread::JoinHandle;
 use std::time::Duration;
-use uia_core::audio::{AudioError, AudioFormat, Encoding};
+use uia_core::audio::{AudioError, WaitingFor};
 use unit::{CLIENT_RATE_HZ, FramesTx, Shared, VoiceUnit};
 
 /// Backstop re-check for notifications CoreAudio did not deliver.
@@ -55,17 +63,6 @@ pub(crate) enum Wake {
     Changed,
     /// The backend is being dropped.
     Stop,
-}
-
-/// The app-side format of both source and sink: fixed, see `CLIENT_RATE_HZ`.
-/// Mono is safe to report for the sink because the session only reads
-/// `sample_rate_hz` from either format.
-fn app_format() -> AudioFormat {
-    AudioFormat {
-        sample_rate_hz: CLIENT_RATE_HZ,
-        channels: 1,
-        encoding: Encoding::Pcm16Le,
-    }
 }
 
 /// How long to wait for a torn-down unit's private aggregate (and with it the
@@ -202,19 +199,147 @@ fn wait_or_stop(rx: &Receiver<Wake>, delay: Duration) -> bool {
 }
 
 /// The configured device names, owned for the supervisor thread. Resolved
-/// only when opening a unit; while one runs, `Some` just means "pinned" —
-/// see [`direction_stale`].
+/// only between units; while one runs, `Some` just means "pinned" — see
+/// [`direction_stale`]. Never changed while the backend runs: a Settings
+/// change drops this backend and opens another.
 struct Wanted {
     input: Option<String>,
     output: Option<String>,
 }
 
-impl Wanted {
-    fn resolve(&self) -> Result<(DeviceInfo, DeviceInfo), AudioError> {
-        Ok((
-            device::resolve(Direction::Input, self.input.as_deref())?,
-            device::resolve(Direction::Output, self.output.as_deref())?,
-        ))
+/// How a lookup went, as [`follow::plan_unit`] sees it.
+fn resolution(found: &Result<DeviceInfo, OpenFailure>) -> Resolution {
+    match found {
+        Ok(_) => Resolution::Found,
+        Err(OpenFailure::MissingPinned { name, .. }) => Resolution::MissingPinned(name.clone()),
+        Err(OpenFailure::Other(_)) => Resolution::Failed,
+    }
+}
+
+/// What one direction of a split unit reports waiting for: the pinned name
+/// it is missing, or nothing while it runs on its leg.
+fn leg_waiting(plan: &LegPlan) -> Option<WaitingFor> {
+    match plan {
+        LegPlan::Plain => None,
+        LegPlan::Wait(name) => Some(follow::waiting_for(Some(name))),
+    }
+}
+
+/// What one direction reports waiting for while nothing runs: what it is
+/// missing, or nothing if it was found.
+fn waiting_after(
+    found: &Result<DeviceInfo, OpenFailure>,
+    pinned: Option<&str>,
+) -> Option<WaitingFor> {
+    match found {
+        Ok(_) => None,
+        Err(OpenFailure::MissingPinned { name, .. }) => Some(follow::waiting_for(Some(name))),
+        Err(OpenFailure::Other(_)) => Some(follow::waiting_for(pinned)),
+    }
+}
+
+/// Once nothing runs in either direction, a direction still reporting no
+/// wait would look healthy on the HUD. It reports what it is configured
+/// for instead, as a cpal leg does after a failed reopen. A direction
+/// already waiting for a pinned name keeps that name.
+fn report_nothing_running(shared: &Shared, wanted: &Wanted) {
+    for (cell, pinned) in [
+        (&shared.input_waiting, wanted.input.as_deref()),
+        (&shared.output_waiting, wanted.output.as_deref()),
+    ] {
+        if cell.get().is_none() {
+            cell.set(Some(follow::waiting_for(pinned)));
+        }
+    }
+}
+
+/// The error a failed plan reports: the OS failure, in preference to a
+/// missing name the plan would otherwise have waited for.
+fn plan_error(
+    input: Result<DeviceInfo, OpenFailure>,
+    output: Result<DeviceInfo, OpenFailure>,
+) -> AudioError {
+    let failures = [input.err(), output.err()];
+    let mut failures = failures.into_iter().flatten();
+    let first = failures.next();
+    match first {
+        Some(OpenFailure::MissingPinned { .. }) => failures.next().or(first),
+        other => other,
+    }
+    .map_or_else(
+        || AudioError::DeviceUnavailable("coreaudio: no devices to open".to_string()),
+        AudioError::from,
+    )
+}
+
+/// One line for the log: how a split unit runs each direction.
+fn describe_split(input: &LegPlan, output: &LegPlan) -> String {
+    let side = |label: &str, plan: &LegPlan| match plan {
+        LegPlan::Plain => format!("{label} on a plain stream"),
+        LegPlan::Wait(name) => format!("{label} waiting for {name:?}"),
+    };
+    format!("{} / {}", side("input", input), side("output", output))
+}
+
+/// The cpal streams of a split unit, one per direction that is present.
+#[derive(Default)]
+struct Legs {
+    input: Option<Leg>,
+    output: Option<Leg>,
+}
+
+impl Legs {
+    /// Bring the legs in line with a split plan: a `Plain` direction gets a
+    /// leg if it has none, a `Wait` direction loses its leg and reports the
+    /// name it waits for. A leg already running is left alone.
+    fn apply(
+        &mut self,
+        input: &LegPlan,
+        output: &LegPlan,
+        wanted: &Wanted,
+        shared: &Shared,
+        frames_tx: &FramesTx,
+    ) -> Result<(), AudioError> {
+        match leg_waiting(input) {
+            Some(what) => {
+                self.input = None;
+                shared.input_waiting.set(Some(what));
+            }
+            None if self.input.is_none() => {
+                shared.input_waiting.set(None);
+                self.input = Some(Leg::capture(
+                    wanted.input.as_deref(),
+                    frames_tx.clone(),
+                    Arc::clone(&shared.input_format),
+                    shared.input_waiting.clone(),
+                )?);
+            }
+            None => {}
+        }
+        match leg_waiting(output) {
+            Some(what) => {
+                self.output = None;
+                // Nothing plays it, and it would come out late.
+                shared.playback.clear();
+                shared.output_waiting.set(Some(what));
+            }
+            None if self.output.is_none() => {
+                shared.output_waiting.set(None);
+                let (queued_for, _) = shared.output_format.load();
+                self.output = Some(Leg::render(
+                    wanted.output.as_deref(),
+                    shared.playback.clone(),
+                    Arc::clone(&shared.output_format),
+                    shared.output_waiting.clone(),
+                )?);
+                let (now, _) = shared.output_format.load();
+                if !follow::keep_queue_on_reopen(queued_for, now) {
+                    shared.playback.clear();
+                }
+            }
+            None => {}
+        }
+        Ok(())
     }
 }
 
@@ -224,6 +349,14 @@ impl Wanted {
 struct Running {
     voice: VoiceUnit,
     _rates: RateGuard,
+}
+
+/// What the supervisor reports at first open.
+enum Ready {
+    /// The unit is running.
+    Unit(Opened),
+    /// A pinned device is missing: see [`describe_split`].
+    Split(String),
 }
 
 /// What the supervisor reports once the unit is running.
@@ -275,8 +408,12 @@ impl Drop for Backend {
 /// until it disappears: a second matching device plugged in later is not
 /// switched to (see [`direction_stale`] for why).
 ///
-/// Failure to open is returned here, never as a source that silently yields
-/// nothing — `uia-app` falls back to plain cpal devices on any error.
+/// A pinned device that is missing is not a failure: this returns promptly
+/// with that side's `waiting()` cell naming it, and the other side running
+/// on a plain cpal stream until both are present (see the module docs).
+/// Any other failure to open is returned here, never as a source that
+/// silently yields nothing — `uia-app` falls back to plain cpal devices on
+/// any error.
 pub fn open_voice_processing(
     input: Option<&str>,
     output: Option<&str>,
@@ -313,8 +450,8 @@ pub fn open_voice_processing(
             ))
         })?;
 
-    let opened = match ready_rx.recv() {
-        Ok(Ok(opened)) => opened,
+    let ready = match ready_rx.recv() {
+        Ok(Ok(ready)) => ready,
         Ok(Err(e)) => {
             let _ = worker.join();
             return Err(e);
@@ -326,9 +463,15 @@ pub fn open_voice_processing(
             ));
         }
     };
-    eprintln!(
-        "uia-audio: coreaudio voice processing opened {opened} (OS echo cancellation active)"
-    );
+    match ready {
+        Ready::Unit(opened) => eprintln!(
+            "uia-audio: coreaudio voice processing opened {opened} (OS echo cancellation active)"
+        ),
+        Ready::Split(split) => eprintln!(
+            "uia-audio: coreaudio voice processing waiting: {split} \
+             (no echo cancellation until both devices are present)"
+        ),
+    }
 
     let backend = Arc::new(Backend {
         shared,
@@ -357,14 +500,16 @@ pub fn list_output_device_names() -> Result<Vec<String>, AudioError> {
     device::list_names(Direction::Output)
 }
 
-/// Own the unit for the backend's lifetime: open, watch, rebuild, back off.
+/// Own the unit for the backend's lifetime: open, watch, rebuild, back off,
+/// and while a pinned device is missing, run the other direction on a cpal
+/// leg until both are there.
 ///
-/// `frames_tx` lives on this thread's stack (each unit's callbacks hold only
-/// a clone), so however this function ends — return or panic — the capture
-/// channel closes and the source sees end-of-stream instead of hanging on a
-/// dead microphone.
+/// `frames_tx` lives on this thread's stack (each unit's callbacks and the
+/// capture leg hold only a clone), so however this function ends — return
+/// or panic — the capture channel closes and the source sees end-of-stream
+/// instead of hanging on a dead microphone.
 fn supervise(
-    ready_tx: std::sync::mpsc::Sender<Result<Opened, AudioError>>,
+    ready_tx: std::sync::mpsc::Sender<Result<Ready, AudioError>>,
     wake: Receiver<Wake>,
     listener_tx: &'static Sender<Wake>,
     shared: Arc<Shared>,
@@ -377,9 +522,15 @@ fn supervise(
     // Whether the teardown wait has already been reported unsettled since
     // the last successful open.
     let mut settle_logged = false;
+    // Whether the current split has been logged, so its re-plans are quiet.
+    let mut split_logged = false;
     // What has been said about raising device rates, so a long outage does
     // not repeat it per attempt.
     let mut raise_log = RaiseLog::default();
+    // While split: the legs, and listeners so a device arriving wakes the
+    // re-plan rather than waiting out the backoff.
+    let mut legs = Legs::default();
+    let mut split_listeners: Option<Listeners> = None;
 
     loop {
         // Before every resolve, the first one included: a previous backend in
@@ -405,29 +556,79 @@ fn supervise(
         }
         // Resolution reads the unfiltered device list on purpose: some real
         // mics report terminal type 0, so filtering taps by terminal type
-        // here could hide them. The wait above is what keeps taps out.
-        let opened = match wanted.resolve() {
-            Ok((input, output)) => {
-                // Raised after resolving and before opening: VPIO picks its
-                // processing rate from the devices' rates when it opens.
-                let Some(rates) = RateGuard::raise(&wake, &[&input, &output], &mut raise_log)
-                else {
-                    return;
-                };
-                // On failure `rates` drops here, putting the rates back
-                // before the backoff below.
-                VoiceUnit::open(input.id, output.id, &shared, &frames_tx).map(|voice| {
-                    (
-                        Running {
-                            voice,
-                            _rates: rates,
-                        },
-                        input,
-                        output,
-                    )
-                })
+        // here could hide them. The wait above is what keeps taps out; the
+        // legs of a split are plain streams, which add no taps.
+        let input = device::resolve(Direction::Input, wanted.input.as_deref());
+        let output = device::resolve(Direction::Output, wanted.output.as_deref());
+        let opened = match (plan_unit_for(&input, &output), input, output) {
+            (UnitPlan::Open, Ok(input), Ok(output)) => {
+                // Drop before open: the legs hold the devices the unit binds.
+                legs = Legs::default();
+                split_listeners = None;
+                split_logged = false;
+                match open_unit(&wake, &shared, &frames_tx, input, output, &mut raise_log) {
+                    Some(Ok(opened)) => Ok(opened),
+                    Some(Err(e)) => {
+                        // A split's cells still name the device that has
+                        // since arrived; nothing runs now.
+                        report_nothing_running(&shared, &wanted);
+                        Err(e)
+                    }
+                    None => return,
+                }
             }
-            Err(e) => Err(e),
+            (UnitPlan::Split { input, output }, ..) => {
+                match legs.apply(&input, &output, &wanted, &shared, &frames_tx) {
+                    Ok(()) => {
+                        split_listeners
+                            .get_or_insert_with(|| Listeners::register(listener_tx, &[]));
+                        let split = describe_split(&input, &output);
+                        match ready_tx.take() {
+                            Some(tx) => {
+                                if tx.send(Ok(Ready::Split(split))).is_err() {
+                                    return;
+                                }
+                            }
+                            None if !split_logged => {
+                                eprintln!("uia-audio: coreaudio voice processing waiting: {split}");
+                            }
+                            None => {}
+                        }
+                        split_logged = true;
+                        loss_logged = false;
+                        if !wait_or_stop(
+                            &wake,
+                            Duration::from_millis(reopen_delay_ms(attempt).into()),
+                        ) {
+                            return;
+                        }
+                        // Coalesce a burst of notifications into one re-plan.
+                        while let Ok(w) = wake.try_recv() {
+                            if w == Wake::Stop {
+                                return;
+                            }
+                        }
+                        attempt = attempt.saturating_add(1);
+                        continue;
+                    }
+                    Err(e) => {
+                        // A leg that failed to open had cleared its cell,
+                        // and one already running stops with the others.
+                        legs = Legs::default();
+                        report_nothing_running(&shared, &wanted);
+                        Err(e)
+                    }
+                }
+            }
+            (_, input, output) => {
+                shared
+                    .input_waiting
+                    .set(waiting_after(&input, wanted.input.as_deref()));
+                shared
+                    .output_waiting
+                    .set(waiting_after(&output, wanted.output.as_deref()));
+                Err(plan_error(input, output))
+            }
         };
         let (running, input, output) = match opened {
             Ok(opened) => opened,
@@ -436,6 +637,9 @@ fn supervise(
                     let _ = tx.send(Err(e));
                     return;
                 }
+                legs = Legs::default();
+                split_listeners = None;
+                split_logged = false;
                 if !loss_logged {
                     eprintln!(
                         "uia-audio: coreaudio cannot reopen voice processing ({e}); still trying"
@@ -445,11 +649,7 @@ fn supervise(
                     // this the assistant would resume mid-backlog after the
                     // outage. A quick successful rebuild never gets here, so
                     // a default-device switch keeps speaking seamlessly.
-                    shared
-                        .queue
-                        .lock()
-                        .unwrap_or_else(PoisonError::into_inner)
-                        .clear();
+                    shared.playback.clear();
                 }
                 if !wait_or_stop(
                     &wake,
@@ -461,6 +661,8 @@ fn supervise(
                 continue;
             }
         };
+        shared.input_waiting.set(None);
+        shared.output_waiting.set(None);
         let bound = (input.id, output.id);
         let listeners = Listeners::register(listener_tx, &[input.id, output.id]);
         let info = Opened {
@@ -470,7 +672,7 @@ fn supervise(
         };
         match ready_tx.take() {
             Some(tx) => {
-                if tx.send(Ok(info)).is_err() {
+                if tx.send(Ok(Ready::Unit(info))).is_err() {
                     return;
                 }
             }
@@ -491,8 +693,8 @@ fn supervise(
                     return;
                 }
             }
-            // Never `wanted.resolve()` here: the unit is running, so the
-            // device list includes its echo-reference taps.
+            // Never resolve names here: the unit is running, so the device
+            // list includes its echo-reference taps.
             let input = observe(bound.0, Direction::Input, wanted.input.is_some());
             let output = observe(bound.1, Direction::Output, wanted.output.is_some());
             if should_rebuild(input, output) {
@@ -506,6 +708,53 @@ fn supervise(
         // The unit first, then its raised rates: see `Running`.
         drop(running);
     }
+}
+
+/// [`follow::plan_unit`] over two lookups.
+fn plan_unit_for(
+    input: &Result<DeviceInfo, OpenFailure>,
+    output: &Result<DeviceInfo, OpenFailure>,
+) -> UnitPlan {
+    follow::plan_unit(&resolution(input), &resolution(output))
+}
+
+/// Raise the devices' rates and open the unit on them. Nothing else may hold
+/// a unit or a leg on these devices when this is called. `None`: a stop
+/// arrived while raising — return promptly.
+fn open_unit(
+    wake: &Receiver<Wake>,
+    shared: &Arc<Shared>,
+    frames_tx: &FramesTx,
+    input: DeviceInfo,
+    output: DeviceInfo,
+    raise_log: &mut RaiseLog,
+) -> Option<Result<(Running, DeviceInfo, DeviceInfo), AudioError>> {
+    // Raised after resolving and before opening: VPIO picks its processing
+    // rate from the devices' rates when it opens.
+    let rates = RateGuard::raise(wake, &[&input, &output], raise_log)?;
+    // Samples queued for a split leg's rate would play at the wrong pitch.
+    let (queued_for, _) = shared.output_format.load();
+    if !follow::keep_queue_on_reopen(queued_for, CLIENT_RATE_HZ) {
+        shared.playback.clear();
+    }
+    // Published before the callbacks start, so the unit's first frames are
+    // read at its rate.
+    shared.input_format.store(CLIENT_RATE_HZ, 1);
+    shared.output_format.store(CLIENT_RATE_HZ, 1);
+    // On failure `rates` drops here, putting the rates back before the
+    // caller's backoff.
+    Some(
+        VoiceUnit::open(input.id, output.id, shared, frames_tx).map(|voice| {
+            (
+                Running {
+                    voice,
+                    _rates: rates,
+                },
+                input,
+                output,
+            )
+        }),
+    )
 }
 
 #[cfg(test)]
@@ -788,21 +1037,22 @@ mod tests {
 
     /// The source must see end-of-stream when the supervisor thread ends,
     /// even while something (here, as in `Backend`) still holds `Shared`.
-    /// Runs the real `supervise` with a device name nothing can match, so it
-    /// ends deterministically with or without audio hardware.
+    /// Runs the real `supervise` with both names pinned to nothing that can
+    /// match, so it waits without opening anything, with or without audio
+    /// hardware, until told to stop.
     #[test]
     fn the_capture_channel_closes_when_the_supervisor_ends() {
         let (frames_tx, mut frames_rx) = tokio::sync::mpsc::channel(4);
         let shared = Arc::new(Shared::new());
-        let (_wake_tx, wake_rx) = std::sync::mpsc::channel();
+        let (wake_tx, wake_rx) = std::sync::mpsc::channel();
         let (ready_tx, ready_rx) = std::sync::mpsc::channel();
         let listener_tx: &'static Sender<Wake> = Box::leak(Box::new(std::sync::mpsc::channel().0));
         let wanted = Wanted {
             input: Some("definitely-not-a-real-device-9f3a1c".to_string()),
-            output: None,
+            output: Some("definitely-not-a-real-device-9f3a1c".to_string()),
         };
         let worker_shared = Arc::clone(&shared);
-        std::thread::spawn(move || {
+        let worker = std::thread::spawn(move || {
             supervise(
                 ready_tx,
                 wake_rx,
@@ -811,15 +1061,57 @@ mod tests {
                 frames_tx,
                 wanted,
             )
-        })
-        .join()
-        .unwrap();
-        assert!(matches!(ready_rx.recv(), Ok(Err(_))));
+        });
+        assert!(ready_rx.recv().is_ok(), "the supervisor never reported");
+        wake_tx.send(Wake::Stop).unwrap();
+        worker.join().unwrap();
         assert!(
             frames_rx.blocking_recv().is_none(),
             "the source would wait forever on a dead microphone"
         );
         drop(shared);
+    }
+
+    /// After a failed rebuild nothing runs, so a direction with no wait
+    /// reports what it is configured for, and a named wait is kept.
+    #[test]
+    fn nothing_running_reports_every_direction_waiting() {
+        let shared = Shared::new();
+        shared
+            .output_waiting
+            .set(Some(WaitingFor::Named("Jabra".to_string())));
+        let wanted = Wanted {
+            input: None,
+            output: Some("Jabra".to_string()),
+        };
+        report_nothing_running(&shared, &wanted);
+        assert_eq!(shared.input_waiting.get(), Some(WaitingFor::Default));
+        assert_eq!(
+            shared.output_waiting.get(),
+            Some(WaitingFor::Named("Jabra".to_string()))
+        );
+
+        let pinned = Shared::new();
+        let wanted = Wanted {
+            input: Some("MacBook Pro Microphone".to_string()),
+            output: None,
+        };
+        report_nothing_running(&pinned, &wanted);
+        assert_eq!(
+            pinned.input_waiting.get(),
+            Some(WaitingFor::Named("MacBook Pro Microphone".to_string()))
+        );
+        assert_eq!(pinned.output_waiting.get(), Some(WaitingFor::Default));
+    }
+
+    /// The session shows which device a split unit waits for, by name.
+    #[test]
+    fn a_waiting_split_still_reports_the_pinned_name() {
+        assert_eq!(
+            leg_waiting(&LegPlan::Wait("Jabra".to_string())),
+            Some(WaitingFor::Named("Jabra".to_string()))
+        );
+        assert_eq!(leg_waiting(&LegPlan::Plain), None);
     }
 
     #[test]
@@ -829,7 +1121,7 @@ mod tests {
         assert_send::<CoreAudioSink>();
     }
 
-    use uia_core::audio::{AudioSink, AudioSource};
+    use uia_core::audio::{AudioSink, AudioSource, WaitingFor};
 
     #[tokio::test]
     #[ignore = "requires real audio devices; run manually on a Mac"]
@@ -858,18 +1150,58 @@ mod tests {
         assert_eq!(sink.buffered_len(), 0);
     }
 
-    /// A `uia.toml` typo must look different from a missing device.
-    #[test]
-    #[ignore = "requires real audio devices; run manually on a Mac"]
-    fn an_unmatched_device_name_is_a_clear_error() {
-        let Err(err) = open_voice_processing(Some("definitely-not-a-real-device-9f3a1c"), None)
-        else {
-            panic!("expected an error for a device name that cannot exist");
-        };
-        assert!(
-            err.to_string().contains("no audio device matching"),
-            "got: {err}"
+    const MISSING: &str = "definitely-not-a-real-device-9f3a1c";
+
+    /// A pinned input that is not there is waited for, never replaced, and
+    /// the speaker keeps working meanwhile on a plain cpal stream.
+    #[tokio::test]
+    #[ignore = "requires a real audio device; run manually on macOS"]
+    async fn a_missing_pinned_input_opens_the_output_on_cpal_and_waits_for_the_input() {
+        use cpal::traits::{DeviceTrait, HostTrait};
+        let default_rate = cpal::default_host()
+            .default_output_device()
+            .expect("no default output device")
+            .default_output_config()
+            .expect("no default output config")
+            .sample_rate();
+
+        let (source, mut sink) = open_voice_processing(Some(MISSING), None)
+            .expect("a missing pinned input must not fail the open");
+        assert_eq!(
+            source.waiting().expect("the source reports waiting").get(),
+            Some(WaitingFor::Named(MISSING.to_string()))
         );
+        assert_eq!(
+            sink.waiting().expect("the sink reports waiting").get(),
+            None
+        );
+        assert_eq!(sink.format().sample_rate_hz, default_rate);
+
+        // 50 ms of audio at the device's rate.
+        let samples = vec![0i16; default_rate as usize / 20];
+        sink.write(&samples).await.unwrap();
+        assert!(sink.buffered_len() > 0, "write queued nothing");
+        tokio::time::sleep(Duration::from_millis(200)).await;
+        assert_eq!(sink.buffered_len(), 0, "the output leg did not drain");
+    }
+
+    /// Dropping a backend that is waiting for a device must not sit out a
+    /// backoff.
+    #[test]
+    #[ignore = "requires a real audio device; run manually on macOS"]
+    fn dropping_a_waiting_backend_returns_promptly() {
+        for (input, output) in [(Some(MISSING), None), (Some(MISSING), Some(MISSING))] {
+            let pair = open_voice_processing(input, output).expect("waiting must open");
+            // Let the supervisor settle into its backoff wait.
+            std::thread::sleep(Duration::from_millis(300));
+            let started = Instant::now();
+            drop(pair);
+            let took = started.elapsed();
+            assert!(
+                took < Duration::from_millis(500),
+                "{input:?}/{output:?} took {took:?}"
+            );
+        }
     }
 
     /// The spike's parity check made permanent. Set UIA_TEST_INPUT and
@@ -943,10 +1275,13 @@ mod tests {
         let worker = std::thread::spawn(move || {
             supervise(ready_tx, wake_rx, listener_tx, shared, frames_tx, wanted)
         });
-        let opened = ready_rx
+        let Ready::Unit(opened) = ready_rx
             .recv()
             .unwrap()
-            .expect("voice processing did not open");
+            .expect("voice processing did not open")
+        else {
+            panic!("{name:?} is present, so the unit must not split");
+        };
         let rate = opened.processing_rate_hz;
         wake_tx.send(Wake::Stop).unwrap();
         worker.join().unwrap();

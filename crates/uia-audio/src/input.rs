@@ -1,12 +1,14 @@
 // Copyright (c) 2026 MycorX. All rights reserved.
 // PolyForm Internal Use 1.0.0 OR PolyForm Noncommercial 1.0.0 — see LICENSE.md.
 
+use crate::cpal_stream::Leg;
+use crate::follow::OpenFailure;
+use crate::live::LiveFormat;
 use async_trait::async_trait;
-use cpal::traits::{DeviceTrait, HostTrait, StreamTrait};
+use cpal::traits::{DeviceTrait, HostTrait};
+use std::sync::Arc;
 use tokio::sync::mpsc;
-use uia_core::audio::{
-    AudioError, AudioFormat, AudioSource, Encoding, downmix_to_mono, f32_to_i16,
-};
+use uia_core::audio::{AudioError, AudioFormat, AudioSource, Encoding, WaitingCell};
 
 /// Translate a cpal stream's rate/channel-count into our own `AudioFormat`.
 /// Device-independent, so it is the one part of this crate CI can assert on.
@@ -18,16 +20,20 @@ pub fn to_audio_format(sample_rate_hz: u32, channels: u16) -> AudioFormat {
     }
 }
 
-/// First input device whose name contains `name` (case-insensitive). Fails
-/// loudly with the list of what cpal actually enumerated on a miss, rather
-/// than silently falling back to the default — a config typo deserves an
-/// error naming the available devices, not a debugging session.
-fn find_input_device_by_name(host: &cpal::Host, name: &str) -> Result<cpal::Device, AudioError> {
+/// First input device whose name contains `name` (case-insensitive). A miss
+/// is [`OpenFailure::MissingPinned`], naming what cpal actually enumerated,
+/// rather than a silent fallback to the default: a pinned device is waited
+/// for, and the list makes a config typo easy to spot in the log.
+pub(crate) fn find_input_device_by_name(
+    host: &cpal::Host,
+    name: &str,
+) -> Result<cpal::Device, OpenFailure> {
     let mut available = Vec::new();
-    for device in host
-        .input_devices()
-        .map_err(|e| AudioError::DeviceUnavailable(format!("cpal: could not list inputs: {e}")))?
-    {
+    for device in host.input_devices().map_err(|e| {
+        OpenFailure::Other(AudioError::DeviceUnavailable(format!(
+            "cpal: could not list inputs: {e}"
+        )))
+    })? {
         let device_name = device
             .description()
             .map(|d| d.name().to_string())
@@ -37,9 +43,10 @@ fn find_input_device_by_name(host: &cpal::Host, name: &str) -> Result<cpal::Devi
         }
         available.push(device_name);
     }
-    Err(AudioError::DeviceUnavailable(format!(
-        "cpal: no input device matching {name:?} among: {available:?}"
-    )))
+    Err(OpenFailure::MissingPinned {
+        name: name.to_string(),
+        detail: format!("cpal: no input device matching {name:?} among: {available:?}"),
+    })
 }
 
 /// Names of every input device cpal currently enumerates, in host order — for
@@ -69,11 +76,16 @@ pub fn list_input_devices() -> Result<Vec<String>, AudioError> {
 /// each buffer to i16 and `try_send`s it, dropping the frame on backpressure
 /// rather than stalling the audio thread. `next_frame` is where backpressure
 /// is felt instead, by a caller that can afford to wait.
+///
+/// The stream underneath is reopened by its [`Leg`] when the device is lost
+/// or, for the default input, when the OS default moves; frames keep arriving
+/// on the same channel, at whatever rate `format` reports.
 pub struct CpalSource {
-    format: AudioFormat,
+    format: Arc<LiveFormat>,
+    waiting: WaitingCell,
     rx: mpsc::Receiver<Vec<i16>>,
-    // Held only to keep the stream alive; cpal stops capture on drop.
-    _stream: cpal::Stream,
+    // Held only to keep the stream alive; dropping it stops capture.
+    _leg: Leg,
 }
 
 impl CpalSource {
@@ -85,65 +97,44 @@ impl CpalSource {
     /// `None`. Matching is case-insensitive substring, same as the WASAPI
     /// path's `com::find_device_by_name` — a user can paste the name Windows
     /// shows without worrying about exact punctuation. A configured name that
-    /// matches nothing is a clear error rather than a silent fallback to the
-    /// default, listing what cpal actually sees so a typo is easy to spot.
+    /// matches nothing is never replaced by the default: the source opens
+    /// waiting for it, reports that through [`AudioSource::waiting`], and
+    /// starts capturing once it appears.
     pub fn input(device_name: Option<&str>) -> Result<Self, AudioError> {
-        let host = cpal::default_host();
-        let device = match device_name {
-            Some(name) => find_input_device_by_name(&host, name)?,
-            None => host
-                .default_input_device()
-                .ok_or_else(|| AudioError::DeviceUnavailable("no default input device".into()))?,
-        };
-        let config = device
-            .default_input_config()
-            .map_err(|e| AudioError::DeviceUnavailable(e.to_string()))?;
-        // Every frame this source yields is downmixed to mono below, so the
-        // format it advertises is mono regardless of what the device
-        // actually captures — a stereo default device (the Windows norm) is
-        // otherwise a silent lie that leaves every consumer (the resampler,
-        // the Opus encoder, which rejects a wrongly-sized frame outright)
-        // treating interleaved L/R samples as if they were one channel.
-        let device_channels = config.channels();
-        let format = to_audio_format(config.sample_rate(), 1);
-
         // Bounded and small: this is live audio, not a backlog to catch up on.
         // A full channel means the consumer has fallen behind, and the right
         // move is to drop the newest frame, not to buffer indefinitely.
         let (tx, rx) = mpsc::channel(64);
-        let stream_config: cpal::StreamConfig = config.into();
-        let stream = device
-            .build_input_stream(
-                stream_config,
-                move |data: &[f32], _: &cpal::InputCallbackInfo| {
-                    let pcm = f32_to_i16(data);
-                    let mono = downmix_to_mono(&pcm, device_channels);
-                    let _ = tx.try_send(mono);
-                },
-                move |err| eprintln!("uia-audio: input stream error: {err}"),
-                None,
-            )
-            .map_err(|e| AudioError::DeviceUnavailable(e.to_string()))?;
-        stream
-            .play()
-            .map_err(|e| AudioError::DeviceUnavailable(e.to_string()))?;
-
+        let format = Arc::new(LiveFormat::new());
+        let waiting = WaitingCell::default();
+        let leg = Leg::capture(device_name, tx, Arc::clone(&format), waiting.clone())?;
         Ok(Self {
             format,
+            waiting,
             rx,
-            _stream: stream,
+            _leg: leg,
         })
     }
 }
 
 #[async_trait]
 impl AudioSource for CpalSource {
+    /// Every frame is downmixed to mono, so this is mono whatever the device
+    /// captures — a stereo default device (the Windows norm) is otherwise a
+    /// silent lie that leaves every consumer (the resampler, the Opus
+    /// encoder, which rejects a wrongly-sized frame outright) treating
+    /// interleaved L/R samples as one channel.
     fn format(&self) -> AudioFormat {
-        self.format
+        let (sample_rate_hz, _) = self.format.load();
+        to_audio_format(sample_rate_hz, 1)
     }
 
     async fn next_frame(&mut self) -> Option<Vec<i16>> {
         self.rx.recv().await
+    }
+
+    fn waiting(&self) -> Option<WaitingCell> {
+        Some(self.waiting.clone())
     }
 }
 
@@ -160,8 +151,13 @@ mod tests {
         let host = cpal::default_host();
         let err = super::find_input_device_by_name(&host, "definitely-not-a-real-device-9f3a1c")
             .unwrap_err();
-        let msg = err.to_string();
-        assert!(msg.contains("no input device matching"), "got: {msg}");
+        match err {
+            crate::follow::OpenFailure::MissingPinned { name, detail } => {
+                assert_eq!(name, "definitely-not-a-real-device-9f3a1c");
+                assert!(detail.contains("no input device matching"), "got: {detail}");
+            }
+            other => panic!("expected a missing pinned device, got {other:?}"),
+        }
     }
 
     #[test]
@@ -170,6 +166,36 @@ mod tests {
         assert_eq!(f.sample_rate_hz, 48_000);
         assert_eq!(f.channels, 2);
         assert_eq!(f.encoding, Encoding::Pcm16Le);
+    }
+
+    /// Needs no device: a name this unlikely matches nothing on any machine,
+    /// including a CI runner with no sound card at all.
+    #[test]
+    fn a_pinned_input_that_is_missing_at_open_waits_instead_of_failing() {
+        use uia_core::audio::{AudioSource, WaitingFor};
+        let src = super::CpalSource::input(Some("definitely-not-a-real-device-9f3a1c"))
+            .expect("a missing pinned input opens in the waiting state");
+        assert_eq!(
+            src.waiting().unwrap().get(),
+            Some(WaitingFor::Named(
+                "definitely-not-a-real-device-9f3a1c".into()
+            ))
+        );
+    }
+
+    /// The session drops a waiting pair at every Settings close, so a leg in
+    /// the middle of a backoff must not hold that up for the rest of it.
+    #[test]
+    fn dropping_a_leg_that_waits_for_a_missing_device_returns_promptly() {
+        let src = super::CpalSource::input(Some("definitely-not-a-real-device-9f3a1c")).unwrap();
+        std::thread::sleep(std::time::Duration::from_millis(300));
+        let started = std::time::Instant::now();
+        drop(src);
+        let took = started.elapsed();
+        assert!(
+            took < std::time::Duration::from_millis(200),
+            "drop took {took:?}"
+        );
     }
 
     #[tokio::test]

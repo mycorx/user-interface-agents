@@ -27,14 +27,28 @@
   // regardless of which field or tab the change came from.
   let { onchange }: { onchange: () => void } = $props();
 
-  // Restart-to-switch (FD5): reflects the engine this launch actually
-  // started with until the radio is changed, at which point it becomes the
-  // choice persisted for the *next* launch - `set_engine` never touches the
-  // running session, same rule as `set_model` below.
+  // Restart-to-switch (FD5): the radio shows the choice saved for the next
+  // launch (`get_saved_engine`, read fresh each time the tab opens), and
+  // `runningEngine` the one this launch started with. They differ until a
+  // restart - `set_engine` never touches the running session, same rule as
+  // `set_model` below.
   let engineChoice = $state<EngineId | null>(null);
+  let runningEngine = $state<EngineId | null>(null);
   let engineError = $state<string | null>(null);
 
+  const ENGINE_LABELS: Record<EngineId, string> = {
+    openai: 'OpenAI',
+    bedrock: 'AWS Bedrock',
+    foundry: 'Microsoft AI Foundry',
+  };
+
   invoke<string>('get_engine')
+    .then((value) => {
+      runningEngine = value as EngineId;
+    })
+    .catch((e) => console.error('get_engine invoke() failed:', e));
+
+  invoke<string>('get_saved_engine')
     .then((value) => {
       engineChoice = value as EngineId;
       // Independently expandable per-provider blocks (this stage's own
@@ -43,7 +57,7 @@
       // after that.
       expanded = { openai: value === 'openai', bedrock: value === 'bedrock', foundry: value === 'foundry' };
     })
-    .catch((e) => console.error('get_engine invoke() failed:', e));
+    .catch((e) => console.error('get_saved_engine invoke() failed:', e));
 
   async function selectEngine(engine: EngineId) {
     const previous = engineChoice;
@@ -349,6 +363,12 @@
       </label>
     </li>
   </ul>
+  {#if engineChoice && runningEngine && engineChoice !== runningEngine}
+    <p class="hint">
+      {ENGINE_LABELS[engineChoice]} takes effect after a restart. The running session still uses
+      {ENGINE_LABELS[runningEngine]}.
+    </p>
+  {/if}
   {#if engineError}
     <p class="field-error">{engineError}</p>
   {/if}
@@ -638,6 +658,12 @@
     background: #d9534f;
     border-color: #d9534f;
     color: #fff;
+  }
+
+  .hint {
+    margin: 6px 0 0;
+    font-size: 12px;
+    color: #8890a0;
   }
 
   .field-error {
