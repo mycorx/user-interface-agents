@@ -50,7 +50,7 @@ use uia_mcp::alert::Alert;
 const HUD_WINDOW: &str = "hud";
 /// The MCP alert card window, built on the first card (see `show_alert_card`).
 const ALERT_WINDOW: &str = "alert";
-/// How long a held alert waits for the agent before it goes to the card.
+/// How long a held alert waits for the agent before it is no longer spoken.
 const ALERT_HOLD_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(30);
 const OPEN_SETTINGS_EVENT: &str = "uia://open-settings";
 

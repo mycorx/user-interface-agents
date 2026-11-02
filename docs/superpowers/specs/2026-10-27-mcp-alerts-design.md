@@ -44,6 +44,8 @@ Consequences:
    the agent speaks the alert instead of the card appearing, using the
    routing below. She gets the alert as data and phrases it herself ("Your
    2pm with Sam starts in five minutes").
+   (Changed 2026-11-02, user: the card now appears as well; see the
+   superseded rule under Route.)
 
 ### Routing when wake-up is on
 
@@ -196,7 +198,9 @@ opened once she finishes" step. Rules (my calls):
   spoken after T-2 arrived.
 - Routing is re-checked at the moment of speaking: if the main window has
   become hidden or minimised by then, the alert goes to Card instead.
-- An alert that is spoken does not also show a card.
+- An alert that is spoken does not also show a card. (Superseded 2026-11-02,
+  user: every alert shows its card on arrival, and a spoken one is also
+  carded; an alert that cannot be spoken in time is simply not spoken.)
 - It closes only a session it opened itself, and only on the first return to
   `Listening` after the reply to its own turn. If the user starts a turn
   first (a state change not caused by the alert), the coordinator hands the

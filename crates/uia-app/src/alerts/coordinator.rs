@@ -1,9 +1,10 @@
 // Copyright (c) 2026 MycorX. All rights reserved.
 // PolyForm Internal Use 1.0.0 OR PolyForm Noncommercial 1.0.0 — see LICENSE.md.
 
-//! The alert coordinator: holds alerts while the agent is busy, speaks them
-//! one at a time, sends the rest to the card, and closes a session only if it
-//! opened that session itself.
+//! The alert coordinator: shows every alert's card, and when the agent may
+//! speak it, holds it while she is busy, speaks alerts one at a time, and
+//! closes a session only if it opened that session itself. An alert that
+//! cannot be spoken in time is simply not spoken: its card is already up.
 //!
 //! It owns no clock and does no I/O of its own: the app passes the time in
 //! and performs every effect through [`AlertEnv`], so the whole machine is
@@ -36,7 +37,7 @@ pub trait AlertEnv: Send + Sync {
     fn connect(&self);
     fn disconnect(&self);
     /// Submit a typed turn. `Err` means it was not accepted; the reason does
-    /// not change what happens next (the alert goes to the card), so it
+    /// not change what happens next (the alert is not spoken), so it
     /// carries none.
     #[allow(clippy::result_unit_err)]
     fn speak(&self, text: String) -> Result<(), ()>;
@@ -52,8 +53,8 @@ enum Turn {
     /// No turn of ours is outstanding.
     None,
     /// Submitted at `at`; she has not started on it yet. If she never does,
-    /// `alert` was not heard and goes to the card.
-    Sent { alert: Box<Alert>, at: Instant },
+    /// the alert was not heard, and only its card told the user.
+    Sent { at: Instant },
     /// She is on it (`Thinking`, `ToolRunning` or `Speaking` seen). The next
     /// `Listening` ends the reply.
     Answering,
@@ -98,8 +99,12 @@ impl Coordinator {
             session = ?self.session,
             "alert received"
         );
+        // The card first, whatever happens next: it keeps the alert and its
+        // link on screen after the voice is gone, and covers every way
+        // speaking it can fail.
+        self.env.show_card(alert.clone());
         match decided {
-            Route::Card => self.env.show_card(alert),
+            Route::Card => {}
             Route::SpeakNow => {
                 self.hold(alert, now);
                 self.speak_next(now);
@@ -123,21 +128,14 @@ impl Coordinator {
             // Still idle: a connect just requested has not been answered yet.
             State::Idle if previous == State::Idle => {}
             State::Idle => {
-                self.card_unheard_turn();
                 self.turn = Turn::None;
                 self.opened_by_us = false;
                 self.connect_requested = false;
                 // Nothing will bring this session back to speak them.
-                while let Some(held) = self.held.pop_front() {
-                    self.env.show_card(held.alert);
-                }
+                self.held.clear();
             }
-            // A reconnect drops whatever turn was in flight. One she had
-            // started answering counts as heard.
-            State::Connecting => {
-                self.card_unheard_turn();
-                self.turn = Turn::None;
-            }
+            // A reconnect drops whatever turn was in flight.
+            State::Connecting => self.turn = Turn::None,
             State::Listening => {
                 match self.turn {
                     Turn::Sent { .. } => return,
@@ -160,22 +158,17 @@ impl Coordinator {
         }
     }
 
-    /// Time passed: alerts held longer than the hold timeout go to the card,
-    /// and so does a turn of ours she has not started on within it.
+    /// Time passed: alerts held longer than the hold timeout are no longer
+    /// spoken (late is worse than not at all), and a turn of ours she has
+    /// not started on within it makes way for the next one.
     pub fn on_tick(&mut self, now: Instant) {
         let timeout = self.hold_timeout;
-        let (expired, kept): (VecDeque<Held>, VecDeque<Held>) = self
-            .held
-            .drain(..)
-            .partition(|held| now.saturating_duration_since(held.arrived) >= timeout);
-        self.held = kept;
-        for held in expired {
-            self.env.show_card(held.alert);
-        }
-        if let Turn::Sent { at, .. } = self.turn
+        self.held
+            .retain(|held| now.saturating_duration_since(held.arrived) < timeout);
+        if let Turn::Sent { at } = self.turn
             && now.saturating_duration_since(at) >= timeout
         {
-            self.card_unheard_turn();
+            self.turn = Turn::None;
             self.speak_next(now);
         }
         self.close_if_done();
@@ -200,28 +193,23 @@ impl Coordinator {
     }
 
     /// Speak the oldest held alert if she is free: re-checks the window first
-    /// and sends anything that cannot be spoken to the card.
+    /// and drops anything that cannot be spoken.
     fn speak_next(&mut self, now: Instant) {
         if !matches!(self.turn, Turn::None) || self.session != State::Listening {
             return;
         }
         while let Some(held) = self.held.pop_front() {
             if self.env.ui_state() != UiState::Visible {
-                self.env.show_card(held.alert);
                 continue;
             }
             let text = spoken_turn_text(&held.alert.server, &held.alert);
             match self.env.speak(text) {
                 Ok(()) => {
-                    self.turn = Turn::Sent {
-                        alert: Box::new(held.alert),
-                        at: now,
-                    };
+                    self.turn = Turn::Sent { at: now };
                     return;
                 }
                 Err(()) => {
-                    tracing::info!(server = %held.alert.server, "alert could not be spoken; showing a card");
-                    self.env.show_card(held.alert);
+                    tracing::info!(server = %held.alert.server, "alert could not be spoken; its card stays");
                 }
             }
         }
@@ -233,16 +221,6 @@ impl Coordinator {
             self.opened_by_us = false;
             self.connect_requested = false;
             self.env.disconnect();
-        }
-    }
-
-    /// End a turn of ours that she never started on, sending its alert to
-    /// the card. A turn she is answering is left alone.
-    fn card_unheard_turn(&mut self) {
-        if matches!(self.turn, Turn::Sent { .. })
-            && let Turn::Sent { alert, .. } = std::mem::replace(&mut self.turn, Turn::None)
-        {
-            self.env.show_card(*alert);
         }
     }
 }
@@ -369,14 +347,18 @@ mod tests {
         let a = alert(Some("evt-1"), "T-5", "Standup in 5 minutes");
 
         c.on_alert(a.clone(), true, t0);
-        assert_eq!(env.calls(), vec![], "held while she is speaking");
+        assert_eq!(
+            env.calls(),
+            vec![card(&a)],
+            "carded, and held while she speaks"
+        );
 
         c.on_state(State::Listening, t0 + Duration::from_secs(2));
-        assert_eq!(env.calls(), vec![spoken(&a)]);
+        assert_eq!(env.calls(), vec![card(&a), spoken(&a)]);
     }
 
     #[test]
-    fn a_held_alert_goes_to_the_card_after_30_seconds() {
+    fn a_held_alert_is_not_spoken_after_30_seconds() {
         let env = FakeEnv::new();
         let t0 = Instant::now();
         let mut c = open_in(&env, State::Thinking, t0);
@@ -384,13 +366,13 @@ mod tests {
 
         c.on_alert(a.clone(), true, t0);
         c.on_tick(t0 + Duration::from_secs(29));
-        assert_eq!(env.calls(), vec![], "still inside the hold window");
-
         c.on_tick(t0 + Duration::from_secs(30));
-        assert_eq!(env.calls(), vec![card(&a)]);
-
         c.on_state(State::Listening, t0 + Duration::from_secs(31));
-        assert_eq!(env.calls(), vec![card(&a)], "a carded alert is not spoken");
+        assert_eq!(
+            env.calls(),
+            vec![card(&a)],
+            "too late to say, and carded once"
+        );
     }
 
     #[test]
@@ -402,24 +384,29 @@ mod tests {
         let other = alert(Some("evt-2"), "T-5", "Lunch in 5 minutes");
         let t2 = alert(Some("evt-1"), "T-2", "Standup in 2 minutes");
 
-        c.on_alert(t5, true, t0);
+        c.on_alert(t5.clone(), true, t0);
         c.on_alert(other.clone(), true, t0);
         c.on_alert(t2.clone(), true, t0 + Duration::from_secs(20));
 
         // The replacement keeps its place in the queue and is spoken first.
         c.on_state(State::Listening, t0 + Duration::from_secs(21));
-        assert_eq!(env.calls(), vec![spoken(&t2)]);
+        assert_eq!(
+            env.calls(),
+            vec![card(&t5), card(&other), card(&t2), spoken(&t2)]
+        );
 
         // Its 30 s runs from its own arrival, so it outlives the alert behind it.
+        let env = FakeEnv::new();
         let mut c = open_in(&env, State::Speaking, t0);
-        let env_calls_before = env.calls().len();
-        c.on_alert(alert(Some("evt-1"), "T-5", "old"), true, t0);
+        c.on_alert(t5.clone(), true, t0);
         c.on_alert(other.clone(), true, t0);
         c.on_alert(t2.clone(), true, t0 + Duration::from_secs(20));
         c.on_tick(t0 + Duration::from_secs(30));
-        assert_eq!(env.calls()[env_calls_before..], [card(&other)]);
-        c.on_tick(t0 + Duration::from_secs(50));
-        assert_eq!(env.calls()[env_calls_before..], [card(&other), card(&t2)]);
+        c.on_state(State::Listening, t0 + Duration::from_secs(31));
+        assert_eq!(
+            env.calls(),
+            vec![card(&t5), card(&other), card(&t2), spoken(&t2)]
+        );
     }
 
     #[test]
@@ -432,8 +419,12 @@ mod tests {
 
         c.on_alert(first.clone(), true, t0);
         c.on_alert(second.clone(), true, t0);
-        c.on_tick(t0 + HOLD);
-        assert_eq!(env.calls(), vec![card(&first), card(&second)]);
+        c.on_state(State::Listening, t0);
+        reply(&mut c, t0);
+        assert_eq!(
+            env.calls(),
+            vec![card(&first), card(&second), spoken(&first), spoken(&second)]
+        );
     }
 
     #[test]
@@ -447,14 +438,17 @@ mod tests {
         c.on_alert(a.clone(), true, t0);
         c.on_alert(b.clone(), true, t0);
         c.on_state(State::Listening, t0);
-        assert_eq!(env.calls(), vec![spoken(&a)]);
+        assert_eq!(env.calls(), vec![card(&a), card(&b), spoken(&a)]);
 
         // Still Listening right after the typed turn: no second speak yet.
         c.on_state(State::Listening, t0);
-        assert_eq!(env.calls(), vec![spoken(&a)]);
+        assert_eq!(env.calls(), vec![card(&a), card(&b), spoken(&a)]);
 
         reply(&mut c, t0 + Duration::from_secs(3));
-        assert_eq!(env.calls(), vec![spoken(&a), spoken(&b)]);
+        assert_eq!(
+            env.calls(),
+            vec![card(&a), card(&b), spoken(&a), spoken(&b)]
+        );
     }
 
     #[test]
@@ -467,14 +461,17 @@ mod tests {
 
         c.on_alert(a.clone(), true, t0);
         c.on_alert(b.clone(), true, t0);
-        assert_eq!(env.calls(), vec![spoken(&a)]);
+        assert_eq!(env.calls(), vec![card(&a), spoken(&a), card(&b)]);
 
         reply(&mut c, t0 + Duration::from_secs(3));
-        assert_eq!(env.calls(), vec![spoken(&a), spoken(&b)]);
+        assert_eq!(
+            env.calls(),
+            vec![card(&a), spoken(&a), card(&b), spoken(&b)]
+        );
     }
 
     #[test]
-    fn the_window_is_rechecked_at_speaking_time_and_a_hidden_window_shows_the_card() {
+    fn the_window_is_rechecked_at_speaking_time_and_a_hidden_window_is_not_spoken_to() {
         let env = FakeEnv::new();
         let t0 = Instant::now();
         let mut c = open_in(&env, State::Speaking, t0);
@@ -495,7 +492,7 @@ mod tests {
     }
 
     #[test]
-    fn an_alert_that_is_spoken_does_not_also_show_a_card() {
+    fn a_spoken_alert_also_shows_its_card_once() {
         let env = FakeEnv::new();
         let t0 = Instant::now();
         let mut c = open_in(&env, State::Listening, t0);
@@ -504,7 +501,7 @@ mod tests {
         c.on_alert(a.clone(), true, t0);
         reply(&mut c, t0 + Duration::from_secs(2));
         c.on_tick(t0 + Duration::from_secs(60));
-        assert_eq!(env.calls(), vec![spoken(&a)]);
+        assert_eq!(env.calls(), vec![card(&a), spoken(&a)]);
     }
 
     #[test]
@@ -515,18 +512,18 @@ mod tests {
         let a = alert(Some("evt-1"), "T-5", "Standup in 5 minutes");
 
         c.on_alert(a.clone(), true, t0);
-        assert_eq!(env.calls(), vec![Call::Connect]);
+        assert_eq!(env.calls(), vec![card(&a), Call::Connect]);
 
         c.on_state(State::Connecting, t0);
         c.on_state(State::Listening, t0 + Duration::from_secs(1));
-        assert_eq!(env.calls(), vec![Call::Connect, spoken(&a)]);
+        assert_eq!(env.calls(), vec![card(&a), Call::Connect, spoken(&a)]);
 
         c.on_state(State::Speaking, t0 + Duration::from_secs(2));
-        assert_eq!(env.calls(), vec![Call::Connect, spoken(&a)]);
+        assert_eq!(env.calls(), vec![card(&a), Call::Connect, spoken(&a)]);
         c.on_state(State::Listening, t0 + Duration::from_secs(4));
         assert_eq!(
             env.calls(),
-            vec![Call::Connect, spoken(&a), Call::Disconnect]
+            vec![card(&a), Call::Connect, spoken(&a), Call::Disconnect]
         );
     }
 
@@ -546,12 +543,19 @@ mod tests {
         reply(&mut c, t0);
         assert_eq!(
             env.calls(),
-            vec![Call::Connect, spoken(&a), spoken(&b), Call::Disconnect]
+            vec![
+                card(&a),
+                Call::Connect,
+                card(&b),
+                spoken(&a),
+                spoken(&b),
+                Call::Disconnect
+            ]
         );
     }
 
     #[test]
-    fn an_alert_held_while_opening_the_session_times_out_to_the_card_and_closes_it() {
+    fn an_alert_held_while_opening_the_session_times_out_and_closes_it() {
         let env = FakeEnv::new();
         let t0 = Instant::now();
         let mut c = Coordinator::new(env.clone(), HOLD);
@@ -560,7 +564,7 @@ mod tests {
         c.on_alert(a.clone(), true, t0);
         c.on_state(State::Connecting, t0);
         c.on_tick(t0 + HOLD);
-        assert_eq!(env.calls(), vec![Call::Connect, card(&a), Call::Disconnect]);
+        assert_eq!(env.calls(), vec![card(&a), Call::Connect, Call::Disconnect]);
     }
 
     #[test]
@@ -577,12 +581,12 @@ mod tests {
         reply(&mut c, t0);
         assert_eq!(
             env.calls(),
-            vec![Call::Connect, spoken(&a), Call::Disconnect]
+            vec![card(&a), Call::Connect, spoken(&a), Call::Disconnect]
         );
     }
 
     #[test]
-    fn a_session_that_fails_to_open_sends_its_alerts_to_the_card() {
+    fn a_session_that_fails_to_open_leaves_only_the_card() {
         let env = FakeEnv::new();
         let t0 = Instant::now();
         let mut c = Coordinator::new(env.clone(), HOLD);
@@ -591,7 +595,13 @@ mod tests {
         c.on_alert(a.clone(), true, t0);
         c.on_state(State::Connecting, t0);
         c.on_state(State::Idle, t0 + Duration::from_secs(1));
-        assert_eq!(env.calls(), vec![Call::Connect, card(&a)]);
+        c.on_state(State::Connecting, t0 + Duration::from_secs(2));
+        c.on_state(State::Listening, t0 + Duration::from_secs(3));
+        assert_eq!(
+            env.calls(),
+            vec![card(&a), Call::Connect],
+            "the dropped alert is not spoken by a later session"
+        );
     }
 
     #[test]
@@ -611,7 +621,7 @@ mod tests {
         c.on_state(State::Listening, t0);
         reply(&mut c, t0);
         c.on_tick(t0 + Duration::from_secs(60));
-        assert_eq!(env.calls(), vec![Call::Connect, spoken(&a)]);
+        assert_eq!(env.calls(), vec![card(&a), Call::Connect, spoken(&a)]);
     }
 
     #[test]
@@ -628,7 +638,7 @@ mod tests {
         c.on_state(State::Listening, t0);
         reply(&mut c, t0);
         c.on_tick(t0 + Duration::from_secs(60));
-        assert_eq!(env.calls(), vec![Call::Connect, spoken(&a)]);
+        assert_eq!(env.calls(), vec![card(&a), Call::Connect, spoken(&a)]);
     }
 
     #[test]
@@ -643,11 +653,11 @@ mod tests {
         c.on_state(State::ToolRunning, t0);
         c.on_state(State::Thinking, t0);
         c.on_state(State::Speaking, t0);
-        assert_eq!(env.calls(), vec![Call::Connect, spoken(&a)]);
+        assert_eq!(env.calls(), vec![card(&a), Call::Connect, spoken(&a)]);
         c.on_state(State::Listening, t0);
         assert_eq!(
             env.calls(),
-            vec![Call::Connect, spoken(&a), Call::Disconnect]
+            vec![card(&a), Call::Connect, spoken(&a), Call::Disconnect]
         );
     }
 
@@ -666,11 +676,11 @@ mod tests {
         env.set_ui(UiState::Hidden);
         c.on_state(State::Listening, t0);
         c.on_tick(t0 + Duration::from_secs(60));
-        assert_eq!(env.calls(), vec![spoken(&a), card(&b)]);
+        assert_eq!(env.calls(), vec![card(&a), spoken(&a), card(&b)]);
     }
 
     #[test]
-    fn a_failed_speak_falls_back_to_the_card() {
+    fn a_failed_speak_moves_on_to_the_next_held_alert() {
         let env = FakeEnv::new();
         let t0 = Instant::now();
         let mut c = open_in(&env, State::Speaking, t0);
@@ -683,8 +693,8 @@ mod tests {
         c.on_state(State::Listening, t0);
         assert_eq!(
             env.calls(),
-            vec![spoken(&a), card(&a), spoken(&b), card(&b)],
-            "each failure goes to the card and the next held one is tried"
+            vec![card(&a), card(&b), spoken(&a), spoken(&b)],
+            "each card is shown once, and each failure tries the next"
         );
     }
 
@@ -701,7 +711,7 @@ mod tests {
         c.on_state(State::Listening, t0);
         assert_eq!(
             env.calls(),
-            vec![Call::Connect, spoken(&a), card(&a), Call::Disconnect]
+            vec![card(&a), Call::Connect, spoken(&a), Call::Disconnect]
         );
     }
 
@@ -717,12 +727,12 @@ mod tests {
         let sent = t0 + Duration::from_secs(5);
         c.on_state(State::Listening, sent);
         c.on_tick(sent + Duration::from_secs(29));
-        assert_eq!(env.calls(), vec![Call::Connect, spoken(&a)]);
+        assert_eq!(env.calls(), vec![card(&a), Call::Connect, spoken(&a)]);
 
         c.on_tick(sent + HOLD);
         assert_eq!(
             env.calls(),
-            vec![Call::Connect, spoken(&a), card(&a), Call::Disconnect]
+            vec![card(&a), Call::Connect, spoken(&a), Call::Disconnect]
         );
     }
 
@@ -737,7 +747,10 @@ mod tests {
         c.on_alert(a.clone(), true, t0);
         c.on_alert(b.clone(), true, t0 + Duration::from_secs(10));
         c.on_tick(t0 + HOLD);
-        assert_eq!(env.calls(), vec![spoken(&a), card(&a), spoken(&b)]);
+        assert_eq!(
+            env.calls(),
+            vec![card(&a), spoken(&a), card(&b), spoken(&b)]
+        );
     }
 
     #[test]
@@ -757,9 +770,10 @@ mod tests {
         assert_eq!(
             env.calls(),
             vec![
-                Call::Connect,
                 card(&a),
+                Call::Connect,
                 Call::Disconnect,
+                card(&b),
                 Call::Connect,
                 spoken(&b)
             ]
@@ -767,7 +781,7 @@ mod tests {
     }
 
     #[test]
-    fn an_alert_whose_turn_is_cut_off_before_she_speaks_goes_to_the_card() {
+    fn an_alert_whose_turn_is_cut_off_before_she_speaks_is_not_spoken_again() {
         let env = FakeEnv::new();
         let t0 = Instant::now();
         let a = alert(Some("evt-1"), "T-5", "Standup in 5 minutes");
@@ -776,7 +790,7 @@ mod tests {
         let mut c = open_in(&env, State::Listening, t0);
         c.on_alert(a.clone(), true, t0);
         c.on_state(State::Idle, t0);
-        assert_eq!(env.calls(), vec![spoken(&a), card(&a)]);
+        assert_eq!(env.calls(), vec![card(&a), spoken(&a)]);
 
         // The session reconnects.
         let env = FakeEnv::new();
@@ -785,37 +799,18 @@ mod tests {
         c.on_state(State::Connecting, t0);
         c.on_state(State::Listening, t0);
         c.on_tick(t0 + Duration::from_secs(60));
-        assert_eq!(env.calls(), vec![spoken(&a), card(&a)]);
+        assert_eq!(env.calls(), vec![card(&a), spoken(&a)]);
     }
 
     #[test]
-    fn an_alert_she_had_started_speaking_is_not_carded_when_the_session_drops() {
-        let env = FakeEnv::new();
-        let t0 = Instant::now();
-        let a = alert(Some("evt-1"), "T-5", "Standup in 5 minutes");
-
-        let mut c = open_in(&env, State::Listening, t0);
-        c.on_alert(a.clone(), true, t0);
-        c.on_state(State::Speaking, t0);
-        c.on_state(State::Idle, t0);
-
-        let mut c2 = open_in(&env, State::Listening, t0);
-        c2.on_alert(a.clone(), true, t0);
-        c2.on_state(State::Speaking, t0);
-        c2.on_state(State::Connecting, t0);
-        c2.on_state(State::Listening, t0);
-        c2.on_tick(t0 + Duration::from_secs(60));
-        assert_eq!(env.calls(), vec![spoken(&a), spoken(&a)]);
-    }
-
-    #[test]
-    fn wake_off_goes_straight_to_the_card() {
+    fn wake_off_shows_only_the_card() {
         let env = FakeEnv::new();
         let t0 = Instant::now();
         let mut c = open_in(&env, State::Listening, t0);
         let a = alert(Some("evt-1"), "T-5", "Standup in 5 minutes");
 
         c.on_alert(a.clone(), false, t0);
+        reply(&mut c, t0);
         assert_eq!(env.calls(), vec![card(&a)]);
     }
 }

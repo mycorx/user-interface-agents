@@ -442,8 +442,9 @@ restart (a failed save reverts the toggle and shows the error):
 
 - **Show alerts** (default on). Off silences the server completely: its
   alerts are dropped, even if the other toggle is on.
-- **Let the agent speak alerts** (default off, needs Show alerts). The agent
-  speaks the alert instead of a card appearing, following the routing below.
+- **Let the agent speak alerts** (default off, needs Show alerts). The card
+  still appears, and the agent also says the alert, following the routing
+  below.
 
 Safety note: the server controls the alert text. With the second toggle on,
 that text reaches the model, which has tools. UIA frames it as data, sends only
@@ -454,18 +455,19 @@ declared, only when you click it, and always shows the host.
 
 ### Routing when the agent speaks alerts
 
-With Show on and the second toggle off, every alert is a **Card**. With both
-on, it is decided from the live state when the alert arrives:
+Every alert shows a **Card** when it arrives. With Show on and the second
+toggle off, that is all. With both on, whether she also says it is decided
+from the live state when the alert arrives:
 
-| Situation | Result |
+| Situation | Spoken? |
 | --- | --- |
-| Main window hidden or minimised | Card |
+| Main window hidden or minimised | No |
 | No session open and text turns are supported | Open a session, speak the alert, close the session once she has finished |
 | Session open and she is waiting (`Listening`) | Speak now |
 | Session open and she is busy (`Thinking`, `ToolRunning`, `Speaking`, `Interrupting`) | Hold; speak after her current reply |
-| Held for more than 30 s, or the engine does not support typed turns, or opening the session fails | Card |
+| Held for more than 30 s, or the engine does not support typed turns, or opening the session fails | No |
 
-A spoken alert does not also show a card. A newer stage for the same
+An alert is carded once, however it is spoken. A newer stage for the same
 `(server, id)` replaces a held older one.
 
 Cards stack up to 3 at the top right, auto-dismiss after 30 s (hovering

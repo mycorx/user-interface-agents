@@ -39,18 +39,22 @@ paste the results into the PR's "## Testing". Set up with the test server in
 ## Routing (agent wake-up on, Settings → MCP → "Let the agent speak alerts")
 
 - [ ] Wake-up off, window hidden: card.
-- [ ] Wake-up on, main window hidden: card.
-- [ ] Wake-up on, main window minimised: card.
-- [ ] Wake-up on, no session open, text turns supported: a session opens, the
-      agent speaks the alert, the session closes after she finishes.
+- [ ] Wake-up on, main window hidden: card only.
+- [ ] Wake-up on, main window minimised: card only.
+- [ ] Wake-up on, no session open, text turns supported: the card appears, a
+      session opens, the agent speaks the alert, the session closes after she
+      finishes.
 - [ ] Same, but you start talking before she finishes: the session is handed
       over and not closed.
-- [ ] Wake-up on, session open and she is waiting: she speaks it now, no card.
+- [ ] Wake-up on, session open and she is waiting: the card appears and she
+      speaks it now.
 - [ ] Wake-up on, session open and she is mid-reply (thinking, tool running,
-      speaking): the alert is spoken after her current reply.
-- [ ] Held alert not spoken within 30 s (keep her busy): a card appears.
-- [ ] Engine without typed turns: card.
-- [ ] Opening the session fails (for example no API key): card.
+      speaking): the card appears at once; the alert is spoken after her
+      current reply.
+- [ ] Held alert not spoken within 30 s (keep her busy): it is not spoken
+      late, and no second card appears.
+- [ ] Engine without typed turns: card only.
+- [ ] Opening the session fails (for example no API key): card only.
 - [ ] A held T-5 is replaced when T-2 for the same meeting arrives.
 
 ## Settings
