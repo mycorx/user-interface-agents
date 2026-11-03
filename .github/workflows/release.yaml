@@ -367,7 +367,7 @@ jobs:
     # A bare image, not the runner: the runner has far more installed than a
     # user's machine, which would hide a missing dependency.
     container:
-      image: ubuntu:26.04
+      image: ubuntu:26.04@sha256:6a06111c3b0a8600feadb270aec771dc239bf407b25625f93f44ab00e11f4d3c
       options: --user root
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
