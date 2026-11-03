@@ -17,7 +17,7 @@
 //! exception: `set_audio_settings` hands a Save to the running session,
 //! which switches devices at the reconnect closing Settings triggers.
 
-use crate::config::{AudioSection, EngineChoice};
+use crate::config::{AudioSection, EngineChoice, TranscriptionLanguage};
 use serde::de::DeserializeOwned;
 use serde::{Deserialize, Serialize};
 use std::path::{Path, PathBuf};
@@ -321,6 +321,11 @@ pub struct ModelSettings {
     #[serde(default)]
     pub bedrock: Option<String>,
     pub foundry: Option<String>,
+    #[serde(default)]
+    pub transcription_language: Option<TranscriptionLanguage>,
+    /// `Some("")` is a deliberate "no transcription", not an unset field.
+    #[serde(default)]
+    pub foundry_transcription: Option<String>,
 }
 
 /// `uia-model.json`, same sibling-of-`uia.toml` convention as
@@ -353,6 +358,28 @@ pub fn resolve_bedrock_model(configured: String, persisted: Option<&ModelSetting
 pub fn resolve_foundry_model(configured: String, persisted: Option<&ModelSettings>) -> String {
     persisted
         .and_then(|s| s.foundry.clone())
+        .unwrap_or(configured)
+}
+
+/// Same precedence rule as [`resolve_openai_model`], for `uia.toml`'s
+/// `[foundry] transcription_deployment`.
+pub fn resolve_foundry_transcription_deployment(
+    configured: String,
+    persisted: Option<&ModelSettings>,
+) -> String {
+    persisted
+        .and_then(|s| s.foundry_transcription.clone())
+        .unwrap_or(configured)
+}
+
+/// Same precedence rule as [`resolve_openai_model`], for `uia.toml`'s
+/// `[transcription] language`.
+pub fn resolve_transcription_language(
+    configured: TranscriptionLanguage,
+    persisted: Option<&ModelSettings>,
+) -> TranscriptionLanguage {
+    persisted
+        .and_then(|s| s.transcription_language)
         .unwrap_or(configured)
 }
 
@@ -568,6 +595,91 @@ pub fn saved_audio_settings(configured: &AudioSection, path: &Path) -> AudioSect
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn foundry_transcribes_with_gpt_live_transcribe_unless_told_otherwise() {
+        let config: crate::config::Config = toml::from_str("").unwrap();
+        assert_eq!(
+            config.foundry.transcription_deployment,
+            "gpt-live-transcribe"
+        );
+        assert_eq!(
+            crate::config::FoundrySection::default().transcription_deployment,
+            "gpt-live-transcribe"
+        );
+    }
+
+    #[test]
+    fn an_empty_foundry_transcription_deployment_in_the_sidecar_is_kept() {
+        // Empty is how the user turns it off, so it must beat the config.
+        let persisted = ModelSettings {
+            foundry_transcription: Some(String::new()),
+            ..ModelSettings::default()
+        };
+        assert_eq!(
+            resolve_foundry_transcription_deployment("from-toml".into(), Some(&persisted)),
+            ""
+        );
+        assert_eq!(
+            resolve_foundry_transcription_deployment("from-toml".into(), None),
+            "from-toml"
+        );
+    }
+
+    #[test]
+    fn the_transcription_language_defaults_to_english_with_no_config_or_sidecar() {
+        let config: crate::config::Config = toml::from_str("").unwrap();
+        assert_eq!(
+            config.transcription.language,
+            TranscriptionLanguage::English
+        );
+        assert_eq!(
+            resolve_transcription_language(config.transcription.language, None),
+            TranscriptionLanguage::English
+        );
+        assert_eq!(TranscriptionLanguage::English.iso_code(), Some("en"));
+    }
+
+    #[test]
+    fn auto_in_the_config_sends_no_language() {
+        let config: crate::config::Config =
+            toml::from_str("[transcription]\nlanguage = \"auto\"\n").unwrap();
+        assert_eq!(config.transcription.language, TranscriptionLanguage::Auto);
+        assert_eq!(TranscriptionLanguage::Auto.iso_code(), None);
+    }
+
+    #[test]
+    fn the_sidecars_transcription_language_wins_over_the_config() {
+        let persisted = ModelSettings {
+            transcription_language: Some(TranscriptionLanguage::Auto),
+            ..ModelSettings::default()
+        };
+        assert_eq!(
+            resolve_transcription_language(TranscriptionLanguage::English, Some(&persisted)),
+            TranscriptionLanguage::Auto
+        );
+    }
+
+    #[test]
+    fn a_model_sidecar_from_before_the_language_setting_still_loads() {
+        let loaded: ModelSettings =
+            serde_json::from_str(r#"{"openai":"gpt-realtime-2.1","foundry":null}"#).unwrap();
+        assert_eq!(loaded.openai.as_deref(), Some("gpt-realtime-2.1"));
+        assert_eq!(loaded.transcription_language, None);
+    }
+
+    #[test]
+    fn the_transcription_language_keeps_its_wire_strings() {
+        // `SettingsProviders.svelte` compares against these.
+        assert_eq!(
+            serde_json::to_value(TranscriptionLanguage::English).unwrap(),
+            "en"
+        );
+        assert_eq!(
+            serde_json::to_value(TranscriptionLanguage::Auto).unwrap(),
+            "auto"
+        );
+    }
 
     #[test]
     fn a_saved_engine_choice_survives_reload() {
@@ -1381,6 +1493,8 @@ mod tests {
                 openai: Some("gpt-realtime-2.1".into()),
                 bedrock: Some("amazon.nova-2-sonic-v1:0".into()),
                 foundry: Some("my-deployment".into()),
+                transcription_language: None,
+                foundry_transcription: None,
             },
         )
         .unwrap();
@@ -1393,6 +1507,8 @@ mod tests {
                 openai: Some("gpt-realtime-2.1".into()),
                 bedrock: Some("amazon.nova-2-sonic-v1:0".into()),
                 foundry: Some("my-deployment".into()),
+                transcription_language: None,
+                foundry_transcription: None,
             })
         );
     }
@@ -1412,6 +1528,8 @@ mod tests {
             openai: Some("gpt-realtime-2.1".into()),
             bedrock: None,
             foundry: None,
+            transcription_language: None,
+            foundry_transcription: None,
         };
         assert_eq!(
             resolve_openai_model("gpt-realtime-2.1-mini".into(), Some(&persisted)),
@@ -1433,6 +1551,8 @@ mod tests {
             openai: None,
             bedrock: None,
             foundry: Some("ui-deployment".into()),
+            transcription_language: None,
+            foundry_transcription: None,
         };
         assert_eq!(
             resolve_foundry_model("configured-deployment".into(), Some(&persisted)),
@@ -1454,6 +1574,8 @@ mod tests {
             openai: None,
             bedrock: Some("amazon.nova-9-sonic-v1:0".into()),
             foundry: None,
+            transcription_language: None,
+            foundry_transcription: None,
         };
         assert_eq!(
             resolve_bedrock_model("amazon.nova-2-sonic-v1:0".into(), Some(&persisted)),
@@ -1475,6 +1597,8 @@ mod tests {
             openai: Some("gpt-realtime-2.1".into()),
             bedrock: None,
             foundry: None,
+            transcription_language: None,
+            foundry_transcription: None,
         };
         assert_eq!(
             resolve_openai_model("gpt-realtime-2.1-mini".into(), Some(&persisted)),

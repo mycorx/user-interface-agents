@@ -1419,6 +1419,19 @@ pub struct FoundrySection {
     /// aren't: it is a uia.toml-only choice, same tier as those two.
     #[serde(default = "default_foundry_deployment")]
     pub deployment: String,
+    /// The deployment that transcribes the user. On Foundry the transcription
+    /// `model` field names a deployment too, separate from `deployment` and
+    /// chosen by the user, so it cannot be a fixed list. Empty turns
+    /// transcription off. A name that does not exist should cost the history
+    /// the user's half (see `uia.log`), not the voice session; that has not
+    /// been confirmed against a live resource.
+    #[serde(default = "default_foundry_transcription_deployment")]
+    pub transcription_deployment: String,
+}
+fn default_foundry_transcription_deployment() -> String {
+    // Mirrors `uia_foundry::DEFAULT_TRANSCRIPTION_DEPLOYMENT`, the same way
+    // `default_foundry_deployment` mirrors `DEFAULT_DEPLOYMENT`.
+    "gpt-live-transcribe".into()
 }
 fn default_foundry_deployment() -> String {
     // Verified live end to end (`foundry_satisfies_the_engine_contract`);
@@ -1435,6 +1448,7 @@ impl Default for FoundrySection {
             key_file: None,
             endpoint: None,
             deployment: default_foundry_deployment(),
+            transcription_deployment: default_foundry_transcription_deployment(),
         }
     }
 }
@@ -1582,6 +1596,38 @@ pub struct Config {
     pub memory: MemorySection,
     #[serde(default)]
     pub audio: AudioSection,
+    #[serde(default)]
+    pub transcription: TranscriptionSection,
+}
+
+/// `[transcription]` in `uia.toml`.
+#[derive(Debug, Clone, Default, Deserialize)]
+pub struct TranscriptionSection {
+    #[serde(default)]
+    pub language: TranscriptionLanguage,
+}
+
+/// The language hint for transcribing what the user says. English unless told
+/// otherwise: left to guess, a transcription model can hear a short or noisy
+/// utterance as some other language. A new language is a new variant here and
+/// a new option in `SettingsProviders.svelte`.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub enum TranscriptionLanguage {
+    #[default]
+    #[serde(rename = "en")]
+    English,
+    #[serde(rename = "auto")]
+    Auto,
+}
+
+impl TranscriptionLanguage {
+    /// The ISO-639-1 code sent to the engine; `None` lets the model guess.
+    pub fn iso_code(self) -> Option<&'static str> {
+        match self {
+            Self::English => Some("en"),
+            Self::Auto => None,
+        }
+    }
 }
 
 #[derive(Debug, thiserror::Error)]

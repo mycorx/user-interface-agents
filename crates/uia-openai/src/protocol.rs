@@ -58,7 +58,7 @@ pub fn parse_server_event(raw: &str) -> Result<Vec<EngineEvent>, EngineError> {
                 .to_string(),
         ),
 
-        // What the user said, transcribed by `whisper-1`. Observed live in S16
+        // What the user said, in the transcription model's words. Observed live in S16
         // (S9 could send no audio, so it never saw this): the name is the long
         // `conversation.item.*` form, NOT `input_audio_transcription.completed`,
         // and the text is in `transcript`. Its `.delta` twin is dropped for the
@@ -90,6 +90,20 @@ pub fn parse_server_event(raw: &str) -> Result<Vec<EngineEvent>, EngineError> {
                 .and_then(|s| serde_json::from_str(s).ok())
                 .unwrap_or(Value::Null),
         },
+
+        // Costs the history this one utterance, not the conversation, so it is
+        // not an `Error`. Logged because nothing else would explain the gap:
+        // on Foundry the usual cause is a misnamed transcription deployment.
+        "conversation.item.input_audio_transcription.failed" => {
+            let err = v.get("error").unwrap_or(&Value::Null);
+            let code = err.get("code").and_then(Value::as_str).unwrap_or_default();
+            let message = err
+                .get("message")
+                .and_then(Value::as_str)
+                .unwrap_or_default();
+            tracing::warn!(code, message, "a user utterance could not be transcribed");
+            return Ok(Vec::new());
+        }
 
         "error" => {
             let err = v.get("error").unwrap_or(&Value::Null);
@@ -207,7 +221,7 @@ pub fn session_update(cfg: &SessionConfig) -> Value {
             audio["output"] = json!({"voice": voice});
         }
         if cfg.transcription {
-            audio["input"] = json!({"transcription": {"model": TRANSCRIPTION_MODEL}});
+            audio["input"] = json!({"transcription": transcription(cfg, TRANSCRIPTION_MODEL)});
         }
         session["audio"] = audio;
     }
@@ -215,9 +229,36 @@ pub fn session_update(cfg: &SessionConfig) -> Value {
     json!({"type": "session.update", "session": session})
 }
 
-/// UNVERIFIED against a live session — S1 sent no microphone audio, so no
-/// input-transcription event was ever observed. Confirm before relying on it.
-const TRANSCRIPTION_MODEL: &str = "whisper-1";
+/// OpenAI's low-latency replacement for its deprecated Whisper model, accepted
+/// over WebRTC (`gpt-transcribe` needs WebSocket).
+const TRANSCRIPTION_MODEL: &str = "gpt-live-transcribe";
+
+/// `audio.input.transcription`. The hint is `languages`, never the singular
+/// `language`, which this model rejects. No language lets the model guess.
+fn transcription(cfg: &SessionConfig, model: &str) -> Value {
+    let mut transcription = json!({"model": model});
+    if let Some(language) = &cfg.transcription_language {
+        transcription["languages"] = json!([language]);
+    }
+    transcription
+}
+
+/// [`session_update`] for an endpoint where `model` addresses a deployment the
+/// user named, so transcription depends on one existing (Azure AI Foundry).
+/// `None` requests no transcription, whatever `cfg` asks for.
+pub fn session_update_for_deployment(cfg: &SessionConfig, deployment: Option<&str>) -> Value {
+    let Some(deployment) = deployment else {
+        return session_update(&SessionConfig {
+            transcription: false,
+            ..cfg.clone()
+        });
+    };
+    let mut update = session_update(cfg);
+    if cfg.transcription {
+        update["session"]["audio"]["input"]["transcription"] = transcription(cfg, deployment);
+    }
+    update
+}
 
 /// A user turn submitted as text rather than audio (PLAN.md S4), using the
 /// same `conversation.item.create` shape `send_tool_result` already sends a
@@ -973,6 +1014,81 @@ mod tests {
             "the selected voice must be passed in the session update, nested \
              under audio.output per the GA gpt-realtime schema"
         );
+    }
+
+    #[test]
+    fn a_language_is_sent_as_languages_with_the_live_transcription_model() {
+        let cfg = SessionConfig {
+            transcription: true,
+            transcription_language: Some("en".into()),
+            ..SessionConfig::default()
+        };
+        assert_eq!(
+            session_update(&cfg)["session"]["audio"]["input"]["transcription"],
+            json!({"model": "gpt-live-transcribe", "languages": ["en"]})
+        );
+    }
+
+    #[test]
+    fn no_language_lets_the_model_guess() {
+        let cfg = SessionConfig {
+            transcription: true,
+            ..SessionConfig::default()
+        };
+        assert_eq!(
+            session_update(&cfg)["session"]["audio"]["input"]["transcription"],
+            json!({"model": "gpt-live-transcribe"})
+        );
+    }
+
+    #[test]
+    fn a_language_without_transcription_sends_nothing() {
+        let cfg = SessionConfig {
+            transcription_language: Some("en".into()),
+            ..SessionConfig::default()
+        };
+        assert!(session_update(&cfg)["session"]["audio"].is_null());
+        assert!(session_update_for_deployment(&cfg, Some("stt"))["session"]["audio"].is_null());
+    }
+
+    #[test]
+    fn a_deployment_replaces_the_model_and_keeps_the_rest() {
+        let cfg = SessionConfig {
+            transcription: true,
+            transcription_language: Some("en".into()),
+            voice: Some("marin".into()),
+            ..SessionConfig::default()
+        };
+        let update = session_update_for_deployment(&cfg, Some("my-transcriber"));
+        assert_eq!(
+            update["session"]["audio"]["input"]["transcription"],
+            json!({"model": "my-transcriber", "languages": ["en"]})
+        );
+        assert_eq!(update["session"]["audio"]["output"]["voice"], "marin");
+    }
+
+    #[test]
+    fn no_deployment_requests_no_transcription_and_keeps_the_voice() {
+        let cfg = SessionConfig {
+            transcription: true,
+            transcription_language: Some("en".into()),
+            voice: Some("marin".into()),
+            ..SessionConfig::default()
+        };
+        let update = session_update_for_deployment(&cfg, None);
+        assert!(update["session"]["audio"]["input"].is_null());
+        assert_eq!(update["session"]["audio"]["output"]["voice"], "marin");
+    }
+
+    #[test]
+    fn a_failed_transcription_reaches_no_one_as_an_event() {
+        // A missing transcription deployment must cost the history its user
+        // half, not the voice session: an `Error` here would reconnect it.
+        let raw = r#"{"type":"conversation.item.input_audio_transcription.failed",
+                      "item_id":"item_1","content_index":0,
+                      "error":{"type":"invalid_request_error",
+                      "code":"model_not_found","message":"no such deployment"}}"#;
+        assert!(parse_server_event(raw).unwrap().is_empty());
     }
 
     #[test]

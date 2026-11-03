@@ -47,8 +47,8 @@ use uia_core::engine::{
 use uia_core::tools::ToolResult;
 use uia_openai::creds::parse_client_secret;
 use uia_openai::protocol::{
-    HandshakeCapability, ToolNames, memory_item_events, parse_server_event, session_update,
-    text_turn_event,
+    HandshakeCapability, ToolNames, memory_item_events, parse_server_event,
+    session_update_for_deployment, text_turn_event,
 };
 use webrtc::data_channel::{DataChannel, DataChannelEvent};
 use webrtc::media_stream::MediaStreamTrack;
@@ -160,10 +160,16 @@ fn check_mint_status(status: reqwest::StatusCode) -> Result<(), EngineError> {
     Err(EngineError::Protocol(format!("mint failed ({status})")))
 }
 
+pub const DEFAULT_TRANSCRIPTION_DEPLOYMENT: &str = "gpt-live-transcribe";
+
 pub struct FoundryEngine {
     endpoint: String,
     api_key: String,
     model: String,
+    /// The deployment that transcribes the user. Separate from `model`, and
+    /// like it a name the user chose, so nothing here can check it exists.
+    /// `None` asks for no transcription.
+    transcription_deployment: Option<String>,
     http: reqwest::Client,
     conn: Option<Connection>,
     /// What this deployment's handshake said about typed turns (S2) - the
@@ -191,10 +197,20 @@ impl FoundryEngine {
             endpoint,
             api_key,
             model,
+            transcription_deployment: Some(DEFAULT_TRANSCRIPTION_DEPLOYMENT.to_string()),
             http: reqwest::Client::new(),
             conn: None,
             capability: HandshakeCapability::new(),
         }
+    }
+
+    /// Replaces the default transcription deployment. Empty or `None` turns
+    /// transcription off, which leaves the voice session itself unaffected.
+    pub fn with_transcription_deployment(mut self, deployment: Option<String>) -> Self {
+        self.transcription_deployment = deployment
+            .map(|d| d.trim().to_string())
+            .filter(|d| !d.is_empty());
+        self
     }
 
     pub fn endpoint(&self) -> &str {
@@ -434,7 +450,7 @@ impl S2sEngine for FoundryEngine {
         .map_err(|e| EngineError::Transport(e.to_string()))?;
 
         // 6. Read task: poll the data channel, translate, forward.
-        let update = session_update(cfg);
+        let update = session_update_for_deployment(cfg, self.transcription_deployment.as_deref());
         // Same replay as OpenAI's, from the same builder — this is a transport
         // wrapper around that protocol, not a second implementation of it.
         let history = memory_item_events(cfg);

@@ -151,6 +151,35 @@
   let savedFoundryModel = $state('');
   let foundryModelError = $state<string | null>(null);
   const foundryModelDirty = $derived(foundryModel.trim() !== savedFoundryModel);
+  let foundryTranscription = $state('');
+  let savedFoundryTranscription = $state('');
+  let foundryTranscriptionError = $state<string | null>(null);
+  const foundryTranscriptionDirty = $derived(
+    foundryTranscription.trim() !== savedFoundryTranscription
+  );
+
+  // Mirrors `uia_app::config::TranscriptionLanguage`'s wire strings.
+  type TranscriptionLanguage = 'en' | 'auto';
+  let transcriptionLanguage = $state<TranscriptionLanguage | null>(null);
+  let transcriptionLanguageError = $state<string | null>(null);
+
+  invoke<TranscriptionLanguage>('get_transcription_language')
+    .then((value) => {
+      transcriptionLanguage = value;
+    })
+    .catch((e) => console.error('get_transcription_language invoke() failed:', e));
+
+  async function selectTranscriptionLanguage(language: TranscriptionLanguage) {
+    transcriptionLanguageError = null;
+    try {
+      await invoke('set_transcription_language', { language });
+      transcriptionLanguage = language;
+      onchange();
+    } catch (e) {
+      transcriptionLanguageError = String(e);
+      console.error('set_transcription_language invoke() failed:', e);
+    }
+  }
 
   invoke<string>('get_model', { provider: 'openai' })
     .then((value) => {
@@ -170,6 +199,26 @@
       savedFoundryModel = value;
     })
     .catch((e) => console.error("get_model('foundry') invoke() failed:", e));
+
+  invoke<string>('get_model', { provider: 'foundry_transcription' })
+    .then((value) => {
+      foundryTranscription = value;
+      savedFoundryTranscription = value;
+    })
+    .catch((e) => console.error("get_model('foundry_transcription') invoke() failed:", e));
+
+  async function saveFoundryTranscription() {
+    foundryTranscriptionError = null;
+    const trimmed = foundryTranscription.trim();
+    try {
+      await invoke('set_model', { provider: 'foundry_transcription', value: trimmed });
+      savedFoundryTranscription = trimmed;
+      onchange();
+    } catch (e) {
+      foundryTranscriptionError = String(e);
+      console.error("set_model('foundry_transcription') invoke() failed:", e);
+    }
+  }
 
   async function saveOpenaiModel() {
     openaiModelError = null;
@@ -374,6 +423,43 @@
   {/if}
 </section>
 
+<section class="active-provider">
+  <h2>Transcription Language</h2>
+  <ul class="provider-radio-list">
+    <li>
+      <label>
+        <input
+          type="radio"
+          name="transcription-language"
+          value="en"
+          checked={transcriptionLanguage === 'en'}
+          onchange={() => selectTranscriptionLanguage('en')}
+        />
+        English
+      </label>
+    </li>
+    <li>
+      <label>
+        <input
+          type="radio"
+          name="transcription-language"
+          value="auto"
+          checked={transcriptionLanguage === 'auto'}
+          onchange={() => selectTranscriptionLanguage('auto')}
+        />
+        Auto
+      </label>
+    </li>
+  </ul>
+  <p class="hint">
+    Helps transcribe what you say. Auto lets the model guess the language. Takes effect after a
+    restart. Not used by AWS Bedrock.
+  </p>
+  {#if transcriptionLanguageError}
+    <p class="field-error">{transcriptionLanguageError}</p>
+  {/if}
+</section>
+
 <section class="provider">
   {@render providerHeader('openai', 'OpenAI')}
   {#if expanded.openai}
@@ -448,6 +534,34 @@
         </div>
         {#if foundryModelError}
           <p class="field-error">{foundryModelError}</p>
+        {/if}
+      </div>
+      <div class="field">
+        <div class="field-header">
+          <label for="foundry_transcription">Transcription deployment</label>
+        </div>
+        <div class="field-controls">
+          <input
+            id="foundry_transcription"
+            type="text"
+            autocomplete="off"
+            placeholder="Empty turns transcription off"
+            bind:value={foundryTranscription}
+          />
+          <button
+            type="button"
+            disabled={!foundryTranscriptionDirty}
+            onclick={saveFoundryTranscription}
+          >
+            Save
+          </button>
+        </div>
+        <p class="hint">
+          A separate deployment that transcribes what you say for the conversation history. Without
+          a working one, your words are not saved.
+        </p>
+        {#if foundryTranscriptionError}
+          <p class="field-error">{foundryTranscriptionError}</p>
         {/if}
       </div>
       <div class="field">

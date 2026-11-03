@@ -181,6 +181,7 @@ impl Listener {
             tracing::info!(server = %self.server, "server accepted no alert subscription; no alerts from this server");
             return SessionEnd::Stop;
         }
+        tracing::info!(server = %self.server, feeds = ?watched, "listening for alerts");
         // Read every feed once now: it is the baseline (or, after a reopen,
         // catches what arrived while the stream was down).
         for uri in &watched {

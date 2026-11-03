@@ -252,6 +252,8 @@ pub struct Session {
     /// Costs latency and money, so the shell sets it from whether a memory
     /// backend is actually going to consume it.
     transcription: bool,
+    /// The language hint for `transcription`; `None` lets the engine guess.
+    transcription_language: Option<String>,
     /// The shell's handle onto this running session (`control.rs`). Owned
     /// here rather than in `SessionDeps` because it is not a port the session
     /// talks *through* — it is a switch the outside world flips while the run
@@ -310,6 +312,7 @@ impl Session {
             system_prompt: None,
             voice: None,
             transcription: false,
+            transcription_language: None,
             control,
         };
         session.publish_text_turn_support();
@@ -589,6 +592,12 @@ impl Session {
         self.transcription = on;
     }
 
+    /// The language to transcribe the user in, as an ISO-639-1 code. `None`
+    /// lets the engine guess.
+    pub fn set_transcription_language(&mut self, language: Option<String>) {
+        self.transcription_language = language;
+    }
+
     /// Adopt the shell's handle, replacing the default one. Called before
     /// `run`, with a clone of the same handle the shell keeps: the shell has
     /// to be able to `.manage()` the handle at startup, long before
@@ -742,6 +751,7 @@ impl Session {
             system_prompt: self.system_prompt.clone(),
             voice: self.voice.clone(),
             transcription: self.transcription,
+            transcription_language: self.transcription_language.clone(),
         };
         if let Err(e) = self.deps.engine.connect(&cfg, tx).await {
             // Same reasoning as `EngineEvent::Error` below: a `connect()`

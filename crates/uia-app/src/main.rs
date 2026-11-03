@@ -27,12 +27,13 @@ use uia_app::alerts::{
     AlertEnv, CardQueue, Coordinator, LiveAlertSettings, SessionStateFeed, TextTurns, UiState,
     text_turns_from, ui_state_from,
 };
-use uia_app::config::{AudioSection, Config, EngineChoice};
+use uia_app::config::{AudioSection, Config, EngineChoice, TranscriptionLanguage};
 use uia_app::hud::{
     ALERT_WINDOW_HEIGHT, ALERT_WINDOW_WIDTH, CONNECTION_EVENT, ENGINE_EVENT, ERROR_EVENT,
     LEVEL_EVENT, LEVEL_INTERVAL, MCP_ALERT_EVENT, STATE_EVENT, TEXT_TURN_SUPPORT_EVENT, TURN_EVENT,
     WaitingNotice, WindowAction, alert_payload, alert_window_position, connection_payload,
-    engine_payload, error_payload, level_payload, state_payload, window_action_for,
+    cursor_in_window, engine_payload, error_payload, fit_in_work_area, level_payload,
+    state_payload, window_action_for,
 };
 use uia_app::mcp_registry;
 use uia_app::oauth_flow;
@@ -50,7 +51,7 @@ use uia_mcp::alert::Alert;
 const HUD_WINDOW: &str = "hud";
 /// The MCP alert card window, built on the first card (see `show_alert_card`).
 const ALERT_WINDOW: &str = "alert";
-/// How long a held alert waits for the agent before it goes to the card.
+/// How long a held alert waits for the agent before it is no longer spoken.
 const ALERT_HOLD_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(30);
 const OPEN_SETTINGS_EVENT: &str = "uia://open-settings";
 
@@ -153,10 +154,15 @@ struct ModelSettingsPath(PathBuf);
 /// [`settings::resolve_foundry_model`] have already been applied (see
 /// `main`), so `get_model` hands back the same values `build_session` used.
 /// Same request/response rationale as [`CurrentEngine`].
+/// `uia.toml`'s `[transcription] language`, before the sidecar is applied, so
+/// the picker can show what the next launch will use.
+struct ConfiguredTranscriptionLanguage(TranscriptionLanguage);
+
 struct CurrentModelSettings {
     openai: String,
     bedrock: String,
     foundry: String,
+    foundry_transcription: String,
 }
 
 /// The path `set_ui_settings` persists to — same rationale as
@@ -275,8 +281,12 @@ fn show_alert_card(app: &AppHandle, alert: Alert) {
     };
     // Shown without focus: the window is not focusable, so this cannot take
     // the keyboard from whatever the user is typing into.
-    let _ = window.show();
-    let _ = app.emit_to(ALERT_WINDOW, MCP_ALERT_EVENT, payload);
+    if let Err(e) = window.show() {
+        tracing::warn!(error = %e, "cannot show the alert card window");
+    }
+    if let Err(e) = app.emit_to(ALERT_WINDOW, MCP_ALERT_EVENT, payload) {
+        tracing::warn!(error = %e, "cannot send the alert to its card window");
+    }
 }
 
 /// Undecorated, transparent, always on top, on every workspace, never
@@ -411,6 +421,16 @@ fn main() {
             location.config_dir().display()
         );
     }
+    // Right after the per-user directory exists, before anything else has
+    // much to say: a packaged build launched without a terminal would
+    // otherwise lose every message below. See `logging`.
+    if let Some(log) = uia_app::logging::init(&location) {
+        tracing::info!(
+            version = env!("CARGO_PKG_VERSION"),
+            log = %log.display(),
+            "uia started"
+        );
+    }
     let config_path = location.config_file();
     // A missing uia.toml is not an error -- every Config field defaults, and
     // in User mode there is none until the user writes one. A malformed one
@@ -492,10 +512,20 @@ fn main() {
             config.foundry.deployment.clone(),
             persisted_model_settings.as_ref(),
         ),
+        foundry_transcription: settings::resolve_foundry_transcription_deployment(
+            config.foundry.transcription_deployment.clone(),
+            persisted_model_settings.as_ref(),
+        ),
     };
     config.openai.model = current_model_settings.openai.clone();
     config.bedrock.model = current_model_settings.bedrock.clone();
     config.foundry.deployment = current_model_settings.foundry.clone();
+    config.foundry.transcription_deployment = current_model_settings.foundry_transcription.clone();
+    let configured_transcription_language = config.transcription.language;
+    config.transcription.language = settings::resolve_transcription_language(
+        configured_transcription_language,
+        persisted_model_settings.as_ref(),
+    );
 
     let ui_settings_path = ui_settings_path_for(&config_path);
 
@@ -647,6 +677,9 @@ fn main() {
         .manage(current_audio_settings)
         .manage(AgentSettingsPath(agent_settings_path))
         .manage(ModelSettingsPath(model_settings_path))
+        .manage(ConfiguredTranscriptionLanguage(
+            configured_transcription_language,
+        ))
         .manage(current_model_settings)
         .manage(UiSettingsPath(ui_settings_path))
         .manage(SessionControlState(managed_control))
@@ -674,6 +707,8 @@ fn main() {
             list_output_devices,
             get_model,
             set_model,
+            get_transcription_language,
+            set_transcription_language,
             get_ui_settings,
             set_ui_settings,
             get_agent_settings,
@@ -710,7 +745,9 @@ fn main() {
             remove_mcp_remote_server,
             get_update_status,
             check_for_update,
-            install_update
+            install_update,
+            place_hud_window,
+            alert_cursor_position
         ])
         .setup(move |app| {
             let handle = app.handle().clone();
@@ -1084,6 +1121,75 @@ async fn install_update(app: AppHandle) -> Result<(), String> {
     updater::install(&app).await
 }
 
+/// A window position in physical pixels, as `outerPosition()` gives it.
+#[derive(Debug, Clone, Copy, serde::Serialize, serde::Deserialize)]
+struct WindowPoint {
+    x: i32,
+    y: i32,
+}
+
+/// Moves the calling window to `to` (or leaves it where it is), then into
+/// its monitor's work area, and returns where it ended up. `CardDeck.svelte`
+/// calls it after every resize: the deck grows from its top-left corner, so
+/// a HUD parked near the right or bottom edge would otherwise open Settings
+/// or History partly off screen, out of reach of the mouse. The geometry is
+/// `hud::fit_in_work_area`, tested.
+#[tauri::command]
+fn place_hud_window(
+    window: tauri::WebviewWindow,
+    to: Option<WindowPoint>,
+) -> Result<WindowPoint, String> {
+    let at = match to {
+        Some(point) => point,
+        None => {
+            let pos = window.outer_position().map_err(|e| e.to_string())?;
+            WindowPoint { x: pos.x, y: pos.y }
+        }
+    };
+    let monitor = match window.monitor_from_point(f64::from(at.x), f64::from(at.y)) {
+        Ok(Some(monitor)) => Some(monitor),
+        _ => window
+            .current_monitor()
+            .ok()
+            .flatten()
+            .or_else(|| window.primary_monitor().ok().flatten()),
+    };
+    let size = window.outer_size().map_err(|e| e.to_string())?;
+    let (x, y) = match monitor {
+        Some(monitor) => {
+            let area = monitor.work_area();
+            fit_in_work_area(
+                (at.x, at.y),
+                (size.width, size.height),
+                (area.position.x, area.position.y),
+                (area.size.width, area.size.height),
+            )
+        }
+        None => (at.x, at.y),
+    };
+    window
+        .set_position(tauri::PhysicalPosition::new(x, y))
+        .map_err(|e| e.to_string())?;
+    Ok(WindowPoint { x, y })
+}
+
+/// Where the cursor is inside the calling window, in logical pixels. The
+/// alert window never takes focus, and WebKit on macOS only tracks the mouse
+/// in the key window, so without this its cards never see a hover until they
+/// are clicked. `AlertCard.svelte` polls it while cards are up. The maths is
+/// `hud::cursor_in_window`, tested.
+#[tauri::command]
+fn alert_cursor_position(window: tauri::WebviewWindow) -> Result<(f64, f64), String> {
+    let cursor = window.cursor_position().map_err(|e| e.to_string())?;
+    let position = window.outer_position().map_err(|e| e.to_string())?;
+    let scale = window.scale_factor().map_err(|e| e.to_string())?;
+    Ok(cursor_in_window(
+        (cursor.x, cursor.y),
+        (position.x, position.y),
+        scale,
+    ))
+}
+
 /// Persists the selector's choice for the *next* launch. Restart-to-switch
 /// (S18; PLAN.md amended): this does not touch the running session, and
 /// `App.svelte` tells the user to restart after calling it. All decision
@@ -1328,6 +1434,7 @@ fn get_model(
         "openai" => Ok(state.openai.clone()),
         "bedrock" => Ok(state.bedrock.clone()),
         "foundry" => Ok(state.foundry.clone()),
+        "foundry_transcription" => Ok(state.foundry_transcription.clone()),
         other => Err(format!("unknown model provider {other:?}")),
     }
 }
@@ -1343,7 +1450,8 @@ fn set_model(
     value: String,
 ) -> Result<(), String> {
     let trimmed = value.trim();
-    if trimmed.is_empty() {
+    // Empty is meaningful for this one field: it turns transcription off.
+    if trimmed.is_empty() && provider != "foundry_transcription" {
         return Err("model value must not be empty".to_string());
     }
     let mut settings: settings::ModelSettings = settings::load(&state.0).unwrap_or_default();
@@ -1351,9 +1459,33 @@ fn set_model(
         "openai" => settings.openai = Some(trimmed.to_string()),
         "bedrock" => settings.bedrock = Some(trimmed.to_string()),
         "foundry" => settings.foundry = Some(trimmed.to_string()),
+        "foundry_transcription" => settings.foundry_transcription = Some(trimmed.to_string()),
         other => return Err(format!("unknown model provider {other:?}")),
     }
     settings::save(&state.0, &settings).map_err(|e| e.to_string())
+}
+
+/// The transcription language saved for the next launch, read fresh so the
+/// picker shows the saved choice rather than this launch's.
+#[tauri::command]
+fn get_transcription_language(
+    configured: tauri::State<ConfiguredTranscriptionLanguage>,
+    path: tauri::State<ModelSettingsPath>,
+) -> TranscriptionLanguage {
+    let persisted: Option<settings::ModelSettings> = settings::load(&path.0);
+    settings::resolve_transcription_language(configured.0, persisted.as_ref())
+}
+
+/// Same restart-to-switch rule as [`set_model`]: the running session already
+/// baked its language into `build_session`.
+#[tauri::command]
+fn set_transcription_language(
+    path: tauri::State<ModelSettingsPath>,
+    language: TranscriptionLanguage,
+) -> Result<(), String> {
+    let mut settings: settings::ModelSettings = settings::load(&path.0).unwrap_or_default();
+    settings.transcription_language = Some(language);
+    settings::save(&path.0, &settings).map_err(|e| e.to_string())
 }
 
 /// The Visual tab's persisted values, returned raw - no

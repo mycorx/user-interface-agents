@@ -541,10 +541,16 @@
   </button>
 {/snippet}
 
-<div class="hud" class:mini>
-  <div class="hud-top" data-tauri-drag-region>
+<!-- Where the window can be dragged from: the top row at full size, and the
+     whole pill in compact mode, which is too small to spare a strip for it.
+     "deep" makes every descendant a handle while Tauri's drag script lets a
+     button or input keep its own click. A bare attribute would only work on
+     the exact element clicked, and never on SVG, which the script skips as
+     not an HTMLElement — which is why the compact wave was never a handle. -->
+<div class="hud" class:mini data-tauri-drag-region={mini ? 'deep' : undefined}>
+  <div class="hud-top" data-tauri-drag-region="deep">
     {#if !mini}
-      <span class="hud-status" class:speaking={status === 'Speaking'} data-tauri-drag-region>
+      <span class="hud-status" class:speaking={status === 'Speaking'}>
         <!-- `muted` is the mic being off, `deaf` is the session having no
              connection to send it to. Both mean "not being heard", so both
              stop the dot reading live; they are told apart because only one
@@ -612,7 +618,7 @@
       <p class="hud-update" title={describeUpdate(update)}>{describeUpdate(update)}</p>
     {/if}
 
-    <span class="spacer" data-tauri-drag-region></span>
+    <span class="spacer"></span>
 
     <!-- Chip icons are inline SVG, not text glyphs. A glyph such as ▢ or ⚙ is
          drawn by whichever font the OS substitutes, so its side bearings and
@@ -681,7 +687,7 @@
     </button>
   </div>
 
-  <div class="hud-slot" data-tauri-drag-region>
+  <div class="hud-slot">
     {#if !mini}
       <!-- The avatar floats centred in the slot; the mic is pinned to the
            bottom of this column, on the text input's line and at the input's
@@ -710,7 +716,6 @@
           viewBox="0 0 {VB_W} {VB_H}"
           preserveAspectRatio="none"
           aria-hidden="true"
-          data-tauri-drag-region
         >
           <line class="wave-rail" x1="0" y1={VB_H / 2} x2={VB_W} y2={VB_H / 2} />
           {#each wavePaths as d, i (i)}
@@ -841,6 +846,14 @@
     align-items: center;
     gap: 8px;
     flex-shrink: 0;
+  }
+
+  /* At full size the top row is the drag handle, so it reaches into the
+     card's padding above and beside it: the margin over the row drags too.
+     The negative margin and the padding cancel, so nothing moves. */
+  .hud:not(.mini) .hud-top {
+    margin: -12px -14px 0;
+    padding: 12px 14px 0;
   }
 
   .spacer {
