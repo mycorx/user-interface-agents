@@ -90,7 +90,7 @@ windows = { version = "0.62", optional = true, features = [
 # `#[windows::core::implement]` (the default-device notification client)
 # expands to `::windows_core` paths, so the crate must be a direct dependency.
 # Already in Cargo.lock at this version through `windows` itself.
-windows-core = { version = "0.62", optional = true }
+windows-core = { version = "0.100", optional = true }
 
 # All four are already in Cargo.lock at these versions via cpal's own CoreAudio
 # host, so this adds features, not crates.
