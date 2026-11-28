@@ -21,7 +21,7 @@ futures = "0.3.34"
 # Must be the version `rmcp` itself uses: its streamable-HTTP client trait
 # names `sse_stream::Sse` and `sse_stream::Error` in its signatures, so a newer
 # `sse-stream` here is a different, incompatible type. Move it with `rmcp`.
-sse-stream = "0.2.6"
+sse-stream = "0.3.0"
 # `rustls` here is also the SOLE source of reqwest 0.13's TLS backend: rmcp's
 # `transport-streamable-http-client-reqwest` feature enables only reqwest's
 # internal `__reqwest` marker, not a TLS backend
